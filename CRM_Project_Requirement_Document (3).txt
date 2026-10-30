@@ -1,0 +1,1918 @@
+CRM Project
+Requirement Document
+Lead Management CRM | Zoho CRM-style Feature Set
+
+Stack
+
+Next.js + TypeScript, Supabase, Zoom, IVR
+
+Roles
+
+Counselor, Team Lead, Manager, Admin, Super Admin
+
+Version
+
+1.0 (Draft) | October 14, 2026
+
+CRM Project Requirement Document
+
+Version 1.0 (Draft)
+
+Contents
+1. Purpose and Goals
+2. Main Navigation
+3. Roles and Hierarchy
+4. Functional Requirements
+5. System Architecture
+6. Database Design
+7. Core API Overview
+8. Non-Functional Requirements
+9. Three-Week Delivery Plan
+10. Acceptance Criteria
+11. Assumptions, Risks and Open Questions
+12. Design System: Typography and Colour
+13. Website Lead Capture and Auto-Assignment
+14. IVR Click-to-Call Integration
+15. Meetings (Zoom)
+16. Invoices and Payments
+17. Out of Scope (Phase 2)
+
+Confidential
+
+Page 1
+
+CRM Project Requirement Document
+
+Version 1.0 (Draft)
+
+1. Purpose and Goals
+Build a role-based CRM to capture, assign, follow up, and convert leads (admissions/education-style flow: course,
+qualification, country). It must match the core experience of Zoho CRM: powerful filters, saved views, lead timeline,
+email/notes/call from inside the lead, pipeline, automations and reports.
+
+Primary goals
+• One place to manage all leads with fast filtering and saved views.
+• Strict hierarchy-based access (Counselor, Team Lead, Manager, Admin, Super Admin).
+• Full activity history (timeline) for every lead.
+• Click-to-call through the IVR dialer, scheduled-call popups, and in-app email.
+• Duplicate prevention with controlled visibility and merging.
+• Downloadable reports built from lead filters.
+
+2. Main Navigation (Home Screen)
+Menu
+
+Purpose
+
+Dashboard
+
+KPIs, widgets, and saved-filter lead views
+
+Leads
+
+Lead list with filter panel, create lead, lead detail
+
+Automations
+
+Rules (assignment, reminders, stage-change actions)
+
+Integrations
+
+IVR, Email (Gmail), notifications, website/ads lead capture
+
+Pipeline
+
+Kanban view of leads by stage
+
+Meetings
+
+Zoom meetings calendar and scheduling (see section 15)
+
+Invoices
+
+Create, approve, send and track lead invoices with Razorpay QR payment (see section 16)
+
+Reports
+
+Filter-based reports with download
+
+Users (Super Admin only)
+
+Create/manage users, reset password
+
+Confidential
+
+Page 2
+
+CRM Project Requirement Document
+
+Version 1.0 (Draft)
+
+3. Roles and Hierarchy
+Super Admin
+Admin
+Manager
+Team Lead
+Counselor
+
+Top to bottom: each role sees its own data and the data of everyone below it.
+Capability
+
+Counselor
+
+Team Lead
+
+Manager
+
+Admin
+
+Super Admin
+
+View own leads
+
+Yes
+
+Yes
+
+Yes
+
+Yes
+
+Yes
+
+View team/downline leads
+
+No
+
+Yes
+
+Yes
+
+Yes
+
+Yes
+
+View all leads
+
+No
+
+No
+
+Partial (own
+branch)
+
+Yes
+
+Yes
+
+Create lead
+
+Yes
+
+Yes
+
+Yes
+
+Yes
+
+Yes
+
+Save personal filter
+
+Yes
+
+Yes
+
+Yes
+
+Yes
+
+Yes
+
+Duplicate: see assignee name
+only
+
+Yes
+
+Yes
+
+No
+
+No
+
+No
+
+Duplicate: open full lead
+
+No
+
+No
+
+Yes
+
+Yes
+
+Yes
+
+Merge leads
+
+Own leads only
+
+Own + team
+leads
+
+Own branch
+
+Any
+
+Any
+
+Download reports
+
+Own data
+
+Team data
+
+Branch data
+
+All
+
+All
+
+Create/delete/activate/deactivate
+user
+
+No
+
+No
+
+No
+
+No
+
+Yes
+
+Reset user password
+
+No
+
+No
+
+No
+
+No
+
+Yes
+
+4. Functional Requirements
+4.1 Dashboard
+• KPI cards: total leads, new today, follow-ups due today, conversions, closure fee collected.
+• Charts: leads by stage, by country, by course, by counselor.
+• Saved-filter widgets: every filter saved in Leads can be pinned to the Dashboard, showing that filtered lead
+list/count.
+
+• Widgets respect the logged-in user's role visibility.
+
+4.2 Leads Page (List View)
+Layout: left side = filter panel, right side = lead table.
+
+Filter panel
+Quick filters: My Leads, All Leads (based on role access).
+Date-based filters. Created, Modified, Next Follow-up and Most Recent Visits each have their own sub-filters:
+Filter
+
+Options
+
+Modified (by / on / at)
+
+Modified by (user), Today, Yesterday, This Week, This Month, Exact date (calendar picker),
+Before date, After date
+
+Confidential
+
+Page 3
+
+CRM Project Requirement Document
+
+Version 1.0 (Draft)
+
+Filter
+
+Options
+
+Next Follow-up
+
+Today, Tomorrow, Next Week, Exact date (calendar picker), Before, After
+
+Created
+
+Today, Yesterday, This Week, This Month, Exact, Before, After
+
+Most Recent Visits
+
+Today, Yesterday, This Week, This Month, Exact, Before, After
+
+Field filters
+Field
+
+Operators
+
+Course
+
+Is, Is not, In (multi-select)
+
+Qualification
+
+Is, Is not, In
+
+Country
+
+Is (country name), Begins with
+
+Assignee
+
+Is (user), multi-select, restricted to users in the person's hierarchy
+
+Saved filters
+• User can name and save any filter combination.
+• Visibility rule: a saved filter belongs to its creator and is visible to the creator's superiors (Team Lead,
+Manager, Admin, Super Admin above them). It is not visible to peer counselors or other users outside that
+chain.
+
+• Saved filters can be edited, renamed, deleted by the owner, and pinned to the Dashboard.
+Lead table (right side)
+• Column chooser: Name, Phone, Email, Country, Course, Qualification, Lead Stage, Assignee, Next Follow-up,
+Created On, Modified On, etc.
+
+• Column selection saved per user.
+• Sorting, pagination, bulk select (bulk assign, bulk stage change, export).
+• Click a row to open the Lead Detail page.
+
+4.3 Create New Lead
+• "Create Lead" button on the Leads page.
+• Fields: Name, Phone, Alternate Mobile, Email, Country, Course, Qualification, Lead Stage, Source, Assignee,
+Next Follow-up.
+
+• Duplicate check (on phone and email, real time): if a match exists, show a duplicate warning and the name
+of the user the lead belongs to.
+
+• Counselor / Team Lead: "View Lead" shows only the assignee name (no lead details).
+• Manager / Admin / Super Admin: "View Lead" opens the complete lead detail page.
+• Save is blocked for exact duplicates (configurable by Admin).
+
+4.4 Lead Detail Page
+Header fields: Name, Phone (click-to-call), Email, Lead Stage, Follow-up date and time, Course, Country,
+Alternate Mobile, Closure Fee, Schedule a Call.
+
+Confidential
+
+Page 4
+
+CRM Project Requirement Document
+
+Version 1.0 (Draft)
+
+Layout
++------------------------------------------------------------------------+
+| LEAD HEADER: Name | Phone | Email | Stage | Follow-up | Schedule a Call |
++----------------------+-------------------------------------------------+
+| LEFT SIDEBAR
+| CONTENT AREA (selected section)
+|
+|
+|
+|
+| > Overview
+| [ Overview ] [ Timeline ]
+<- two tabs
+|
+|
+Email
+| ----------------------------------------------- |
+|
+Notes
+| Overview tab: content of the selected section
+|
+|
+| Timeline tab: activity history of the lead
+|
++----------------------+-------------------------------------------------+
+
+The left sidebar lists three sections: Overview, Email and Notes. Whichever section is selected, the content area
+shows the same two tabs: Overview and Timeline.
+Sidebar section
+
+Overview tab
+
+Timeline tab
+
+Overview
+
+All lead details, inline edit, stage change, assignee change (role
+permitting), View and Merge action
+
+Complete activity history of the lead,
+with date and time
+
+Email
+
+Compose with the user's Gmail template, send, and list of sent
+mails
+
+Complete activity history of the lead,
+with date and time
+
+Notes
+
+Add notes (saved with user, date and time), notes listed newest
+first
+
+Complete activity history of the lead,
+with date and time
+
+Email section (sidebar)
+• Opens the logged-in user's (Counselor / Team Lead / Manager) Gmail template by default.
+• User types the message in-app and clicks Send; the mail is delivered to the email address stored on that lead.
+• Sent mail is logged in the timeline (subject, time, sender).
+Notes section (sidebar)
+• Add a note; saved with user name, date and time.
+• Notes listed newest first and mirrored in the timeline.
+Timeline tab (available in Overview, Email and Notes)
+• Records every activity with date and time: lead created, source, assigned to whom, reassigned, field edits,
+stage changes, calls (with duration/outcome), scheduled calls, emails, notes, merges.
+
+• Read-only and non-deletable (audit trail).
+
+4.5 Click-to-Call (IVR Dialer)
+• Clicking the phone number triggers the IVR provider API to start the call from the user's registered
+extension/agent number.
+
+• The call appears automatically in the dialer screen (no manual dialing).
+• Call log (start, end, duration, status, recording link if provided) is stored and added to the timeline.
+• Inbound/webhook events update the lead activity.
+
+4.6 Schedule a Call and Popup Notifications
+• User picks date and time on the lead; the call is saved against that lead and user.
+• At the scheduled time, the user who scheduled it (Counselor, Team Lead, Manager, Admin) gets an in-app
+popup and notification with lead name, phone and a Call Now button.
+
+• Optional reminder 10 minutes before. Options: Snooze, Mark done, Reschedule.
+• Delivery in real time, with browser notification as backup.
+
+Confidential
+
+Page 5
+
+CRM Project Requirement Document
+
+Version 1.0 (Draft)
+
+4.7 View and Merge Leads
+• Anyone can see who a lead is assigned to when a duplicate is found.
+• Merge rules depend on role:
+Role
+
+Can merge when
+
+Counselor
+
+Both leads belong to the counselor
+
+Team Lead
+
+Both leads belong to the Team Lead or their team
+
+Manager
+
+Both leads are within the manager's branch
+
+Admin / Super Admin
+
+Any two leads
+
+• If both leads are outside the user's scope, the user can only see the owner, not merge.
+• Merge flow: choose master record, choose which field values to keep, confirm. Timelines of both leads are
+combined and the secondary lead is archived, not hard-deleted.
+
+4.8 Pipeline
+• Kanban board by lead stage (e.g., New, Contacted, Interested, Application, Closed Won, Closed Lost).
+• Drag and drop to change stage (logged in timeline).
+• Card shows name, course, country, follow-up, assignee. Respects saved filters.
+
+4.9 Automations
+• Trigger, condition, action rules.
+• Examples: round-robin assignment of new leads, auto follow-up date when stage changes, reminder if no
+activity in 2 days, escalate to Team Lead if follow-up is overdue.
+
+• Enable/disable rules, execution log.
+
+4.10 Integrations
+Integration
+
+Use
+
+IVR / Dialer
+
+Click-to-call, call logs, webhooks
+
+Third-party IVR
+
+Automatic click-to-call (see section 14)
+
+Gmail (OAuth/SMTP)
+
+Templates, send mail from lead
+
+Browser/real-time notifications
+
+Scheduled call popups
+
+Lead sources (website forms, Facebook/Google Ads,
+webhooks)
+
+Auto lead capture
+
+Website form, WhatsApp, chatbot
+
+Automatic lead creation (see section 13)
+
+Zoom
+
+Meetings from the CRM (see section 15)
+
+Razorpay
+
+Payment QR codes for invoices, payment webhooks (see section
+16)
+
+4.11 Reports
+• Build a report from any lead filter (including saved filters).
+• Choose columns; download as Excel (XLSX) and CSV (PDF optional).
+• Role-based data scope; every download is audit-logged.
+• Standard reports: lead source, counselor performance, stage conversion, follow-up pending, country/course
+wise.
+
+Confidential
+
+Page 6
+
+CRM Project Requirement Document
+
+Version 1.0 (Draft)
+
+4.12 User and Access Management (Super Admin)
+• Create user (name, email, phone, role, reporting-to, IVR extension).
+• Edit, delete (soft delete), activate, deactivate.
+• Reset password for any user.
+• Reassign leads when a user is deactivated or deleted.
+• Login with token-based authentication, session timeout, login history.
+
+5. Technology Stack and System Architecture
+Website form
+WhatsApp API
+Chatbot
+Third-party IVR
+Zoom
+|
+|
+|
+|
+|
++----------------+-------+-------+-----------------+---------------+
+| HTTPS and webhooks
++------------------v---------------------+
+|
+SUPABASE (Backend + Database)
+|
+| Edge Functions: lead-intake, ivr,
+|
+|
+zoom, email, assignment engine
+|
+| Auth | Row Level Security | Realtime |
+| Storage | Scheduled jobs (pg_cron)
+|
+| PostgreSQL database
+|
++------------------^---------------------+
+| Supabase client + Realtime
++------------------+---------------------+
+|
+Next.js + TypeScript Frontend
+|
+| Dashboard | Leads | Pipeline | Reports |
+| Automations | Integrations | Meetings |
++----------------------------------------+
+Layer
+
+Technology
+
+Frontend framework
+
+Next.js (App Router) with TypeScript (strict mode)
+
+UI and styling
+
+Tailwind CSS with shadcn/ui components (Radix), navy and white theme tokens
+
+Data and forms
+
+TanStack Query, TanStack Table, React Hook Form with Zod validation
+
+Charts
+
+Recharts
+
+Backend
+
+Supabase Edge Functions (TypeScript) for integrations, webhooks and the assignment engine
+
+Database
+
+Supabase PostgreSQL
+
+Authentication
+
+Supabase Auth; users are created by the Super Admin through the admin API
+
+Authorization
+
+Row Level Security policies built on the reporting hierarchy (a user sees own rows and rows of all
+users below)
+
+Real-time
+
+Supabase Realtime for timeline updates and call/meeting popups
+
+Scheduled jobs
+
+pg_cron plus Edge Functions (follow-up reminders, scheduled-call popups, SLA checks)
+
+File storage
+
+Supabase Storage (report exports, attachments, call recordings links)
+
+Hosting
+
+Vercel for the Next.js app; Supabase Cloud for backend and database
+
+Integrations
+
+Third-party IVR (REST and webhooks), Zoom API, Gmail API, WhatsApp Business Cloud API,
+chatbot webhooks
+
+6. Database Design
+Table
+
+Key fields
+
+users
+
+id, name, email, phone, password_hash, role, reporting_to, status (active/inactive), ivr_extension
+
+Confidential
+
+Page 7
+
+CRM Project Requirement Document
+
+Version 1.0 (Draft)
+
+Table
+
+Key fields
+
+leads
+
+id, name, phone, alt_phone, email, country, course, qualification, stage_id, source, assignee_id,
+closure_fee, next_followup_at, last_visit_at, created_by, created_at, modified_by, modified_at,
+merged_into_id, is_archived
+
+lead_stages
+
+id, name, order, pipeline_id
+
+activities (timeline)
+
+id, lead_id, type, description, meta (JSON), user_id, created_at
+
+notes
+
+id, lead_id, user_id, content, created_at
+
+emails
+
+id, lead_id, user_id, subject, body, to_email, status, sent_at
+
+email_templates
+
+id, user_id, name, subject, body
+
+calls
+
+id, lead_id, user_id, direction, status, duration, recording_url, started_at
+
+scheduled_calls
+
+id, lead_id, user_id, scheduled_at, status, reminder_sent
+
+saved_filters
+
+id, name, owner_id, filter_json, pinned_to_dashboard, created_at
+
+user_columns
+
+id, user_id, view, columns_json
+
+automations
+
+id, name, trigger, conditions_json, actions_json, is_active
+
+automation_logs
+
+id, automation_id, lead_id, result, created_at
+
+notifications
+
+id, user_id, type, payload, is_read, created_at
+
+merge_logs
+
+id, master_lead_id, merged_lead_id, user_id, field_choices_json, created_at
+
+report_downloads
+
+id, user_id, filter_json, format, created_at
+
+integrations
+
+id, type, config (encrypted), status
+
+Key relationships: a user reports to one user (self-reference); a lead has one assignee and many activities,
+notes, emails, calls and scheduled calls; saved filters belong to one owner.
+Indexes: phone, email (unique and duplicate check), assignee_id, stage_id, next_followup_at, modified_at,
+created_at.
+Additional tables (website capture, IVR, assignment and meetings):
+Table
+
+Key fields
+
+lead_sources
+
+id, name (website_form, whatsapp, chatbot, manual, ads), api_key_hash, is_active
+
+inbound_events
+
+id, source_id, lead_id, payload (JSON), status, received_at (raw log of every
+website/WhatsApp/chatbot event)
+
+chat_sessions
+
+id, lead_id, channel, transcript (JSON), summary, started_at, ended_at
+
+assignment_rules
+
+id, name, priority, conditions_json, strategy, pool_user_ids, fallback_user_id, is_active
+
+assignment_log
+
+id, lead_id, rule_id, assigned_to, reason, created_at
+
+user_availability
+
+id, user_id, is_available, working_hours_json, max_open_leads
+
+ivr_events
+
+id, call_id, provider_event, payload (JSON), received_at
+
+meetings
+
+id, lead_id (optional), title, host_id, zoom_meeting_id, join_url, start_url, passcode, start_at,
+duration_min, status, recording_url
+
+meeting_attendees
+
+id, meeting_id, user_id, lead_email, response_status
+
+Invoice tables:
+Table
+
+Key fields
+
+invoices
+
+id, invoice_no, lead_id, created_by, status, subtotal, tax_amount, discount_type, discount_value,
+discount_amount, discount_reason, total, currency, due_date, pdf_url, razorpay_qr_id, qr_image_url,
+qr_expires_at, approved_by, approved_at, sent_at, paid_at, notes
+
+invoice_items
+
+id, invoice_id, description, quantity, unit_price, amount
+
+Confidential
+
+Page 8
+
+CRM Project Requirement Document
+
+Version 1.0 (Draft)
+
+Table
+
+Key fields
+
+invoice_approvals
+
+id, invoice_id, requested_by, decided_by, decision, comment, decided_at
+
+payments
+
+id, invoice_id, razorpay_payment_id, amount, method, status, paid_at, raw_payload (JSON)
+
+All tables have Row Level Security enabled. Policies use a hierarchy function that returns the user ids below the
+logged-in user.
+
+7. Core API Overview
+Area
+
+Endpoints
+
+Auth
+
+POST /auth/login, /auth/logout, /auth/refresh
+
+Users
+
+GET/POST/PUT/DELETE /users, PATCH /users/:id/status, POST /users/:id/reset-password
+
+Leads
+
+GET /leads (filters, columns, pagination), POST /leads, GET/PUT /leads/:id
+
+Duplicate
+
+GET /leads/check-duplicate?phone=&email=
+
+Merge
+
+POST /leads/merge
+
+Timeline
+
+GET /leads/:id/timeline
+
+Notes / Email
+
+POST /leads/:id/notes, POST /leads/:id/email
+
+Calls
+
+POST /leads/:id/call, POST /webhooks/ivr, POST /leads/:id/schedule-call
+
+Filters
+
+GET/POST/PUT/DELETE /filters, PATCH /filters/:id/pin
+
+Pipeline
+
+GET /pipeline, PATCH /leads/:id/stage
+
+Reports
+
+POST /reports/export
+
+Automations
+
+CRUD /automations
+
+Notifications
+
+Real-time channel /ws, GET /notifications
+
+8. Non-Functional Requirements
+• Security: password hashing, token-based sessions with refresh, role checks on every API (not just UI),
+encrypted integration secrets, HTTPS.
+
+• Performance: lead list under 2 seconds for 100k+ leads (server-side filtering and pagination, indexes).
+• Audit: all data changes, merges and downloads logged.
+• Availability: daily database backups.
+• Usability: responsive layout; desktop-first.
+
+Confidential
+
+Page 9
+
+CRM Project Requirement Document
+
+Version 1.0 (Draft)
+
+9. Three-Week Delivery Plan
+9.1 Team Split
+Track
+
+Responsibility
+
+Database
+
+Schema, indexes, migrations, seed data
+
+Backend
+
+APIs, RBAC, business rules, jobs
+
+Frontend
+
+UI screens, state, integration with APIs
+
+Integrations
+
+IVR, Gmail, notifications, lead capture
+
+9.2 Week-by-Week Breakdown
+Week 1: Foundation and Core Lead Management
+Day
+
+Database
+
+Backend
+
+Frontend
+
+Integrations
+
+1
+
+Finalize schema, ERD,
+create users/leads/stag
+es/activities
+
+Project setup, auth (login,
+secure tokens)
+
+App setup, layout, navigation,
+login page
+
+Collect IVR and Gmail
+API docs/credentials
+
+2
+
+Remaining tables,
+indexes, seed roles
+
+Users module, role hierarchy,
+RBAC middleware
+
+Dashboard shell, users list
+(Super Admin)
+
+IVR sandbox setup
+
+3
+
+Saved filters,
+user_columns tables
+
+Lead CRUD APIs, data-scope
+by role
+
+Leads page layout (filter panel +
+table)
+
+Gmail OAuth setup
+
+4
+
+Optimize indexes for
+filter queries
+
+Filter engine (created, modified,
+follow-up, visits, course,
+qualification, country, assignee)
+
+Filter UI with calendar,
+before/after
+
+5
+
+Review and tuning
+
+Saved filters API with visibility
+rules, column chooser API
+
+Saved filters UI, column
+selection
+
+Week 1 review and demo
+
+Week 1 deliverables: login, hierarchy and RBAC, user management, lead list with all filters, saved filters, column
+chooser.
+
+Week 2: Lead Detail, Duplicates, Calls, Email, Notes
+Day
+
+Database
+
+Backend
+
+Frontend
+
+6
+
+Notes, emails, calls,
+scheduled_calls tables
+
+Create lead API with duplicate
+check, timeline service
+
+Create Lead form with duplicate
+alert
+
+7
+
+Merge logs table
+
+Duplicate visibility rules
+(assignee only vs full), View
+Lead
+
+Lead detail page (header, left
+sidebar, Overview and Timeline
+tabs)
+
+Notes API, timeline writes for
+every action
+
+Notes section and Timeline tab
+
+Email send API using user
+template
+
+Email section with Gmail
+template, send
+
+Gmail send integration
+
+Click-to-call API, IVR webhook,
+call logs
+
+Click-to-call on phone field
+
+IVR dialer integration and
+testing
+
+8
+
+9
+
+Email templates table
+
+10
+
+Integrations
+
+Week 2 deliverables: create lead with duplicate control, full lead detail with Overview/Email/Notes sections and
+Overview/Timeline tabs, click-to-call with IVR.
+
+Confidential
+
+Page 10
+
+CRM Project Requirement Document
+
+Version 1.0 (Draft)
+
+Week 3: Scheduling, Merge, Pipeline, Reports, Automations, Testing
+Day
+
+Database
+
+Backend
+
+Frontend
+
+Integrations
+
+11
+
+Notifications table
+
+Schedule-call API, scheduler job
+
+Schedule call UI
+
+Real-time notification
+service for popups
+
+Merge API with role rules
+
+Merge UI and View/Merge
+options
+
+Popup and browser
+notification testing
+Lead capture webhook
+
+12
+
+13
+
+Automations tables
+
+Pipeline API, automation engine
+(basic rules)
+
+Pipeline kanban, Automations
+UI
+
+14
+
+Report download log
+
+Reports export (XLSX/CSV)
+from filters
+
+Reports page, dashboard
+saved-filter widgets
+
+15
+
+Final data checks
+
+Bug fixes, security checks
+
+UI polish, bug fixes
+
+End-to-end UAT,
+deployment, handover
+
+Week 3 deliverables: schedule-call popups, merge by role, pipeline, automations, reports, dashboard widgets,
+UAT sign-off, production deployment.
+
+9.3 Timeline at a Glance
+Module
+
+Week 1
+
+Week 2
+
+Week 3
+
+Auth, hierarchy, user management
+Lead list and filters
+Saved filters and dashboard widgets
+Create lead and duplicate control
+Lead detail, timeline, notes, email
+IVR click-to-call
+Schedule call popup
+Merge leads
+Pipeline and automations
+Reports
+Testing and deployment
+Dark bar = main build effort; light bar = partial effort in that week.
+
+9.4 Milestones
+Milestone
+
+Date
+
+Output
+
+M1
+
+End of Week 1 (Day 5)
+
+Auth, RBAC, leads list, filters demo
+
+M2
+
+End of Week 2 (Day 10)
+
+Lead detail, email, notes, IVR demo
+
+M3
+
+End of Week 3 (Day 15)
+
+Full system, UAT sign-off, go-live
+
+9.5 Allocation of Added Scope
+The items below are scheduled inside the same three weeks and run in parallel with the base plan.
+Day
+
+Added work
+
+1 to 2
+
+Next.js and TypeScript project setup, Supabase project, Tailwind theme with navy and white tokens, Inter font
+setup, base components
+
+1 to 3
+
+Supabase schema, Row Level Security policies using the hierarchy function
+
+Confidential
+
+Page 11
+
+CRM Project Requirement Document
+
+Version 1.0 (Draft)
+
+Day
+
+Added work
+
+6 to 7
+
+lead-intake Edge Function, website contact form endpoint, duplicate handling for web leads
+
+8
+
+WhatsApp webhook and chatbot webhook, chat transcript storage
+
+9
+
+Assignment engine (round-robin, load-based, fixed, fallback) and assignment log
+
+10
+
+Third-party IVR adapter, automatic click-to-call, call webhook, post-call outcome popup
+
+11 to 12
+
+Zoom meeting create, reschedule, cancel, webhooks; Meetings UI and reminders
+
+13
+
+Assignment rule builder under Automations
+
+13 to 14
+
+Invoices: create, discount approval, PDF and email, Razorpay QR and payment webhook, invoice list and reports
+
+14 to 15
+
+End-to-end tests of all channels (form, WhatsApp, chatbot, IVR, Zoom), UAT, deployment
+
+Schedule risk: the added scope makes three weeks tight. If IVR, WhatsApp or Zoom credentials arrive late, those
+integrations ship first in a short follow-up window while the CRM core stays on schedule.
+
+10. Acceptance Criteria (Samples)
+1. A counselor cannot see leads or saved filters of another counselor.
+2. A filter saved by a counselor is visible to that counselor and their Team Lead, Manager, Admin and Super
+Admin, but not to peers.
+
+3. Entering an existing phone or email shows the duplicate warning and owner name; counselors and team leads
+see only the owner name, managers and above can open the full lead.
+
+4. Every lead action (create, assign, edit, call, email, note, merge) appears in the timeline with date and time.
+5. Clicking the phone number starts the call on the IVR dialer automatically.
+6. A scheduled call triggers a popup at the exact time for the user who scheduled it.
+7. Merge is allowed only per the role rules in section 4.7.
+8. Reports download with exactly the filtered data the user is allowed to see.
+9. Only Super Admin can create, delete, activate, deactivate users and reset passwords.
+10. A website contact form submission creates a lead within 5 seconds, tagged with its source, and assigns it by
+the active assignment rule.
+
+11. A new WhatsApp message from an unknown number and a completed chatbot conversation each create a
+lead with the conversation stored in the timeline.
+
+12. A repeat enquiry from an existing phone or email does not create a duplicate; it adds a timeline entry and
+notifies the lead owner.
+
+13. Clicking a phone number starts the call through the third-party IVR with no manual dialing, and the call log
+appears in the timeline automatically.
+
+14. A user can schedule a Zoom meeting from a lead, the lead receives the join link by email, and the meeting
+appears in the timeline.
+
+15. The interface uses the navy and white palette and Inter typography defined in section 12.
+16. Saving an invoice with no discount emails it to the lead immediately, with the Razorpay QR for the full
+amount.
+
+17. Saving an invoice with a discount sends nothing until an Admin or Super Admin approves; after approval the
+invoice is emailed with a Razorpay QR for the discounted amount.
+
+18. A completed Razorpay payment marks the invoice as Paid, updates the lead's closure fee and adds a
+timeline entry.
+
+11. Assumptions, Risks and Open Questions
+Assumptions
+
+Confidential
+
+Page 12
+
+CRM Project Requirement Document
+
+Version 1.0 (Draft)
+
+• IVR provider offers a click-to-call API and webhooks, with sandbox access from Day 1.
+• Gmail integration uses Google OAuth; each user connects their own account/template.
+• Lead stages and field lists will be finalized by Day 1.
+Risks
+Risk
+
+Mitigation
+
+IVR API delays or documentation gaps
+
+Get credentials on Day 1, build adapter layer, mock if blocked
+
+3 weeks is tight for full Zoho parity
+
+Prioritize core modules; advanced automations and SMS/WhatsApp go to
+Phase 2
+
+Complex role-based filter queries slow down
+
+Server-side filtering, indexes, caching
+
+Gmail API approval/quotas
+
+Fallback to SMTP
+
+Open questions
+1. Which IVR provider will be used?
+2. Is the filter visibility rule (creator plus superiors, not peers) correct as understood?
+3. Should duplicates be fully blocked or allowed with a warning for Admin?
+4. Which report formats are mandatory (Excel, CSV, PDF)?
+5. Expected user count and lead volume for sizing?
+
+Confidential
+
+Page 13
+
+CRM Project Requirement Document
+
+Version 1.0 (Draft)
+
+12. Design System: Typography and Colour
+The interface is data-heavy, so it uses a calm navy and white look, one typeface, and tight but readable spacing.
+
+12.1 Typography
+Primary typeface: Inter (loaded with next/font). It stays legible at small sizes in tables, and its tabular figures keep
+phone numbers, fees and counts aligned. JetBrains Mono is used only for IDs and code.
+Style
+
+Size / line height
+
+Weight
+
+Use
+
+Page title
+
+24 / 32 px
+
+600
+
+Page headings (Leads, Pipeline)
+
+Section heading
+
+18 / 26 px
+
+600
+
+Panels, dashboard sections
+
+Card title
+
+16 / 24 px
+
+600
+
+Cards, lead name in header
+
+Body
+
+14 / 20 px
+
+400
+
+Forms, descriptions, notes
+
+Table cell
+
+13 / 18 px
+
+400
+
+Lead table rows
+
+Table header
+
+12 / 16 px
+
+600, uppercase, 0.04em spacing
+
+Column headers
+
+Label and caption
+
+12 / 16 px
+
+500
+
+Field labels, timestamps, helper text
+
+Button
+
+14 / 20 px
+
+500
+
+All buttons
+
+Mono
+
+12 / 16 px
+
+400
+
+Lead IDs, meeting IDs
+
+Rules: use only weights 400, 500 and 600; turn on tabular numbers for all numeric columns; keep text line length
+under 80 characters; minimum text size is 12 px.
+
+12.2 Colour Palette
+Swatch
+
+Token
+
+Hex
+
+Use
+
+Navy 900
+
+#0A1A3F
+
+Left navigation, top bar, primary buttons
+
+Navy 700
+
+#14315F
+
+Table headers, active menu item, headings
+
+Navy 600
+
+#1E4A8C
+
+Hover states, secondary headings
+
+Accent Blue
+
+#2563EB
+
+Links, focus ring, selected filters, key actions
+
+Blue 100
+
+#DBE7FB
+
+Selected rows, badges
+
+Blue 50
+
+#EEF3FB
+
+Zebra rows, filter panel background
+
+White
+
+#FFFFFF
+
+Page and card background, text on navy
+
+Grey 300
+
+#C9D3E3
+
+Borders and dividers
+
+Grey 600
+
+#5B6577
+
+Secondary text
+
+Text
+
+#1F2937
+
+Primary text
+
+Success
+
+#16A34A
+
+Won, completed, answered
+
+Warning
+
+#D97706
+
+Follow-up due, scheduled
+
+Danger
+
+#DC2626
+
+Overdue, errors, lost
+
+12.3 Usage Rules
+• Proportion: about 60% white, 30% navy, 10% accent blue.
+• Left navigation and top bar are navy with white text; the content area is white; the filter panel is Blue 50.
+• Primary button: navy fill, white text. Secondary button: white fill, navy border.
+• Text contrast meets WCAG AA (at least 4.5:1). Status is never shown by colour alone; each status badge also
+carries a label.
+
+Confidential
+
+Page 14
+
+CRM Project Requirement Document
+
+Version 1.0 (Draft)
+
+• All colours and sizes are defined once as design tokens in the Tailwind theme.
+
+13. Website Lead Capture and Auto-Assignment
+Leads from the website contact form, website WhatsApp and website chatbot flow straight into the CRM, with no
+manual entry.
+
+13.1 Flow
+Contact form ---+
+WhatsApp -------+--> lead-intake (Supabase Edge Function)
+Chatbot --------+
+|
+v
+1 Validate and clean data (phone to E.164, email format)
+2 Duplicate check on phone and email
+|-- new lead --> create lead, tag source
+'-- existing --> add 'repeat enquiry' to timeline,
+update last visit, notify owner
+3 Run assignment automation (rules by priority)
+4 Write timeline entry and send popup to the assignee
+
+13.2 Channels
+Channel
+
+Trigger
+
+Data captured
+
+Source tag
+
+Website contact
+form
+
+Form submitted
+
+Name, phone, email, course, country,
+qualification, message, page URL, UTM
+parameters
+
+website_form
+
+Website WhatsApp
+
+First inbound message from a
+new number (WhatsApp Business
+Cloud API webhook)
+
+Name from profile, phone, first message; later
+messages saved in the timeline
+
+whatsapp
+
+Website chatbot
+
+Bot collects contact details or
+hands off to a human
+
+Name, phone, email, answers given,
+conversation transcript and summary
+
+chatbot
+
+13.3 Security
+• Each source has its own public key; endpoints check allowed website origins and rate limits.
+• WhatsApp and chatbot webhooks verify the provider signature or verify token.
+• Spam protection on the form (hidden field and rate limit).
+• Every raw event is stored in inbound_events so failed leads can be replayed.
+
+13.4 Auto-Assignment Automation
+Admin and Manager create assignment rules under Automations. Rules run in priority order; the first matching
+rule assigns the lead.
+Strategy
+
+Behaviour
+
+Round-robin
+
+Rotates evenly across a chosen pool of counselors or teams
+
+Load-based
+
+Gives the lead to the available user with the fewest open leads
+
+Fixed user or team
+
+Always assigns to a named counselor or Team Lead
+
+Fallback
+
+Goes to a Team Lead or Manager queue when no one matches or is available
+
+Example rule
+
+Condition
+
+Strategy
+
+1
+
+Source is chatbot and country begins with UK
+
+Round-robin: UK team
+
+2
+
+Course is MBA
+
+Fixed: MBA Team Lead
+
+Confidential
+
+Page 15
+
+CRM Project Requirement Document
+
+Version 1.0 (Draft)
+
+Example rule
+
+Condition
+
+Strategy
+
+3
+
+Source is whatsapp
+
+Load-based: all available counselors
+
+4
+
+Anything else
+
+Round-robin: general pool
+
+• Respects user availability, working hours and maximum open leads per counselor.
+• Every decision is stored in assignment_log (rule used and reason) and shown in the lead timeline.
+• If the lead has no activity within a set time (for example 30 minutes), it is reassigned or escalated to the Team
+Lead.
+
+• The assignee receives an instant in-app popup with lead name, source and a Call Now button.
+
+13.5 Website Setup
+• The website posts the contact form to the lead-intake endpoint with its source key.
+• The website captures UTM parameters and page URL for the source report.
+• The WhatsApp number and chatbot platform are configured under Integrations with their webhook URL and
+secret.
+
+14. IVR Click-to-Call Integration (Third-Party)
+The CRM connects to the company's third-party IVR provider through an adapter layer, so the provider can be
+changed without touching the UI. Clicking a phone number places the call automatically.
+
+14.1 Call Flow
+1. The user clicks the phone number on the lead.
+2. The Next.js app calls the ivr-click-to-call Edge Function with the lead id.
+3. The function finds the user's IVR agent id or extension and calls the provider's click-to-call API.
+4. The provider rings the agent's dialer first, then connects the lead. The call shows on the dialer automatically
+with no manual dialing.
+
+5. The provider sends webhooks (ringing, answered, ended, recording ready) to the ivr-webhook Edge Function,
+which verifies the signature.
+
+6. The function saves the call in the calls table, logs the event in ivr_events and writes the timeline entry.
+7. When the call ends, a popup asks for the outcome, a note and the next follow-up date.
+
+14.2 Information Needed from the IVR Provider
+Item
+
+Purpose
+
+API documentation and sandbox
+
+Build and test the adapter
+
+Authentication method and keys
+
+Secure server-to-server calls
+
+Click-to-call (originate) endpoint
+
+Start the call automatically
+
+Webhook events and signature method
+
+Update call logs in real time
+
+Agent or extension mapping
+
+Link each CRM user to an IVR agent
+
+Recording URL access
+
+Show recordings in the timeline
+
+• If the provider call fails, the user sees a clear message and the failure is logged.
+• Phone numbers are sent in international format.
+• Inbound calls are matched to a lead by phone number; unknown numbers create a lead with source
+ivr_inbound.
+
+Confidential
+
+Page 16
+
+CRM Project Requirement Document
+
+Version 1.0 (Draft)
+
+15. Meetings (Zoom)
+Meetings are a CRM function so the team can run lead and internal meetings on Zoom without leaving the CRM.
+
+• Schedule Meeting button on the lead header and a Meetings page with a calendar view.
+• The CRM creates the meeting through the Zoom API (Server-to-Server OAuth) under the host's Zoom account
+and stores the join link, start link and passcode.
+
+• Participants: the lead (invited by email with the join link from the user's Gmail) and any internal users.
+• Reminders use the same popup system as scheduled calls, shown to the host and internal attendees before the
+start time.
+
+• Actions: reschedule, cancel, join, start as host. Changes update Zoom and the timeline.
+• Zoom webhooks update status (started, ended) and save the recording link when ready.
+• Every meeting event (scheduled, rescheduled, started, ended, cancelled) appears in the lead timeline with date
+and time.
+Role
+
+Meeting access
+
+Counselor
+
+Schedule and see meetings for own leads
+
+Team Lead
+
+Own meetings plus team calendar
+
+Manager
+
+Branch calendar
+
+Admin and Super Admin
+
+All meetings; connect and manage the Zoom account
+
+16. Invoices and Payments
+Invoices is a main menu item on the home page. Users generate an invoice for a lead, and the invoice is emailed
+to the lead's email address with a Razorpay QR code so the student can pay directly.
+
+16.1 Who Can Do What
+Role
+
+Invoice access
+
+Counselor
+
+Create invoices for own leads; request a discount
+
+Team Lead
+
+Create invoices for own and team leads; request a discount
+
+Manager
+
+Create invoices for branch leads; request a discount
+
+Admin and Super Admin
+
+Create invoices for any lead; approve, edit or reject discounts; cancel invoices
+
+16.2 Invoice Fields
+• Invoice number (automatic, for example INV-2026-0001) and invoice date.
+• Lead details filled automatically: name, email, phone, course, country.
+• Line items: description (for example course fee), quantity, unit price, amount.
+• Tax (percentage), optional discount (amount or percentage) with a required reason, total, due date, notes.
+• Status, created by, approved by, sent date, paid date.
+
+Confidential
+
+Page 17
+
+CRM Project Requirement Document
+
+Version 1.0 (Draft)
+
+16.3 Flow
+Save invoice
+|
++-- No discount --> PDF created --> email to lead with
+|
+Razorpay QR (full amount) --> status: Sent
+|
+'-- Discount added --> status: Pending Approval (nothing sent)
+|
+v
+popup + notification to Admin / Super Admin
+Admin reviews discount
+|-- Approve (or edit amount) --> QR for discounted amount
+|
+--> email to lead --> Sent
+'-- Reject + comment --> creator notified --> Rejected
+(creator can revise and resubmit)
+
+• No discount: clicking Save generates the invoice number and PDF and emails the invoice to the lead's email
+straight away, with the Razorpay QR for the full amount.
+
+• With discount: the user enters the discount and reason and clicks Save. The invoice waits as Pending
+Approval. Once an Admin or Super Admin approves, the system creates the Razorpay QR for the amount after
+discount and emails the invoice and QR to the lead.
+
+• Every step (created, approval requested, approved, rejected, sent, paid) is written to the lead timeline.
+
+16.4 Razorpay QR and Payment
+• The QR is created with the Razorpay QR Code API for the exact final amount, with an expiry date, and carries
+the invoice id and lead id in its notes.
+
+• The QR image is placed in the email and on the invoice PDF.
+• A Razorpay webhook (signature verified) updates the invoice to Paid, saves the payment in the payments table,
+updates the lead's closure fee, notifies the counselor and sends a payment receipt email.
+
+• If the QR expires, the user clicks Resend to create a new QR and email it again.
+• Razorpay keys are stored as Supabase secrets, never in the frontend.
+
+16.5 Invoice Status and Rules
+Status
+
+Meaning
+
+Pending Approval
+
+Discount requested; waiting for Admin or Super Admin
+
+Sent
+
+Emailed to the lead; waiting for payment
+
+Paid
+
+Payment received through Razorpay
+
+Rejected
+
+Discount rejected; the creator can revise
+
+Expired
+
+QR expired without payment; can be resent
+
+Cancelled
+
+Cancelled by Admin or Super Admin
+
+• After an invoice is sent its amounts are locked; to change them, cancel it and issue a new invoice.
+• The discount cannot be changed after approval.
+• Invoice PDFs are stored in Supabase Storage.
+• The Invoices page lists all invoices the user may see, with filters for status, date, counselor and lead, and a
+PDF download.
+
+• Invoice data is available in Reports.
+• Backend functions: invoice-create, invoice-approve, razorpay-webhook.
+
+Confidential
+
+Page 18
+
+CRM Project Requirement Document
+
+Version 1.0 (Draft)
+
+17. Out of Scope (Phase 2)
+• Mobile app
+• WhatsApp/SMS campaigns and two-way WhatsApp replies from the CRM
+• Zoom meeting embedded inside the CRM
+• Advanced AI scoring and forecasting
+• Multi-currency and invoicing
+
+Confidential
+
+Page 19
+
+

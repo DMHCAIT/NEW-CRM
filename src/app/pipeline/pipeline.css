@@ -1,0 +1,68 @@
+.pipeline-workspace { min-width: 0; }
+.pipeline-workspace .pipeline-heading { align-items: center; margin-bottom: 20px; }
+.pipeline-heading-copy { display: flex; align-items: center; gap: 13px; min-width: 0; }
+.pipeline-module-icon { display: grid; place-items: center; flex-shrink: 0; width: 44px; height: 44px; border: 1px solid #dce6f5; border-radius: 10px; background: #edf3fd; color: #275ca0; }
+.pipeline-heading h1 { font-size: 24px; line-height: 30px; }
+.pipeline-heading p { margin-top: 3px; font-size: 13px; }
+.pipeline-workspace .button { font-size: 13px; }
+.pipeline-panel { overflow: hidden; }
+.pipeline-view-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 54px; padding: 12px 18px; border-bottom: 1px solid #e3e8ef; }
+.pipeline-view-bar > div { display: flex; align-items: center; gap: 9px; min-width: 0; color: #4f6380; }
+.pipeline-view-bar h2 { margin: 0; color: #263b58; font-size: 14px; font-weight: 600; }
+.pipeline-record-count { padding: 3px 7px; border-radius: 5px; background: #edf2f8; color: #526781; font-size: 11px; white-space: nowrap; }
+.pipeline-group-label { color: #7b8798; font-size: 12px; white-space: nowrap; }
+.pipeline-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 18px; }
+.pipeline-search { display: flex; flex: 1 1 200px; align-items: center; gap: 7px; min-width: 0; max-width: 300px; height: 34px; padding: 0 10px; border: 1px solid #dfe5ee; border-radius: 5px; color: #8791a1; }
+.pipeline-search > svg { flex-shrink: 0; }
+.pipeline-workspace .pipeline-search > input { flex: 1; width: 0; min-height: 0; height: 100%; padding: 0; border: 0; border-radius: 0; background: transparent; outline: 0; box-shadow: none; font-size: 13px; }
+.pipeline-search:focus-within { border-color: #6b9be5; box-shadow: 0 0 0 2px #dbe7fb; }
+.pipeline-filter { flex: 0 1 170px; min-width: 0; }
+.pipeline-sort { flex: 0 1 150px; min-width: 0; }
+.pipeline-controls .searchable-dropdown-trigger { min-height: 34px; font-size: 12px; }
+.pipeline-mine { display: inline-flex; align-items: center; gap: 7px; color: #526781; font-size: 12px; white-space: nowrap; }
+.pipeline-mine input { margin: 0; }
+.pipeline-guide { padding: 0 18px 12px; border-bottom: 1px solid #e3e8ef; }
+.pipeline-guide summary { width: fit-content; color: #61738e; font-size: 12px; cursor: pointer; }
+.pipeline-guide p { margin: 10px 0 0; color: #718096; font-size: 12px; }
+.pipeline-guide .pipeline-journey-scroll { overflow-x: auto; }
+.pipeline-guide .pipeline-journey-steps { display: flex; width: max-content; min-width: 0; margin: 12px 0 0; gap: 12px; }
+.pipeline-guide .pipeline-journey-step { white-space: nowrap; font-size: 12px; }
+.pipeline-guide .pipeline-journey-step:not(:last-child)::after { position: static; width: 24px; height: 2px; }
+.pipeline-workspace .pipeline-board { grid-auto-columns: 264px; align-items: stretch; gap: 12px; padding: 16px; background: #f5f7fb; overflow: auto; scrollbar-width: thin; }
+.pipeline-board .board-column { display: flex; flex-direction: column; padding: 0; min-height: 420px; border: 1px solid #e3e8ef; border-radius: 7px; background: #edf1f7; transition: border-color .15s, background .15s; overflow: hidden; }
+.pipeline-board .board-title { display: flex; align-items: center; flex-shrink: 0; min-height: 54px; margin: 0; padding: 12px; border-top: 3px solid #9aaac0; border-bottom: 1px solid #e3e8ef; background: #fff; }
+.pipeline-board .board-title h3 { margin: 0; color: #354b68; font-size: 12px; line-height: 18px; font-weight: 600; }
+.pipeline-board .board-title > span { flex-shrink: 0; font-size: 11px; }
+.pipeline-column-cards { min-height: 0; max-height: 60vh; overflow-y: auto; scrollbar-width: thin; padding: 10px; }
+.pipeline-board .board-card { margin-bottom: 10px; padding: 12px; border-color: #dfe5ef; border-radius: 6px; box-shadow: 0 2px 4px rgba(20,49,95,.035); }
+.pipeline-board .board-card:last-child { margin-bottom: 0; }
+.pipeline-board .board-card[draggable="true"] { cursor: grab; }
+.pipeline-board .board-card[draggable="true"]:active { cursor: grabbing; }
+.pipeline-board .lead-cell { display: flex; align-items: center; gap: 8px; }
+.pipeline-board .lead-cell .avatar { flex-shrink: 0; width: 29px; height: 29px; font-size: 11px; }
+.pipeline-board .lead-cell strong { font-size: 13px; font-weight: 600; color: #234f8b; }
+.pipeline-board .pipeline-card-course { margin: 10px 0 7px; font-size: 12px; line-height: 18px; color: #697b93; }
+.pipeline-board .pipeline-card-phone { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #536882; }
+.pipeline-board .board-card-foot { gap: 7px; font-size: 11px; }
+.pipeline-board .board-card-foot > span { display: flex; align-items: flex-start; gap: 6px; overflow-wrap: anywhere; }
+.pipeline-board .board-card-foot svg { flex-shrink: 0; }
+.pipeline-board .pipeline-stage-control .searchable-dropdown-trigger { min-height: 30px; font-size: 11px; }
+.pipeline-stage-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 190px; color: #8392a8; text-align: center; }
+.pipeline-stage-empty > span { display: grid; place-items: center; width: 32px; height: 32px; border: 1px dashed #cbd6e5; border-radius: 50%; font-size: 12px; }
+.pipeline-stage-empty p { margin: 10px 0 4px; font-size: 12px; }
+.pipeline-stage-empty small { color: #8d9cb1; font-size: 11px; }
+.pipeline-board .pipeline-drop-target { border-color: #6797dc; background: #e3edfc; }
+.pipeline-board .pipeline-card-dragging { opacity: .5; }
+.pipeline-filter-empty { margin: 0; padding: 14px 18px; color: #64748b; font-size: 13px; }
+.pipeline-footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; padding: 12px 18px; border-top: 1px solid #e3e8ef; color: #7b8798; font-size: 12px; }
+@media (max-width: 760px) {
+  .pipeline-workspace .pipeline-heading { align-items: stretch; }
+  .pipeline-heading .heading-actions { justify-content: flex-end; }
+  .pipeline-view-bar, .pipeline-controls { padding: 12px; }
+  .pipeline-group-label { display: none; }
+  .pipeline-search { max-width: none; flex-basis: 100%; }
+  .pipeline-filter, .pipeline-sort { flex: 1 1 130px; }
+  .pipeline-guide { padding-left: 12px; padding-right: 12px; }
+  .pipeline-workspace .pipeline-board { grid-auto-columns: minmax(240px, 80vw); padding: 12px; }
+  .pipeline-footer { padding: 12px; }
+}
