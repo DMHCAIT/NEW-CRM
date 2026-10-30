@@ -474,9 +474,10 @@ test("compact lead overview uses one uninterrupted field grid without section di
     overrides: { "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({ data: { ...live, lead, notes: [], activities: [], emails: [] }, loading: false, error: "", reload() {}, setError() {} }) } },
   });
   assert.doesNotMatch(html, /lead-field-group|Contact details|Admission details|Ownership &amp; follow-up|Additional information/);
-  for (const name of ["Lead name", "Email", "Country code", "Phone", "Alternate phone", "Country", "Course", "Qualification", "Category", "Source", "Stage", "Lead owner", "Closure fee", "Next follow-up", "Preferred campus", "Counselor note"])
+  for (const name of ["Lead name", "Email", "Phone", "Alternate phone", "Country", "Course", "Qualification", "Category", "Source", "Stage", "Lead owner", "Closure fee", "Next follow-up", "Preferred campus", "Counselor note"])
     assert.ok(html.includes(`aria-label="${name}"`), name);
-  assert.equal((html.match(/class="lead-inline-field"/g) ?? []).length, 16);
+  assert.doesNotMatch(html, /aria-label="Country code"/);
+  assert.equal((html.match(/class="lead-inline-field"/g) ?? []).length, 15);
   assert.match(html, /type="datetime-local"/);
   assert.match(html, /Autosave enabled/);
   assert.match(html, /Last modified/);
@@ -1334,7 +1335,8 @@ test("lead columns float without layout shifts and save each checkbox change aut
   const options = () => render().filter((node) => node.props?.className === "lead-column-option");
 
   toggle().props.onClick();
-  assert.equal(options().length, 16);
+  assert.equal(options().length, 15);
+  assert.ok(options().every((option) => option.props.children[1].props.children !== "Country code"));
   search("  EMAIL ");
   assert.equal(options().length, 1);
   assert.equal(options()[0].props.children[1].props.children, "Email");
@@ -1360,7 +1362,7 @@ test("lead columns float without layout shifts and save each checkbox change aut
   assert.equal(options().length, 0);
   assert.ok(render().some((node) => node.props?.role === "status" && node.props.children === "No columns match your search."));
   search("");
-  assert.equal(options().length, 16);
+  assert.equal(options().length, 15);
   assert.ok(!render().some((node) => node.type === "button" && ["Cancel", "Save columns"].includes(node.props.children)));
   search("email");
   options()[0].props.children[0].props.onChange({ target: { checked: false } });
@@ -1371,7 +1373,7 @@ test("lead columns float without layout shifts and save each checkbox change aut
   assert.equal(options()[0].props.children[0].props.disabled, false);
   toggle().props.onClick();
   toggle().props.onClick();
-  assert.equal(options().length, 16);
+  assert.equal(options().length, 15);
   assert.equal(options().find((node) => node.props.children[1].props.children === "Email").props.children[0].props.checked, true);
 
   for (const option of options()) {

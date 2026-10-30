@@ -1,6 +1,6 @@
 import type { Lead } from "@/lib/types";
 
-export type FilterField = "name" | "phone" | "email" | "countryCode" | "country" | "course" | "qualification" | "category" | "stage" | "assignee" | "source" | "createdAt" | "modifiedAt" | "modifiedBy" | "followUpAt" | "lastVisitAt" | "untouched";
+export type FilterField = "name" | "phone" | "email" | "country" | "course" | "qualification" | "category" | "stage" | "assignee" | "source" | "createdAt" | "modifiedAt" | "modifiedBy" | "followUpAt" | "lastVisitAt" | "untouched";
 export type FilterOperator = "is" | "is_not" | "in" | "not_in" | "contains" | "not_contains" | "begins_with" | "ends_with" | "is_empty" | "is_not_empty" | "before" | "after" | "on_or_before" | "on_or_after" | "between" | "not_between" | "today" | "tomorrow" | "yesterday" | "this_week" | "last_week" | "this_month" | "last_month" | "next_month" | "next_week" | "custom_date" | "last_days" | "next_days" | "overdue" | "is_true" | "is_false";
 export type FilterCriterion = { id: string; field: FilterField; operator: FilterOperator; value: string; secondValue?: string };
 export type MatchMode = "all" | "any";
@@ -10,8 +10,8 @@ export const FILTERS_STORAGE_KEY = "northstar.leads.saved-filters";
 export const FILTERS_CHANGED_EVENT = "northstar:lead-filters-changed";
 export const FILTER_FIELDS: { key: FilterField; label: string; kind: "text" | "choice" | "date" | "boolean" }[] = [
   { key: "name", label: "Lead name", kind: "text" }, { key: "phone", label: "Phone", kind: "text" },
-  { key: "email", label: "Email", kind: "text" }, { key: "countryCode", label: "Country code", kind: "choice" },
-  { key: "country", label: "Country", kind: "choice" }, { key: "course", label: "Course", kind: "choice" },
+  { key: "email", label: "Email", kind: "text" }, { key: "country", label: "Country", kind: "choice" },
+  { key: "course", label: "Course", kind: "choice" },
   { key: "category", label: "Category", kind: "choice" }, { key: "followUpAt", label: "Follow up", kind: "date" },
   { key: "qualification", label: "Qualification", kind: "choice" }, { key: "source", label: "Lead source", kind: "choice" },
   { key: "stage", label: "Lead stage", kind: "choice" }, { key: "assignee", label: "Assignee", kind: "choice" },
@@ -96,7 +96,9 @@ export function isSavedLeadFilter(value: unknown): value is SavedLeadFilter {
 
 export function renameLegacyUntouchedOperators(item: unknown): unknown {
   if (typeof item !== "object" || item === null || !("criteria" in item) || !Array.isArray(item.criteria)) return item;
-  return { ...item, criteria: item.criteria.map((criterion: unknown) => (
+  return { ...item, criteria: item.criteria.filter((criterion: unknown) => (
+    typeof criterion !== "object" || criterion === null || !("field" in criterion) || criterion.field !== "countryCode"
+  )).map((criterion: unknown) => (
     typeof criterion === "object" && criterion !== null && "operator" in criterion && typeof criterion.operator === "string" && criterion.operator in LEGACY_UNTOUCHED_RENAMES
       ? { ...criterion, operator: LEGACY_UNTOUCHED_RENAMES[criterion.operator] } : criterion)) };
 }

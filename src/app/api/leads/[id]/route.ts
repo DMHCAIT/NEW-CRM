@@ -52,7 +52,7 @@ export async function PATCH(request: Request, context: Context) {
     if (input.assignee_id !== (current.assigneeId ?? null) && (!user.permissions.includes("leads.assign") || !["team_lead", "manager", "admin", "super_admin"].includes(user.profile.role))) throw new HttpError(403, "Assignment permission and a team lead, manager or administrator role are required.");
     if (Object.hasOwn(body, "stageId") && input.stage_id && !(await fetchStages(supabase)).some(stage => stage.id === input.stage_id)) throw new HttpError(400, "Choose an active CRM stage.");
     const columnInputs: Record<keyof typeof input, string[]> = {
-      name: ["name"], phone: ["phone"], normalized_phone: ["phone", "countryCode"], country_code: ["countryCode"],
+      name: ["name"], phone: ["phone", "countryCode"], normalized_phone: ["phone", "countryCode"], country_code: ["countryCode"],
       alt_phone: ["altPhone"], email: ["email"], normalized_email: ["email"], country: ["country"], course: ["course"],
       qualification: ["qualification"], category: ["category"], source: ["source"], stage_id: ["stageId"],
       assignee_id: ["assigneeId"], next_followup_at: ["followUpAt"], closure_fee: ["closureFee"], custom_fields: ["customFields"],

@@ -56,6 +56,59 @@ async function asUser(id, callback, verified = true) {
   });
 }
 
+test("database writes combine country codes and preserve explicit international phone numbers", async () => {
+  for (const [phone, code, expected] of [
+    ["9123456789", "India (+91)", "+919123456789"],
+    ["98765 43210", "India (+91)", "+919876543210"],
+    ["919876543210", "India (+91)", "+919876543210"],
+    ["+63 4567893834", "India (+91)", "+634567893834"],
+    ["+44 (20) 1234-5678", null, "+442012345678"],
+    ["5551234567", "United States (+1)", "+15551234567"],
+    ["9876543210", null, "9876543210"],
+  ]) {
+    await db.transaction(async tx => {
+      await tx.exec("savepoint phone_case");
+      const { rows: [row] } = await tx.query(
+        `insert into public.leads(name, phone, country_code, normalized_phone, created_by)
+         values('Combined phone test', $1, $2, 'stale', $3) returning id, phone, normalized_phone`,
+        [phone, code, owner]);
+      assert.equal(row.phone, expected);
+      assert.equal(row.normalized_phone, expected.replace(/\D/g, ""));
+      await tx.query("update public.leads set phone=$1 where id=$2", [expected, row.id]);
+      const { rows: [updated] } = await tx.query("select phone,normalized_phone from public.leads where id=$1", [row.id]);
+      assert.equal(updated.phone, expected);
+      assert.equal(updated.normalized_phone, expected.replace(/\D/g, ""));
+      await tx.exec("rollback to savepoint phone_case");
+    });
+  }
+});
+
+test("phone migration backfills legacy leads without changing edit or follow-up metadata and repairs saved columns", async () => {
+  await db.transaction(async tx => {
+    await tx.exec("savepoint phone_migration");
+    await tx.exec("drop trigger a_combine_lead_phone on public.leads");
+    const { rows: [legacy] } = await tx.query(
+      `insert into public.leads(name,phone,country_code,normalized_phone,created_by,next_followup_at)
+       values('Legacy phone','9123456789','India (+91)','9123456789',$1,'2020-01-01')
+       returning *`, [owner]);
+    const { rows: [report] } = await tx.query(
+      `insert into public.saved_reports(user_id,name,filter_json,columns_json)
+       values($1,'Legacy columns','{}','["name","countryCode","phone","email"]') returning id`, [owner]);
+    const migration = readFileSync(join(__dirname, "..", "supabase", "migrations", "202610300002_combined_lead_phone.sql"), "utf8")
+      .replace(/^\s*begin;\s*/i, "").replace(/\s*commit;\s*$/i, "")
+      .replaceAll("create function public.", "create or replace function public.");
+    await tx.exec(migration);
+    const { rows: [updated] } = await tx.query("select * from public.leads where id=$1", [legacy.id]);
+    assert.equal(updated.phone, "+919123456789");
+    assert.equal(updated.normalized_phone, "919123456789");
+    for (const key of ["phone", "normalized_phone"]) { delete legacy[key]; delete updated[key]; }
+    assert.deepEqual(updated, legacy);
+    const { rows: [saved] } = await tx.query("select columns_json from public.saved_reports where id=$1", [report.id]);
+    assert.deepEqual(saved.columns_json, ["name", "phone", "email"]);
+    await tx.exec("rollback to savepoint phone_migration");
+  });
+});
+
 const queryFilter = criteria => ({ id: "", name: "", criteria, matchMode: "all", query: "", quickView: "All accessible leads" });
 async function leadPage(actor, filter = queryFilter([]), options = {}) {
   return asUser(actor, async tx => (await tx.query(`select public.crm_lead_page(

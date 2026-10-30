@@ -23,7 +23,7 @@ const auth = {
   jsonError: (error) => Response.json({ error: error.message }, { status: error.status ?? 500 }),
 };
 const picklists = load("src\\lib\\lead-picklists.ts");
-const validation = load("src\\lib\\live-leads.ts", { "@/lib/server/auth": auth, "@/lib/lead-picklists": picklists });
+const validation = load("src\\lib\\live-leads.ts", { "@/lib/server/auth": auth, "@/lib/lead-picklists": picklists, "@/lib/lead-phone": load("src\\lib\\lead-phone.ts") });
 const csv = load("src\\lib\\live-leads-csv.ts");
 const filters = load("src\\lib\\lead-filters.ts");
 const reports = load("src\\lib\\reports.ts", { "@/lib/lead-filters": filters });
@@ -40,6 +40,21 @@ test("click-to-call safely formats lead phones with their selected calling code"
     assert.equal(leadCallNumber(value, "India (+91)"), null);
   }
   assert.equal(leadCallNumber("123456789012345", "India (+91)"), null);
+});
+
+test("lead storage combines calling code and phone without duplicating explicit international prefixes", () => {
+  for (const [phone, countryCode, expected] of [
+    ["9123456789", "India (+91)", "+919123456789"],
+    ["98765 43210", "India (+91)", "+919876543210"],
+    ["919876543210", "India (+91)", "+919876543210"],
+    ["+63 4567893834", "India (+91)", "+634567893834"],
+    ["+44 (20) 1234-5678", "", "+442012345678"],
+    ["5551234567", "United States (+1)", "+15551234567"],
+  ]) {
+    const parsed = validation.parseLead({ ...validLead, phone, countryCode });
+    assert.equal(parsed.phone, expected);
+    assert.equal(parsed.normalized_phone, expected.slice(1));
+  }
 });
 
 function callScheduleRoute({ denied = false, invisible = false, archived = false, dbFailure = false, badOrigin = false } = {}) {

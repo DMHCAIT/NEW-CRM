@@ -105,7 +105,7 @@ export function LiveFilterEditor({ filter, onChange, leads, stages = [], profile
       const selectedValues = ["in", "not_in"].includes(c.operator) ? c.value.split("\n").filter(Boolean) : c.value ? [c.value] : [];
       const fieldKey = c.field;
       const picklistKey: Partial<Record<FilterField, LeadPicklistKey>> = {
-        countryCode: "countryCode", country: "country", qualification: "qualification",
+        country: "country", qualification: "qualification",
         category: "category", course: "course", source: "source",
       };
       const configured = fieldKey === "stage" ? stages.map(stage => stage.name)
@@ -229,7 +229,7 @@ export function LeadForm({ initial, stages, profiles, canAssign, onSave, busy, s
   return <form className={`live-lead-form${newLead ? " live-lead-form-new" : ""}`} onSubmit={(e) => { e.preventDefault(); void onSave(draft); }}>
     {renderTextField("name")}
     {renderTextField("email")}
-    {renderPicklist("countryCode", newLead)}
+    {newLead && renderPicklist("countryCode", true)}
     {renderTextField("phone")}
     {renderPicklist("country", newLead)}
     {renderPicklist("qualification", newLead)}

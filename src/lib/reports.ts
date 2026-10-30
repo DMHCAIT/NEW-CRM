@@ -2,7 +2,7 @@ import { filterLeads, type SavedLeadFilter } from "@/lib/lead-filters";
 import type { Lead } from "@/lib/types";
 
 export const REPORT_COLUMNS = [
-  { key: "name", label: "Lead name" }, { key: "countryCode", label: "Country code" }, { key: "phone", label: "Phone" },
+  { key: "name", label: "Lead name" }, { key: "phone", label: "Phone" },
   { key: "email", label: "Email" }, { key: "country", label: "Country" },
   { key: "qualification", label: "Qualification" }, { key: "category", label: "Category" }, { key: "course", label: "Course" },
   { key: "stage", label: "Stage" }, { key: "assignee", label: "Assignee" },

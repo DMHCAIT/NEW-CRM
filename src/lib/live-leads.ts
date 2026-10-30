@@ -3,6 +3,8 @@ import { HttpError } from "@/lib/server/auth";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { CurrentUser } from "@/lib/types";
 import { DEFAULT_LEAD_PICKLISTS } from "@/lib/lead-picklists";
+import { normalizePhone } from "@/lib/lead-phone";
+export { normalizePhone } from "@/lib/lead-phone";
 
 export const leadConfiguration = z.object({
   duplicateFields: z.enum(["phone_email", "phone", "email"]).default("phone_email"),
@@ -49,19 +51,14 @@ export const leadInput = z.object({
   customFields: z.record(z.string().max(100), z.string().max(2000)).refine((v) => Object.keys(v).length <= 100, "Too many custom fields").optional().default({}),
 }).strict();
 
-export function normalizePhone(phone: string, countryCode = "") {
-  const digits = phone.replace(/\D/g, "");
-  const code = (countryCode.match(/\(([^)]+)\)/)?.[1]?.split("/")[0] ?? "").replace(/\D/g, "");
-  return code && !digits.startsWith(code) ? `${code}${digits}` : digits;
-}
-
 export function parseLead(value: unknown) {
   const result = leadInput.safeParse(value);
   if (!result.success) throw new HttpError(400, result.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; "));
   const v = result.data;
   const normalizedPhone = normalizePhone(v.phone, v.countryCode);
   return {
-    name: v.name, phone: v.phone, country_code: v.countryCode || null, normalized_phone: normalizedPhone,
+    name: v.name, phone: `${v.phone.startsWith("+") || /\(\+\d+/.test(v.countryCode) ? "+" : ""}${normalizedPhone}`,
+    country_code: v.countryCode || null, normalized_phone: normalizedPhone,
     alt_phone: v.altPhone || null, email: v.email || null, normalized_email: v.email?.toLowerCase() || null,
     country: v.country || null, course: v.course || null, qualification: v.qualification || null, category: v.category || null,
     source: v.source, stage_id: v.stageId, assignee_id: v.assigneeId,

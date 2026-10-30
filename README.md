@@ -178,6 +178,16 @@ certificate chain and server hostname; it never disables TLS verification.
   migration history. It does not reset the database or create demo users.
 - Repeat `npm run db:check` after migration to confirm no pending files remain.
 
+Lead creation keeps separate country-code and phone inputs, but stores the combined
+number in `leads.phone` (for example, `India (+91)` and `9123456789` become
+`+919123456789`). Explicit `+` international numbers take precedence over the selected
+code. `normalized_phone` stores the same digits without `+` for duplicate checks.
+The country-code metadata is retained for input compatibility and filtering, but
+is not a separate lead/report column or editable lead-detail field. Migration
+`202610300002_combined_lead_phone.sql` formats existing records without changing
+their edit history or follow-up state; numbers without a known code are not
+assigned a guessed country.
+
 These commands use the administrative database connection, not application RLS.
 Run them only against the intended project; application startup never runs them.
 

@@ -33,6 +33,7 @@ test("all requested fields are available and operator menus are field-specific",
   assert.ok(api.operatorsForField("followUpAt").some((op) => op.value === "overdue"));
   assert.ok(!api.operatorsForField("createdAt").some((op) => op.value === "overdue"));
   assert.equal(api.operatorsForField("untouched").map((op) => op.value).join(","), "is_true,is,before,after,between,custom_date");
+  assert.ok(!api.FILTER_FIELDS.some((field) => field.key === "countryCode"));
 });
 
 test("text, normalized phones, choices, empty values and negatives", () => {
@@ -48,6 +49,16 @@ test("text, normalized phones, choices, empty values and negatives", () => {
   ]) assert.ok(matches(field, op, value), `${field} ${op}`);
   assert.ok(matches("email", "is_empty", "", { ...base, email: "   " }));
   assert.ok(!matches("country", "not_in", "Canada\nIreland"));
+});
+
+test("legacy saved filters drop the retired country-code condition", () => {
+  const saved = { id: "legacy", name: "Legacy filter", ...filter([
+    criterion("countryCode", "is", "India (+91)"),
+    criterion("country", "is", "India"),
+  ]) };
+  const normalized = api.renameLegacyUntouchedOperators(saved);
+  assert.equal(api.isSavedLeadFilter(normalized), true);
+  assert.deepEqual(normalized.criteria.map(({ field }) => field), ["country"]);
 });
 
 test("calendar dates, inclusive/exclusive boundaries and date negation", () => {

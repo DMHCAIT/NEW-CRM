@@ -209,7 +209,7 @@ export default function LeadDetailPage() {
       <section className="detail-overview"><div className="detail-section-heading">{sectionIntro("Lead information", can("leads.edit") ? "Edit any field below. Text saves when you leave the field; selections save immediately." : "Contact information and admissions details", UserRound)}<span className="lead-autosave-badge" role="status">{saving ? "Saving changes..." : can("leads.edit") ? "Autosave enabled" : "Read only"}</span></div>
         <div className="lead-inline-grid">
           {field("name", "Lead name", lead.name)}{field("email", "Email", lead.email, undefined, "email")}
-          {picklist("countryCode", "Country code")}{field("phone", "Phone", lead.phone, undefined, "tel")}
+          {field("phone", "Phone", lead.phone, undefined, "tel")}
           {field("altPhone", "Alternate phone", lead.altPhone ?? "", undefined, "tel")}{picklist("country", "Country")}
           {picklist("course", "Course")}{picklist("qualification", "Qualification")}{picklist("category", "Category")}{picklist("source", "Source")}
           {field("stageId", "Stage", lead.stageId ?? "", data.stages.map(stage => ({ value: stage.id, label: stage.name })))}
