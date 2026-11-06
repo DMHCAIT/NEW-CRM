@@ -1,6 +1,6 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
-import { jsonError, requireUser } from "@/lib/server/auth";
+import { HttpError, jsonError, requireUser } from "@/lib/server/auth";
 import { requireEnv } from "@/lib/server/env";
 import { encryptSession } from "@/lib/server/login-crypto";
 import { getSupabaseAdminClient } from "@/lib/supabase/server";
@@ -8,6 +8,7 @@ import { databaseError } from "@/lib/server/operational";
 import { canConnectMailbox, crmSessionId, gmailCallback, gmailCookie, gmailCryptoKey, gmailScopes, oauthParameters, oauthStateHash } from "@/lib/server/operational-gmail";
 import { checkOrigin } from "@/lib/server/login";
 import { getIntegrationConfig, requireIntegrationValue } from "@/lib/server/integration-settings";
+import { workspaceManaged } from "@/lib/server/gmail-delegation";
 
 export async function POST(request: Request) {
   try {
@@ -15,6 +16,7 @@ export async function POST(request: Request) {
     const { supabase, user } = await requireUser();
     canConnectMailbox(user.permissions);
     const config = await getIntegrationConfig("gmail");
+    if (workspaceManaged(config)) throw new HttpError(409, "Your Workspace mailbox is managed by your administrator. Individual Google consent is not needed.");
     const clientId = requireIntegrationValue(config, "GOOGLE_CLIENT_ID");
     requireIntegrationValue(config, "GOOGLE_CLIENT_SECRET"); requireEnv("NEXT_PUBLIC_APP_URL");
     const redirectUri = gmailCallback(config);

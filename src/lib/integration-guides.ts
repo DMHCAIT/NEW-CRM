@@ -11,6 +11,20 @@ type IntegrationGuide = {
 };
 
 export const integrationGuides: Record<IntegrationProvider, IntegrationGuide> = {
+  stripe: {
+    needs: ["A Stripe account enabled for USD payments", "A test/live secret API key", "A matching webhook endpoint signing secret"],
+    steps: [
+      { title: "Get the secret key", detail: "Use your organization's Stripe account with USD payments enabled. Copy the secret API key from its developer settings. Start in test mode; never put the key in browser code." },
+      { title: "Configure webhooks", detail: "In Workbench/Webhooks, add the public endpoint shown below for checkout.session.completed and checkout.session.async_payment_succeeded. Copy that endpoint's whsec_ signing secret, not a CLI forwarding secret." },
+      { title: "Save and verify", detail: "Save both secrets here and test the connection. Create a USD test invoice, pay through Stripe Checkout and verify the CRM status link changes to Paid. Use matching test/live modes. INR invoices use Razorpay instead." },
+    ],
+    verify: "Only signed paid sessions matching the invoice ID, saved session ID, amount and USD currency can mark paid. A success-page redirect alone never marks paid.",
+    problems: [
+      { title: "Checkout expires or creation times out", detail: "Stripe Checkout sessions expire. Reconcile an expired or interrupted session before replacing an invoice; retained payment/email locks prevent accidental duplicate requests. Check provider status before retrying." },
+      { title: "Paid in Stripe but pending in CRM", detail: "Inspect this endpoint's delivery attempts in Stripe. Confirm the endpoint signing secret and account mode match, then retry the signed event after fixing configuration. A browser redirect cannot confirm payment." },
+    ],
+    docs: { label: "Stripe Checkout webhooks", url: "https://docs.stripe.com/payments/checkout/fulfill-orders" },
+  },
   intake: {
     needs: ["Access to your website or chatbot backend", "A public HTTPS CRM address", "One source ID and API key for each form or chatbot"],
     steps: [
@@ -45,16 +59,19 @@ export const integrationGuides: Record<IntegrationProvider, IntegrationGuide> = 
     next: { label: "Connect Pages & forms", href: "#integration-facebook-pages" },
   },
   gmail: {
-    needs: ["A Google Cloud project with Gmail API enabled", "A Web application OAuth client", "Each user's consent using their CRM login mailbox"],
+    needs: ["A Google Cloud project with Gmail API enabled", "Either a Web OAuth client or a domain-wide delegated service account", "Workspace super-admin approval for automatic organization access"],
     steps: [
-      { title: "Prepare Google Cloud", detail: "Enable Gmail API and configure your OAuth audience/consent screen. Add test users while testing, or complete Google's verification requirements for your production audience. Workspace administrators may also need to allow this app." },
-      { title: "Create the OAuth client", detail: "Create a Web application OAuth client. Copy its client ID and secret into Connection settings. Register the exact Authorized callback URL shown below, including scheme, hostname, port (locally) and path." },
-      { title: "Authorize your personal mailbox", detail: "After saving, open Your Gmail mailbox below and choose Connect Gmail. Sign in to Google with the same email used to log in to CRM and approve read/send access. Each counselor connects separately; an administrator's consent does not connect everyone." },
+      { title: "Prepare Google Cloud", detail: "Enable Gmail API. Choose managed Workspace access or per-user OAuth below. For OAuth, configure your audience/consent screen, add test users while testing, and complete Google's verification requirements for your production audience. Workspace administrators may also need to allow the app." },
+      { title: "Automatic Workspace access (no employee consent)", detail: "For organization-managed mailboxes, create a service account with domain-wide delegation and download a JSON key. A Workspace super administrator must add its numeric client_id in Admin console > Security > Access and data control > API controls > Manage Domain Wide Delegation, authorizing https://www.googleapis.com/auth/gmail.readonly and https://www.googleapis.com/auth/gmail.send. No Google Cloud IAM Owner role is needed." },
+      { title: "Save managed configuration", detail: "Choose Workspace-managed in Connection settings, enter your exact Workspace domain (for example dmhca.in), and paste the downloaded JSON key. Save and run Check saved setup while signed in with your primary organizational mailbox. This verifies delegation for your own mailbox without sending mail. Employees in that domain use their CRM login mailbox automatically; they do not click Connect Gmail. This grants the service account organization-wide mailbox authority: protect the key and restrict CRM access." },
+      { title: "Per-user OAuth only: create a Web client", detail: "Create a Web application OAuth client. Copy its client ID and secret into Connection settings. Register the exact Authorized callback URL shown below, including scheme, hostname, port (locally) and path. Skip this step in Workspace-managed mode." },
+      { title: "Per-user OAuth alternative", detail: "In per-user OAuth mode only, open Your Gmail mailbox and choose Connect Gmail. Sign in with the same email used for CRM and approve read/send access. Each counselor connects separately in this mode. Managed mode instead uses the super-admin's domain-wide delegation." },
     ],
-    verify: "The setup check is local only. Connect Gmail, then send a test message from an accessible lead's Emails tab and verify the From address and Sent folder. CRM login alone does not grant Google consent.",
+    verify: "Managed mode checks delegation against your own mailbox; OAuth mode checks settings locally and requires Connect Gmail. In either mode, send a test message from an accessible lead and verify From and Sent, then manually sync your inbox. Automatic authorization does not imply a background inbox import.",
     problems: [
       { title: "redirect_uri_mismatch or access blocked", detail: "Copy the callback exactly into the Google Web client. Check the OAuth audience/test users, Gmail API, Google verification and Workspace app restrictions." },
       { title: "Wrong mailbox or sending scope missing", detail: "Reconnect using your exact CRM login email and grant both read and send scopes. Changing the shared OAuth client requires existing users to reconnect. SMTP is never a fallback for lead email." },
+      { title: "Managed authorization fails", detail: "Check the service account numeric client_id (not project ID), both exact delegation scopes, Gmail API enablement and the user's Gmail license. Use primary mailbox addresses, not aliases. Delegation changes can take up to 24 hours. An administrator can disable managed mode centrally; revoke the grant in Google Admin and delete the key to remove Google access." },
     ],
     docs: { label: "Google Gmail OAuth documentation", url: "https://developers.google.com/workspace/gmail/api/auth/about-auth" },
     next: { label: "Connect your Gmail mailbox", href: "#integration-mailbox" },
@@ -104,6 +121,8 @@ export const integrationGuides: Record<IntegrationProvider, IntegrationGuide> = 
 };
 
 export const integrationFieldHelp: Record<string, string> = {
+  STRIPE_SECRET_KEY: "Server-only sk_test_ or sk_live_ API key. Never a publishable key.",
+  STRIPE_WEBHOOK_SECRET: "whsec_ signing secret for the deployed Stripe webhook endpoint.",
   ZOOM_ACCOUNT_ID: "From the Zoom Server-to-Server OAuth app credentials.",
   ZOOM_CLIENT_ID: "Client ID of the activated Server-to-Server app.",
   ZOOM_CLIENT_SECRET: "Client secret from the same Zoom app.",
@@ -122,6 +141,9 @@ export const integrationFieldHelp: Record<string, string> = {
   GOOGLE_CLIENT_ID: "From a Google Cloud Web application OAuth client.",
   GOOGLE_CLIENT_SECRET: "Client secret from that same Google OAuth client.",
   GOOGLE_REDIRECT_URI: "Register this exact URL in the Google client's authorized redirect URIs.",
+  GOOGLE_MAILBOX_MODE: "OAuth requires each user's consent. Workspace-managed requires one super-admin-approved domain-wide delegation.",
+  GOOGLE_WORKSPACE_DOMAIN: "Only active CRM login mailboxes in this exact domain are eligible; aliases, subdomains and external domains are not automatically included.",
+  GOOGLE_SERVICE_ACCOUNT_JSON: "Complete downloaded JSON key with client_email, client_id and private_key. Stored encrypted, never returned to the browser. Do not paste it in chat or commit it.",
   LEAD_INTAKE_SIGNING_KEY: "At least 32 random characters. Share only with your trusted website backend.",
   FACEBOOK_APP_ID: "Numeric ID from your Meta developer app.",
   FACEBOOK_APP_SECRET: "App secret from the same Meta app; not a Page access token.",

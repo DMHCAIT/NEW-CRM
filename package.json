@@ -10,6 +10,9 @@
     "typecheck": "tsc --noEmit",
     "db:check": "node scripts/database.cjs check",
     "db:migrate": "node scripts/database.cjs migrate",
+    "db:check:live": "node scripts/database.cjs check --live",
+    "db:migrate:live": "node scripts/database.cjs migrate --live",
+    "build:live": "npm run db:migrate:live && next build",
     "test": "node --test --test-concurrency=2"
   },
   "dependencies": {

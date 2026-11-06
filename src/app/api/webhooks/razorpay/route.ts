@@ -5,6 +5,7 @@ import { getSupabaseAdminClient } from "@/lib/supabase/server";
 import { databaseError } from "@/lib/server/operational";
 import { getIntegrationConfig, requireIntegrationValue } from "@/lib/server/integration-settings";
 import { sendPaymentReceipt } from "@/lib/server/invoice-delivery";
+import { invoicePaymentReference } from "@/lib/invoice-policy";
 
 type RazorpayEntity = {
   id?: unknown;
@@ -45,10 +46,10 @@ export async function POST(request: Request) {
     }
     const admin = getSupabaseAdminClient();
     const { data: invoice, error } = await admin.from("invoices")
-      .select("id,invoice_no,total,currency,status,razorpay_payment_link_id")
+      .select("id,invoice_no,total,currency,status,razorpay_payment_link_id,payment_revision")
       .eq("razorpay_payment_link_id", link.id).maybeSingle();
     databaseError(error);
-    if (!invoice || invoice.id !== link.reference_id || Math.round(Number(invoice.total) * 100) !== payment.amount || invoice.currency !== payment.currency)
+    if (!invoice || invoice.currency !== "INR" || invoicePaymentReference(invoice.id, invoice.payment_revision) !== link.reference_id || Math.round(Number(invoice.total) * 100) !== payment.amount || invoice.currency !== payment.currency)
       throw new HttpError(400, "Razorpay payment link does not match an invoice.");
     const { data: recorded, error: paymentError } = await admin.rpc("operational_record_payment_link", {
       p_invoice_id: invoice.id,

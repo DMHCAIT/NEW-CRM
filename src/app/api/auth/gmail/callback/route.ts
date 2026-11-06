@@ -8,11 +8,13 @@ import { getSupabaseAdminClient } from "@/lib/supabase/server";
 import { databaseError } from "@/lib/server/operational";
 import { secureEqual } from "@/lib/server/operational-intake";
 import { canConnectMailbox, crmSessionId, gmailCallback, gmailCookie, gmailCryptoKey, gmailRequest, gmailScopes, googleTokenRequest, oauthStateHash, requireLoginMailbox } from "@/lib/server/operational-gmail";
+import { workspaceManaged } from "@/lib/server/gmail-delegation";
 
 export async function GET(request: Request) {
   try {
     const { supabase, user } = await requireUser();
     canConnectMailbox(user.permissions);
+    if (workspaceManaged(await getIntegrationConfig("gmail"))) throw new HttpError(409, "Workspace-managed Gmail is enabled. Individual OAuth connections are disabled.");
     const query = new URL(request.url).searchParams;
     const state = query.get("state") ?? "";
     const store = await cookies();

@@ -15,7 +15,7 @@ export function databaseError(error: { message: string } | null) {
 export const uuid = z.string().uuid();
 
 export async function accessibleLead(supabase: SupabaseClient, id: string) {
-  const { data, error } = await supabase.from("leads").select("id,name,email,assignee_id").eq("id", id).eq("is_archived", false).is("merged_into_id", null).maybeSingle();
+  const { data, error } = await supabase.from("leads").select("id,name,email,assignee_id,billing_address").eq("id", id).eq("is_archived", false).is("merged_into_id", null).maybeSingle();
   databaseError(error);
   if (!data) throw new HttpError(404, "Lead not found or not accessible.");
   return data;
@@ -30,6 +30,7 @@ export async function leadOptions(supabase: SupabaseClient) {
 export const integrationRequirements = {
   zoom: ["ZOOM_ACCOUNT_ID", "ZOOM_CLIENT_ID", "ZOOM_CLIENT_SECRET"],
   razorpay: ["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"],
+  stripe: ["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET"],
   smtp: ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD", "SMTP_FROM"],
 };
 

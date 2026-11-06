@@ -3,6 +3,7 @@ import { HttpError } from "@/lib/server/auth";
 import type { IntegrationProvider } from "@/lib/integration-definitions";
 import { smtpTransport } from "@/lib/server/smtp-transport";
 import { requireIntegrationValue } from "@/lib/server/integration-settings";
+import { delegatedGmailToken, workspaceManaged } from "@/lib/server/gmail-delegation";
 
 async function checkedJson(url: string, init: RequestInit, message: string) {
   const response = await fetch(url, { ...init, redirect: "error", cache: "no-store", signal: AbortSignal.timeout(15000) });
@@ -11,6 +12,11 @@ async function checkedJson(url: string, init: RequestInit, message: string) {
 }
 export async function checkIntegration(provider: IntegrationProvider, config: Record<string, string>, recipient?: string) {
   const value = (key: string) => requireIntegrationValue(config, key);
+  if (provider === "stripe") {
+    await checkedJson("https://api.stripe.com/v1/balance", { headers: { Authorization: `Bearer ${value("STRIPE_SECRET_KEY")}` } }, "Stripe authentication failed");
+    value("STRIPE_WEBHOOK_SECRET");
+    return "Stripe authentication passed. No Checkout session or charge was created. Verify signed webhook delivery and a test payment separately.";
+  }
   if (provider === "zoom") {
     const credentials = Buffer.from(`${value("ZOOM_CLIENT_ID")}:${value("ZOOM_CLIENT_SECRET")}`).toString("base64");
     const token = await checkedJson(`https://zoom.us/oauth/token?grant_type=account_credentials&account_id=${encodeURIComponent(value("ZOOM_ACCOUNT_ID"))}`, { method: "POST", headers: { Authorization: `Basic ${credentials}` } }, "Zoom authentication failed");
@@ -35,6 +41,11 @@ export async function checkIntegration(provider: IntegrationProvider, config: Re
     } finally { transport.close(); }
   }
   if (provider === "gmail") {
+    if (workspaceManaged(config)) {
+      if (!recipient) throw new HttpError(400, "A CRM login mailbox is required to test Workspace delegation.");
+      await delegatedGmailToken(config, recipient);
+      return "Workspace delegation authenticated and your CRM login mailbox is accessible. No email was sent. Test lead sending and inbox sync; other employees need enabled Gmail mailboxes in the same domain.";
+    }
     for (const key of ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI"]) value(key);
     return "OAuth settings are complete (local check only). Google has not authenticated these credentials. Use Connect Gmail below to verify the client, redirect registration, user consent and Gmail API access.";
   }

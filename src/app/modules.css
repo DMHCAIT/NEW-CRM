@@ -359,6 +359,58 @@
 .invoice-grand-total dt { color: #35577e; }
 .invoice-form-footer { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 9px; padding: 16px 24px; border-top: 1px solid #e7edf5; background: #fafbfd; }
 .invoice-form-footer p { margin: 0 auto 0 0; color: #8796aa; font-size: 11px; }
+.zf-invoice { background: #fff; border: 1px solid #e3e6ec; border-radius: 4px; }
+.zf-invoice > .invoice-form { display: block; padding: 0; }
+.zf-invoice .zf-title { margin: 0; padding: 16px 24px; font-size: 16px; font-weight: 500; color: #222; border-bottom: 1px solid #eceef2; }
+.zf-invoice .zf-alert { margin: 12px 24px 0; }
+.zf-body { margin: 0; padding: 4px 24px 24px; border: 0; min-width: 0; }
+.zf-section { margin: 22px 0 14px; font-size: 16px; font-weight: 500; color: #2747c7; }
+.zf-subsection { margin: 4px 0 10px; font-size: 15px; font-weight: 500; color: #222; }
+.zf-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 420px)); gap: 14px 48px; align-items: start; }
+.zf-field { display: grid; grid-template-columns: 150px minmax(0, 200px); align-items: center; gap: 12px; margin: 0; font-size: 12px; }
+.zf-label { font-weight: 600; color: #333; font-size: 12px; }
+.zf-req { color: #e2483d; }
+.zf-control { min-width: 0; display: block; }
+.zf-check .zf-control { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #444; }
+.zf-input, .zf-invoice .searchable-dropdown-trigger { width: 100%; box-sizing: border-box; min-height: 28px; padding: 4px 8px; border: 1px solid #d5d9e0; border-radius: 2px; background: #fff; font: inherit; font-size: 12px; color: #333; }
+.zf-input[readonly] { background: #fafafa; color: #888; }
+.zf-input.zf-strong[readonly] { color: #222; font-weight: 600; background: #fff; }
+.zf-input:focus { outline: none; border-color: #2747c7; box-shadow: 0 0 0 1px #2747c733; }
+textarea.zf-input { resize: vertical; }
+.zf-suffix { display: flex; }
+.zf-suffix .zf-input { border-radius: 2px 0 0 2px; min-width: 0; }
+.zf-suffix input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+.zf-suffix input[type="number"]::-webkit-inner-spin-button, .zf-suffix input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.zf-suffix b { display: grid; place-items: center; min-width: 26px; border: 1px solid #d5d9e0; border-left: 0; background: #fff; font-size: 11px; font-weight: 500; color: #555; }
+.zf-table-wrap { overflow-x: auto; margin-bottom: 18px; border-bottom: 1px solid #eceef2; }
+.zf-table { border-collapse: collapse; min-width: 700px; font-size: 12px; }
+.zf-table thead th { padding: 8px 6px; text-align: left; font-weight: 600; color: #333; background: #f5f6f8; white-space: nowrap; }
+.zf-table thead th:first-child { padding-left: 36px; }
+.zf-table td { padding: 10px 6px; vertical-align: middle; }
+.zf-table td:first-child { padding-left: 36px; }
+.zf-table .zf-course-cell { width: 200px; min-width: 200px; }
+.zf-table .zf-course-cell .searchable-dropdown-trigger { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.zf-table td:not(.zf-course-cell) { width: 82px; }
+.zf-summary { margin-top: 8px; }
+.zf-hint { margin: 8px 0 0; font-size: 11px; color: #777; }
+.zf-footer { position: sticky; bottom: 0; }
+.zf-editor-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; padding: 22px 24px; border-bottom: 1px solid #e6ecf3; }
+.zf-invoice .zf-editor-heading .zf-title { padding: 5px 0 8px; border: 0; font-size: 21px; font-weight: 600; color: #233750; }
+.zf-editor-heading p { margin: 0; color: #64748b; font-size: 12px; line-height: 1.6; }
+.zf-process { display: flex; flex-wrap: wrap; gap: 16px 30px; list-style: none; margin: 0; padding: 14px 24px; background: #f8fafc; border-bottom: 1px solid #e6ecf3; }
+.zf-process li { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #52657e; }
+.zf-process b { display: grid; place-items: center; width: 23px; height: 23px; border-radius: 50%; background: #e8effb; color: #2747c7; }
+.zf-policy-note { padding: 12px 14px; border: 1px solid #e0e9f4; border-radius: 6px; background: #f7faff; color: #536a85; font-size: 12px; line-height: 1.7; margin: 14px 0; }
+.zf-policy-note.is-warning { background: #fffaf0; color: #8a641f; border-color: #f1dfb8; }
+.zf-payment-summary { display: grid; grid-template-columns: repeat(auto-fit,minmax(150px,1fr)); gap: 1px; border: 1px solid #e0e7f0; border-radius: 7px; background: #e0e7f0; overflow: hidden; margin: 20px 0 12px; }
+.zf-payment-summary > div { background: #f8fafc; padding: 15px; }
+.zf-payment-summary dt { color: #64748b; font-size: 11px; margin-bottom: 8px; }
+.zf-payment-summary dd { margin: 0; font-size: 16px; font-weight: 600; color: #233750; }
+.zf-payment-summary > div:nth-child(4) { background: #edf4ff; }
+.zf-invoice .zf-table { width: 100%; min-width: 930px; }
+.zf-invoice .zf-table td:not(.zf-course-cell) { min-width: 110px; }
+.zf-invoice .zf-table .zf-course-cell { min-width: 230px; }
+.zf-invoice .zf-input[readonly] { color: #53657c; background: #f4f7fb; border-color: #e2e8f0; }
 .invoice-paper { width: min(100%,850px); margin: 24px auto; padding: 30px; border: 1px solid #e0e7f0; border-radius: 5px; box-shadow: 0 3px 12px #203b6006; }
 .invoice-paper-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
 .invoice-paper-header h2 { font-size: 27px; letter-spacing: 2px; font-weight: 400; margin: 13px 0 5px; }
@@ -419,6 +471,10 @@
   .invoice-metric strong { font-size: 18px; }
   .invoice-form-fields { grid-template-columns: minmax(0,1fr); padding: 18px; gap: 18px; }
   .invoice-item-editor, .invoice-totals { grid-column: 1; }
+  .zf-body { padding: 4px 14px 18px; }
+  .zf-grid { grid-template-columns: minmax(0,1fr); gap: 12px; }
+  .zf-grid > span:empty { display: none; }
+  .zf-field { grid-template-columns: 120px minmax(0,1fr); }
   .invoice-item-fields { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 13px; padding: 13px; }
   .invoice-item-fields > label:first-child { grid-column: 1 / -1; }
   .invoice-line-amount { grid-column: 1 / -1; padding: 5px 0; }

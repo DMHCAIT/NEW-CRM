@@ -38,7 +38,8 @@ function load(path, mocks = {}, globals = {}) {
   vm.runInNewContext(ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021 },
   }).outputText, { exports, Buffer, Date, Number, Set, Map, URL, URLSearchParams, AbortSignal, Request, Response, process, console, crypto: webcrypto,
-    require: (name) => name in mocks ? mocks[name] : name === "@/lib/server/integration-settings" ? integrationSettings : require(name), ...globals });
+    require: (name) => name in mocks ? mocks[name] : name === "@/lib/server/integration-settings" ? integrationSettings :
+      name === "@/lib/server/gmail-delegation" ? load("src/lib/server/gmail-delegation.ts", { "@/lib/server/auth": auth }, globals) : require(name), ...globals });
   return exports;
 }
 const intake = load("src/lib/server/operational-intake.ts", {

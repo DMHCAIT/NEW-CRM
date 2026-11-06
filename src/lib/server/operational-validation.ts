@@ -4,11 +4,18 @@ const twoDecimals = (value: number) => Math.abs(value * 100 - Math.round(value *
 const money = z.coerce.number().finite().min(0).max(99999999).refine(twoDecimals, "Use at most two decimal places.");
 export const invoiceInput = z.object({
   lead_id: z.string().uuid(),
+  course_id: z.preprocess(value => value === "" ? undefined : value, z.string().uuid().optional()),
+  company_code: z.enum(["DMHCA", "IBMP"]).optional(),
+  currency: z.enum(["INR", "USD"]).default("INR"),
+  billing_address: z.string().trim().max(2000).optional(),
+  save_billing_address: z.boolean().default(false),
+  installment_amount: money.optional(),
   parent_invoice_id: z.preprocess((value) => value === "" ? undefined : value, z.string().uuid().nullable().optional()),
-  description: z.string().trim().min(1).max(500),
-  quantity: z.coerce.number().positive().max(10000).refine(twoDecimals, "Use at most two decimal places."),
-  unit_price: money,
+  description: z.string().trim().min(1).max(500).default("Catalog course"),
+  quantity: z.coerce.number().positive().max(10000).refine(twoDecimals, "Use at most two decimal places.").default(1),
+  unit_price: money.default(0),
   tax_amount: money.default(0),
+  tax_percent: z.coerce.number().finite().min(0).max(100).refine(twoDecimals, "Use at most two decimal places.").optional(),
   discount_percent: z.coerce.number().min(0).max(100).default(0).refine(twoDecimals, "Use at most two decimal places."),
   discount_reason: z.string().trim().max(1000).default(""),
   payment_type: z.enum(["one_shot", "emi", "loan", "installments"]).default("one_shot"),
@@ -19,15 +26,19 @@ export const invoiceInput = z.object({
   }, "Invalid due date"),
   notes: z.string().trim().max(3000).default(""),
 }).superRefine((value, ctx) => {
-  if (value.discount_percent > 0 && !value.discount_reason)
+  if (!value.parent_invoice_id && value.discount_percent > 0 && !value.discount_reason)
     ctx.addIssue({ code: "custom", message: "A discount reason is required.", path: ["discount_reason"] });
-  if (value.discount_percent === 0 && value.discount_reason)
+  if (!value.parent_invoice_id && value.discount_percent === 0 && value.discount_reason)
     ctx.addIssue({ code: "custom", message: "A discount reason is only used with a discount.", path: ["discount_reason"] });
   if (value.parent_invoice_id && value.payment_type !== "installments")
     ctx.addIssue({ code: "custom", message: "Only installment invoices can be linked to an original invoice.", path: ["payment_type"] });
   const total = value.quantity * value.unit_price * (1 - value.discount_percent / 100) + value.tax_amount;
-  if ((value.payment_type === "one_shot" || value.payment_type === "installments") && total < 1)
-    ctx.addIssue({ code: "custom", message: "Razorpay Payment Links require an invoice total of at least ₹1.", path: ["unit_price"] });
+  if (!value.course_id && !value.parent_invoice_id && (value.payment_type === "one_shot" || value.payment_type === "installments") && total < 1)
+    ctx.addIssue({ code: "custom", message: "Online payments require an invoice total of at least one currency unit.", path: ["unit_price"] });
+  if ((value.course_id || value.parent_invoice_id) && (!value.company_code || !value.billing_address))
+    ctx.addIssue({ code: "custom", message: "Choose an invoice company and enter the billing address.", path: ["billing_address"] });
+  if ((value.course_id || value.parent_invoice_id) && value.payment_type === "installments" && (!value.installment_amount || value.installment_amount < 1))
+    ctx.addIssue({ code: "custom", message: "Enter the amount for this installment (at least one currency unit).", path: ["installment_amount"] });
   if (value.course_total !== undefined && total > value.course_total)
     ctx.addIssue({ code: "custom", message: "Installment cannot exceed the course total.", path: ["course_total"] });
   if (value.quantity * value.unit_price + value.tax_amount > 9999999999.99)

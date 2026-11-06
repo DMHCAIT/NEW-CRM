@@ -46,11 +46,13 @@ function htmlToText(html: string) {
     .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").trim();
 }
 
-export function emailLayout(title: string, bodyHtml: string) {
+export function emailLayout(title: string, bodyHtml: string, branding?: { legal_name: string; primary_color: string; accent_color: string }) {
+  const primary = branding && /^#[0-9a-f]{6}$/i.test(branding.primary_color) ? branding.primary_color : "#0A1A3F";
+  const accent = branding && /^#[0-9a-f]{6}$/i.test(branding.accent_color) ? `border-bottom:4px solid ${branding.accent_color};` : "";
   return `<!doctype html><html><body style="margin:0;background:#EEF3FB;font-family:Inter,Arial,sans-serif;color:#1F2937">
 <table width="100%" cellpadding="0" cellspacing="0" style="padding:24px 0"><tr><td align="center">
 <table width="600" cellpadding="0" cellspacing="0" style="background:#fff;border:1px solid #C9D3E3;border-radius:8px">
-<tr><td style="background:#0A1A3F;color:#fff;padding:16px 24px;font-size:18px;font-weight:600;border-radius:8px 8px 0 0">DMHCA · ${escapeHtml(title)}</td></tr>
+<tr><td style="background:${primary};${accent}color:#fff;padding:16px 24px;font-size:18px;font-weight:600;border-radius:8px 8px 0 0">${escapeHtml(branding?.legal_name ?? "DMHCA")} · ${escapeHtml(title)}</td></tr>
 <tr><td style="padding:24px;font-size:14px;line-height:20px">${bodyHtml}</td></tr>
 </table></td></tr></table></body></html>`;
 }

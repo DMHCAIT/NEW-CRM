@@ -24,6 +24,24 @@ are reported rather than replaced with demonstration records.
 6. Configure SMTP (below), then provision the first Super Admin (below).
 7. Run `npm run dev`. Restart Next.js after changing environment variables.
 
+### Troubleshooting production login
+
+Local `.env.local` values are not deployed through Git. Configure the Production
+environment in Vercel and redeploy after changes. The public application URL must
+match the browser origin; keep the encryption key unchanged when sharing a
+database containing encrypted integration credentials.
+
+Database failures during password login return HTTP 503 with a safe reference:
+`LOGIN_RATE_LIMIT` (rate-limit function), `LOGIN_PROFILE` (profile lookup),
+`LOGIN_CHALLENGE` (pending verification insert), or `LOGIN_CHALLENGE_CLEANUP`
+(previous pending verification removal). Vercel runtime logs record that reference
+and a sanitized provider error code, without database response details or tokens.
+Use these to identify the failing operation before changing keys or migrations.
+An invalid password still returns 401, rate limiting returns 429, and failed
+verification email delivery returns 503 with an SMTP-specific message. If a generic
+500 remains, inspect the failed request's Vercel runtime logs; the browser console
+alone does not identify its cause. Never share credentials or request payloads.
+
 ### Performance and local preview
 
 Use `npm run build` followed by `npm start` for production-speed serving.
@@ -177,6 +195,50 @@ certificate chain and server hostname; it never disables TLS verification.
   initialize an existing untracked application schema or changed/out-of-order
   migration history. It does not reset the database or create demo users.
 - Repeat `npm run db:check` after migration to confirm no pending files remain.
+
+#### Local development and live deployment
+
+The app and database migrations must use the same Supabase project. A message such
+as `column leads.billing_address does not exist` means the database is behind the
+application, not that the lead data should be cleared. That column is added by
+`202611030002_course_billing_stripe.sql`; Gmail access also needs the Workspace
+and mailbox-permission migrations. Apply all pending migrations in filename order.
+
+For local development with the hosted Supabase project:
+
+```sh
+npm run db:check
+npm run db:migrate
+npm run db:check
+npm run dev
+```
+
+The first check exits unsuccessfully if migrations or required columns are missing.
+Local commands load `.env.development.local`, `.env.local`, `.env.development` and
+`.env` using Next.js development environment precedence. If a local PostgreSQL
+instance has no TLS, explicitly set `DATABASE_SSL_MODE=disable`; this is allowed
+only for loopback hosts. Hosted Supabase connections always verify TLS.
+
+On the live server, configure `DATABASE_URL`, `DATABASE_CA_CERT_PATH`, Supabase
+API keys, `AUTH_ENCRYPTION_KEY` and `NEXT_PUBLIC_APP_URL` as server environment
+variables. Use the same stable encryption key when local and live share encrypted
+integration credentials. Set the live build command to:
+
+```sh
+npm run build:live
+```
+
+This applies pending migrations before building and refuses deployment if they
+fail. `npm run db:check:live` and `npm run db:migrate:live` are also available;
+live migration commands never load local environment files, so a developer's
+`.env.local` cannot silently select a deployment database. Run migrations only
+from the controlled deployment step, not from public web requests.
+
+Back up the database before migrations. For shared local/live databases, coordinate
+schema changes with the running deployment. If SQL connections time out or reset,
+copy the exact **Session pooler** URI from Supabase > Connect and check network
+access, the database password and CA certificate. The Supabase API working does
+not prove the administrative PostgreSQL connection is reachable.
 
 Lead creation keeps separate country-code and phone inputs, but stores the combined
 number in `leads.phone` (for example, `India (+91)` and `9123456789` become
@@ -481,7 +543,7 @@ routes explicitly explain that they use Page tokens rather than website keys.
 Apply migrations `202610230005_integration_credentials.sql` and
 `202610230006_multi_source_connections.sql` before deploying this feature, using
 the checksum-tracked migration process above. Open **Integrations** to configure
-Zoom, Razorpay, SMTP, Google OAuth, website/chatbot signing and the Meta app.
+Zoom, Razorpay, Stripe, SMTP, Google OAuth, website/chatbot signing and the Meta app.
 Only an **Admin or Super Admin** with `integrations.manage` can read configuration
 metadata or change shared credentials, Page tokens, source assignments and form routes.
 Other authorized viewers get setup guidance, not credential metadata.
@@ -533,25 +595,151 @@ Save the Razorpay key ID, key secret and separate webhook signing secret in
 `/api/webhooks/razorpay` for `payment_link.paid`. The endpoint verifies the raw
 signature, invoice/link reference, payment ID, amount, currency and captured state.
 Verified payment recording is idempotent; link existence and browser redirects do
-not mark invoices paid. A random-token public invoice status URL is emailed beside
-each short payment URL and reveals only invoice/course, amount and status.
+not mark invoices paid. INR online invoices use Razorpay; USD uses Stripe.
+Invoice email and PDF Pay Now buttons open the same random-token, branded CRM
+invoice page for both providers. It displays the full itemized invoice and verified
+payment status; after payment is verified it shows Paid and removes the payment
+action. Razorpay returns to this page after checkout, and the page refreshes status
+automatically. The page exposes only information printed on that invoice.
+
+### Stripe (USD invoices)
+
+Use the organization's Stripe merchant account enabled for USD payments.
+In Stripe developer settings, obtain a **secret API key** (start in test mode).
+In Workbench/Webhooks, add
+`https://www.ibmpcrm.xyz/api/webhooks/stripe` and subscribe to
+`checkout.session.completed` and `checkout.session.async_payment_succeeded`.
+Copy this endpoint's signing secret, not the secret from a local CLI forwarder.
+Save `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` in **Integrations > Stripe**
+or server-only environment variables. Never use a publishable key as the secret
+key, mix test/live credentials, or expose either secret to browser code.
+Test connection reads the account balance; it does not charge a customer.
+
+A signed event must report a fully paid USD Checkout session with the exact
+saved invoice/session IDs and amount. Unpaid asynchronous sessions remain pending.
+Replayed events cannot create duplicate payments. A successful browser redirect
+is never payment evidence. Keep webhook retries enabled and inspect failed
+delivery attempts if payment is complete in Stripe but pending in CRM.
+
+### Courses and company setup
+
+Before deploying this billing build, apply
+`202611030002_course_billing_stripe.sql` with the tracked migration process:
+`npm run db:check`, then `npm run db:migrate`. Back up first and coordinate
+migration and application deployment in a maintenance window: the new creation
+function requires catalog inputs that older application builds do not send.
+Do not rerun or edit an already-applied migration. This migration adds tables and
+columns without deleting existing invoices, leads, payments or approvals.
+
+Open **Courses** as an Admin/Super Admin with `settings.manage`:
+
+1. Add each course's standard **INR and USD prices separately**. There is no
+   automatic currency conversion. Staff with `invoices.view` can read prices;
+   only administrators can change them or deactivate courses.
+2. Complete DMHCA and IBMP's real legal billing names, addresses and applicable
+   tax registration IDs. Issuance is blocked until the company address is set;
+   no legal/tax details are fabricated.
+3. Invoice PDFs and invoice delivery emails use the supplied logos and their
+   palettes: DMHCA navy/red (`#1c1d4e` / `#a91e2c`), IBMP navy/teal
+   (`#091b3c` / `#188574`). Company settings still control the workspace preview
+   and public status page colors. Legal billing details remain snapshotted.
+
+Invoice PDFs follow the reference's angled header/footer, bill-to and invoice
+details, course table, totals, payment schedule and payment details sections.
+The DMHCA PDF embeds `public/DMHCA-invoice-logo.png`, a lossless PNG conversion
+of `public/DMHCA-Logo.webp` (PDF does not support WebP); IBMP embeds
+`public/IBMP-logo.png`. Both assets are included in server output tracing.
+Approved, unexpired online invoices have a clickable **Pay Now** PDF annotation
+and email button. INR opens the saved Razorpay link; USD opens the stable
+invoice payment page, which creates/reuses an eligible Stripe checkout session.
+Pending approval, tax review, paid, expired and financing invoices do not expose
+a payable PDF button. Downloading a PDF never creates a payment link or sends mail.
+Bank account details are not invented; payment details describe the configured
+secure provider or finance arrangement instead.
+
+Set each lead's billing address in Overview, or edit the prefilled invoice
+address. Users with `leads.edit` can save the edited address back to the lead;
+otherwise it is invoice-only. Issuing snapshots the billing name/email/address,
+company details/colors, course item and price. Later catalog, company or lead
+edits do not rewrite issued invoices.
 
 ### Invoice workspace
 
 The main Invoices page and each lead's **Invoices** section share one register,
 searchable status filters, billing form, itemized preview and PDF, approval,
 email and payment actions. The lead section requires `invoices.view`;
-its API checks access to the lead and filters by lead **before** the 200-record
-limit. The main register remains scoped by database row-level security.
+its API checks access to the lead before loading records in 200-record batches.
+The register loads all accessible invoices, not just the latest 200. Admin and
+Super Admin can see every invoice, including archived-lead invoices; other staff
+remain scoped by database row-level security.
 Creation requires `invoices.create`; discount approval and external-financing
 verification require `invoices.approve` (Admin/Super Admin by default). Invoices
 support one-shot, installment, EMI and loan modes. Discounts use a percentage and
 mandatory reason; discounted invoices await approval, while un-discounted
-invoices issue immediately and automatically create a Razorpay Payment Link
-(one-shot/installments) and email the lead plus invoice creator when available.
-Each later installment is a separate invoice linked to its course invoice. The
-database prevents overlapping unpaid installments and amounts beyond the remaining
-course balance.
+invoices issue immediately and automatically create a Razorpay Payment Link for
+INR or Stripe Checkout for USD (full payment/installments). The lead is the
+recipient; both the invoice creator and assigned lead owner are copied,
+deduplicated case-insensitively. A valid lead email, billing address and active
+assigned owner with an email are required. Discounted invoices are delivered
+only after approval.
+Apply `202611050001_invoice_installment_workflow.sql` with `npm run db:migrate`
+before running this workflow. The full catalog price, course discount and course
+tax are calculated once for the enrollment. Enter the **tax-inclusive amount
+actually payable** for installment one; the discount is not applied a second time
+to that payment. Later installments automatically continue the matching lead,
+course, company and currency enrollment, retaining approved pricing. Their maximum
+is the full course total minus confirmed paid installments. Final-payment rounding
+reconciles the itemized discount and tax across the enrollment. A discounted
+enrollment requires approval once; its unchanged subsequent installments inherit
+that approval. Existing historical totals are not recalculated.
+Each installment is a separate numbered invoice linked to its course invoice. The
+database serializes enrollment creation and prevents overlapping unpaid installments,
+including attempts to bypass the parent selection, and amounts beyond the remaining
+course balance. Existing enrollments retain their original total even after
+catalog price changes/deactivation. Historical pre-catalog DMHCA/INR enrollments
+can continue by selecting their original invoice in installment mode without
+inventing a course mapping or changing historical invoices.
+
+#### Fixed tax, approvals and four-day payment terms
+
+Apply `202611050002_invoice_tax_deadline.sql` before deploying this policy.
+New agreements use **18% GST for INR and 0% tax for USD**, calculated on the
+discounted course price. Tax and due date are read-only; the database ignores
+browser-supplied rates/amounts and sets the deadline to **creation + 96 hours**.
+Discount percentage remains editable for new agreements, with a mandatory reason;
+Admin/Super Admin approval is required before any invoice/payment email is sent.
+Existing installment discount agreements remain locked to the original approval.
+Approval does not restart or extend the payment window.
+
+Wholly unpaid existing agreements with different tax rates are flagged for
+**Review & recalculate tax** in invoice details. An admin must reconcile/cancel
+old provider links first; recalculated totals then require **Approve & send
+invoice**, even with no discount. Paid invoices and agreements with confirmed
+installments are not rewritten. Their historic tax agreement is identified in
+the form. The old payment token is invalidated on revision and new provider
+references/idempotency keys distinguish revised invoices.
+Admin and Super Admin with invoice approval permission can use **Approve & send
+invoice** directly in the register's Actions column or in invoice details.
+Invoices needing tax correction show **Review tax before approval** instead,
+which opens the details for review; expired and already-decided invoices cannot
+be approved from the register. Approval always requires confirmation.
+
+New Razorpay links include the exact provider `expire_by` deadline. USD email
+links open the stable CRM invoice page; **Pay securely with Stripe** reuses an
+open Checkout session or creates a new one after verified expiry. Stripe supports
+only 30-minute to 24-hour sessions, so each session has its own provider expiry
+and database history. A final session opened near the deadline may run **up to
+30 minutes after the four-day deadline**, as approved for this workflow. No new
+session is opened after the invoice deadline. Old-session webhook confirmations
+remain valid, and checkout is not renewed when a payment is complete/processing.
+Ambiguous provider creation/cancellation retains a lease for finance reconciliation.
+
+The CRM and public page show **Expired** after the deadline and remove payment
+actions. The public page remains available to display verified receipts. Finance
+can **Reconcile & close expired invoice** (after any Stripe grace period) to
+cancel outstanding provider links and unblock a replacement installment.
+Historical links already issued before this policy need provider reconciliation:
+the migration does not call external merchant APIs or revoke old email links.
 
 Each lead also has **Invoices | Timeline** tabs. Invoice history uses persisted
 creation, approval decisions, SMTP acceptance and verified payment timestamps.
@@ -563,10 +751,37 @@ they do not invent changes for legacy records.
 Invoice and receipt emails use the existing configured **finance SMTP** sender;
 this is separate from personal Gmail in the lead Emails section. SMTP acceptance
 does not guarantee inbox delivery. EMI/loan installments are tracked externally;
-only a verified Razorpay webhook or an authorized staff confirmation with a
-reference and evidence can mark an invoice paid. Missing provider configuration
+only a verified Razorpay/Stripe webhook, authenticated provider verification, or
+an Admin/Super Admin confirmation with a reference and evidence can mark an invoice
+paid. The CRM register refreshes every 15 seconds while invoices await payment or
+approval. **Check payment status** reconciles the saved provider payment if a webhook
+was missed. **Verify payment URL** verifies a pasted Razorpay link (INR) or Stripe
+Checkout/Payment Link (USD) against the configured company merchant account.
+Verification requires a paid/captured payment of the exact invoice amount/currency,
+bound to the invoice or matching billing email. Pasting an unpaid or arbitrary URL
+never marks an invoice paid. Reused payments cannot settle a different invoice.
+Link searches cover the latest 1,000 provider links; ambiguous, split or older
+payments require finance reconciliation. Unpaid pasted URLs are not attached or
+polled; use the existing webhook flow, retry verification after payment, or have
+finance verify evidence. Other external payments (including loans) require admin
+confirmation after independently checking funds received. Finance must reconcile
+any other outstanding payment links to avoid collecting twice.
+Missing provider configuration
 is reported, and ambiguous provider/email operations remain locked for reconciliation.
-Apply the new `202610240001_invoice_payment_links.sql` migration before rollout.
+The public link refreshes every ten seconds while awaiting payment, shows **Paid**
+after verification and removes the payment button. Invoice/receipt email
+acceptance is recorded; SMTP acceptance is not a guarantee of inbox delivery.
+Configure the finance sender to be authorized for both company identities.
+Company choice changes branding, not merchant accounts or settlement currency;
+each currency currently uses the single configured provider account.
+
+Stripe Checkout sessions expire within 24 hours. Normal, confirmed session expiry
+is renewed through the stable public payment page within the invoice deadline;
+finance must reconcile uncertain provider operations before replacing a checkout.
+Never clear locks or retry blindly. Existing payment/email/receipt locks prevent
+duplicate creation or delivery after ambiguous timeouts. Test INR/USD payments,
+discount approval, installment balances and Loan/EMI evidence in provider test mode
+before accepting live payments.
 
 ### Lead workspace and personal Gmail
 
@@ -672,6 +887,67 @@ behavior: leads are archived from active views, with history preserved.
 Overview has a separate record-change/activity timeline, Notes has a note timeline,
 and Emails has an incoming/outgoing message timeline with sender and status.
 
+#### Automatic organization Gmail access (Workspace-managed)
+
+This mode authorizes each active CRM user's own primary Google Workspace mailbox
+without requiring employee OAuth consent. It supports Gmail-hosted mailboxes,
+not Outlook/Yahoo, aliases, groups or arbitrary addresses. CRM lead permissions
+still apply; users cannot select a different sender or impersonate another user.
+
+1. Apply `202611030001_workspace_gmail.sql` using the tracked migration process
+   **before deploying this build**. Existing OAuth connections are preserved.
+2. In your organization's Google Cloud project, enable **Gmail API**. Create a
+   dedicated **service account**, enable Google Workspace domain-wide delegation,
+   and download a JSON key under its Keys tab. It does not need Google Cloud
+   IAM Owner/Editor roles. If organization policy blocks service account keys,
+   consult your administrator; do not weaken that policy without approval.
+3. A Google Workspace **super administrator** opens Admin console > Security >
+   Access and data control > API controls > Manage Domain Wide Delegation.
+   Add the service account's **numeric client_id** (from the JSON, not its email,
+   project ID or Web OAuth client) with these exact scopes:
+
+   ```text
+   https://www.googleapis.com/auth/gmail.readonly,https://www.googleapis.com/auth/gmail.send
+   ```
+
+   Complete additional administrator approval if your organization requires it.
+   Propagation can take up to 24 hours.
+4. As a CRM Admin/Super Admin with integration management access, open
+   **Integrations > Gmail mailbox**, choose **Workspace-managed**, enter
+   `dmhca.in` as the domain and paste the complete JSON into the service account
+   field. Save credentials. The key is encrypted with the existing
+   `AUTH_ENCRYPTION_KEY`, write-only, and never returned through settings reads.
+   Keep that encryption key stable across production instances. A Web OAuth
+   client, client secret and callback registration are not needed in this mode.
+5. Run **Check saved setup**, signed in with your primary `@dmhca.in` mailbox.
+   This requests delegated authorization and verifies your Gmail profile, without
+   reading messages or sending email. Then verify lead sending and inbox sync
+   with two employee CRM accounts. Every user must have an enabled/licensed Gmail
+   mailbox matching their CRM login. No individual **Connect Gmail** is needed.
+
+Automatic authorization occurs when sending or syncing, not as a Google network
+call on every CRM login. Inbox import remains manual and paginated. Users with
+`integrations.view` can sync/reset **their own** inbox; lead sending still
+requires `leads.edit`. Domain mismatch, disabled Gmail, revoked delegation,
+invalid keys and provider failures are reported explicitly, never replaced with
+shared SMTP or another user's credentials. Workspace access is checked afresh
+against the saved configuration and Google when requesting a token.
+
+**Authority and revocation:** Google grants the service account organization-wide
+authority for these scopes, even though CRM limits use to the signed-in login
+mailbox and configured exact domain. Protect the JSON key like an organization
+administrator credential. Do not commit it, put it in `NEXT_PUBLIC_*`, or share it
+with employees. Revoke the grant in Google Admin and disable/delete the key to
+remove Google access; already-issued Google tokens may remain valid until expiry.
+Changing CRM back to OAuth stops new managed requests but is not Google-side
+revocation. Existing OAuth users retain their grants; managed-only users must
+connect individually after switching back. Stored inbox copies and linked lead
+email history are not automatically deleted by changing the mode.
+
+See Google's [domain-wide delegation documentation](https://developers.google.com/identity/protocols/oauth2/service-account#delegatingauthority).
+
+#### Per-user Gmail OAuth (default)
+
 Enable Gmail API in Google Cloud, configure the OAuth consent screen and its
 test users or approved production audience, and save `GOOGLE_CLIENT_ID`,
 `GOOGLE_CLIENT_SECRET` and `GOOGLE_REDIRECT_URI` in **Integrations > Gmail mailbox**.
@@ -688,11 +964,23 @@ read-only and send scopes, PKCE and browser/session-bound,
 single-use state; credentials are stored encrypted in service-only tables.
 Google may require app verification before external users can authorize access.
 
+When local and live share a database, register both
+`http://localhost:3000/api/auth/gmail/callback` and the live HTTPS callback on the
+Google OAuth client. Set `NEXT_PUBLIC_APP_URL` and `GOOGLE_REDIRECT_URI` separately
+in each environment. The server's `GOOGLE_REDIRECT_URI` overrides the callback in
+saved CRM Gmail settings, without replacing shared OAuth client credentials.
+Workspace-managed access does not use an OAuth callback. Public provider webhooks
+cannot reach localhost directly; use a public development tunnel or the provider's
+local forwarding tool, with that environment's webhook signing secrets.
+
 Sync is a **manual pull** with durable page queues and Gmail history cursors.
 Continue syncing until caught up; no scheduler is implied. Expired Gmail history
-requires the explicit reset action. Attachments are not downloaded.
+requires the explicit reset action. Users with `leads.edit` or `integrations.view`
+can view and sync only their own inbox; database row-level security enforces this
+user boundary. Attachments are not downloaded.
 Lead email is sent through the Gmail API using only the **signed-in user's**
-encrypted mailbox credentials, never the lead owner's credentials or shared SMTP.
+encrypted OAuth credentials or administrator-authorized delegated access, never
+the lead owner's credentials or shared SMTP.
 The connected Google Workspace mailbox must match the authenticated CRM login
 email (case-insensitive). OAuth suggests that address, rejects a different
 mailbox before saving credentials, and sending rechecks existing connections.

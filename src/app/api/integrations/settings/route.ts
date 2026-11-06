@@ -6,11 +6,11 @@ import { checkOrigin } from "@/lib/server/login";
 import { integrationDefinitions } from "@/lib/integration-definitions";
 import { getSupabaseAdminClient } from "@/lib/supabase/server";
 import { parseInput, databaseError } from "@/lib/server/operational";
-import { assertIntegrationAdmin, decryptIntegrationValues, encryptIntegrationValues, getIntegrationConfig, integrationRecord, validateIntegrationConfig } from "@/lib/server/integration-settings";
+import { assertIntegrationAdmin, decryptIntegrationValues, encryptIntegrationValues, getIntegrationConfig, integrationRecord, integrationRuntimeConfig, validateIntegrationConfig } from "@/lib/server/integration-settings";
 import { checkIntegration } from "@/lib/server/integration-checks";
 import { appUrl } from "@/lib/server/env";
 
-const providerSchema = z.enum(["zoom", "razorpay", "smtp", "gmail", "intake", "facebook"]);
+const providerSchema = z.enum(["zoom", "razorpay", "stripe", "smtp", "gmail", "intake", "facebook"]);
 export async function GET() {
   try {
     const { user } = await requireUser("integrations.view");
@@ -18,7 +18,7 @@ export async function GET() {
     if (!canManage) return NextResponse.json({ canManage: false, settings: [], appUrl: appUrl() }, { headers: { "Cache-Control": "no-store" } });
     const settings = await Promise.all(integrationDefinitions.map(async definition => {
       const record = await integrationRecord(definition.id);
-      const values = record ? decryptIntegrationValues(record.encrypted_values) : await getIntegrationConfig(definition.id);
+      const values = record ? integrationRuntimeConfig(definition.id, decryptIntegrationValues(record.encrypted_values)) : await getIntegrationConfig(definition.id);
       return {
         provider: definition.id, source: record ? "crm" : "environment", revision: record?.revision ?? null,
         values: Object.fromEntries(definition.fields.filter(field => !field.secret).map(field => [field.key, values[field.key] ?? ""])),
@@ -41,7 +41,7 @@ export async function POST(request: Request) {
     if (input.action === "test_email" && (input.provider !== "smtp" || input.recipient !== user.email)) throw new HttpError(400, "Test emails may only be sent to your own CRM login address.");
     const row = await integrationRecord(input.provider);
     if ((row?.revision ?? null) !== input.revision) throw new HttpError(409, "Integration settings changed in another session. Refresh before saving or testing.");
-    const current = row ? decryptIntegrationValues(row.encrypted_values) : await getIntegrationConfig(input.provider);
+    const current = row ? integrationRuntimeConfig(input.provider, decryptIntegrationValues(row.encrypted_values)) : await getIntegrationConfig(input.provider);
     const values = validateIntegrationConfig(input.provider, { ...current, ...Object.fromEntries(Object.entries(supplied).filter(([key, value]) => value !== "" || !definition.fields.find(field => field.key === key)?.secret)) });
     const admin = getSupabaseAdminClient();
     if (input.action === "save") {
@@ -61,7 +61,7 @@ export async function POST(request: Request) {
     if (Object.keys(supplied).length) throw new HttpError(400, "Save changes before running a connection check.");
     let message: string;
     try {
-      message = await checkIntegration(input.provider, values, input.action === "test_email" ? input.recipient : undefined);
+      message = await checkIntegration(input.provider, values, input.provider === "gmail" ? user.email : input.action === "test_email" ? input.recipient : undefined);
     } catch (error) {
       if (row) {
         const { error: saveError } = await admin.from("integration_credentials").update({ tested_at: new Date().toISOString(), test_status: "failed", test_message: "Connection check failed. Check provider credentials, permissions and network access." }).eq("provider", input.provider).eq("revision", row.revision);

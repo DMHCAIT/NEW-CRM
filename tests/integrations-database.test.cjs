@@ -173,3 +173,36 @@ test("Gmail batch commits atomically persist messages, linked email and durable 
   assert.equal((await db.query("select * from public.gmail_connections")).rows.length, 0);
   assert.equal((await db.query("select * from public.gmail_messages")).rows.length, 0);
 });
+
+test("Gmail inbox read permission allows lead editors to read only their own messages", async () => {
+  await service(tx => tx.query(`insert into public.gmail_messages(user_id,gmail_message_id,subject)
+    values($1,'permission-owner','Owner inbox'),($2,'permission-hidden','Hidden inbox')`, [owner, hidden]));
+  await db.query(`insert into public.user_permission_overrides(user_id,permission_key,allowed)
+    values($1,'integrations.view',false)
+    on conflict(user_id,permission_key) do update set allowed=excluded.allowed`, [owner]);
+  try {
+    const messages = await asUser(tx => tx.query("select gmail_message_id from public.gmail_messages order by gmail_message_id"));
+    assert.deepEqual(messages.rows.map(row => row.gmail_message_id), ["permission-owner"]);
+  } finally {
+    await db.query(`update public.user_permission_overrides set allowed=true
+      where user_id=$1 and permission_key='integrations.view'`, [owner]);
+  }
+});
+
+test("managed sync rows require no OAuth tokens, remain service-only and can switch back to OAuth", async () => {
+  await service(tx => tx.query("insert into public.gmail_connections(user_id,email,auth_mode) values($1,'owner@example.com','workspace')", [owner]));
+  let row = (await service(tx => tx.query("select * from public.gmail_connections where user_id=$1", [owner]))).rows[0];
+  assert.equal(row.encrypted_tokens, null);
+  assert.equal(row.auth_mode, "workspace");
+  assert.equal(row.sync_state.mode, "bootstrap");
+  await assert.rejects(asUser(tx => tx.query("select * from public.gmail_connections")), /permission denied/);
+  await assert.rejects(asUser(tx => tx.query("insert into public.gmail_connections(user_id,email,auth_mode) values($1,'other@example.com','workspace')", [hidden])), /permission denied/);
+  await assert.rejects(service(tx => tx.query("update public.gmail_connections set auth_mode='oauth' where user_id=$1", [owner])), /gmail_oauth_tokens_required/);
+  await service(tx => tx.query("select public.integration_set_gmail($1,'reset')", [owner]));
+  await service(tx => tx.query("select public.integration_set_gmail($1,'connect','owner@example.com','new-encrypted-oauth-token','900')", [owner]));
+  row = (await service(tx => tx.query("select * from public.gmail_connections where user_id=$1", [owner]))).rows[0];
+  assert.equal(row.auth_mode, "oauth");
+  assert.equal(row.encrypted_tokens, "new-encrypted-oauth-token");
+  assert.equal(row.sync_state.baseline, "900");
+  await service(tx => tx.query("select public.integration_set_gmail($1,'disconnect')", [owner]));
+});

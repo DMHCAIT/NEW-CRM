@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { requireEnv } from "@/lib/server/env";
 import { getIntegrationConfig, requireIntegrationValue } from "@/lib/server/integration-settings";
+import { invoicePaymentReference } from "@/lib/invoice-policy";
 
 async function authHeader() {
   const config = await getIntegrationConfig("razorpay");
@@ -8,6 +9,15 @@ async function authHeader() {
 }
 
 export type RazorpayPaymentLink = { id: string; short_url: string; status: string };
+
+export async function razorpayRequest(path: string, method = "GET"): Promise<unknown> {
+  const response = await fetch(`https://api.razorpay.com/v1/${path}`, {
+    method, headers: { Authorization: await authHeader() }, redirect: "error", cache: "no-store",
+    signal: AbortSignal.timeout(20000),
+  });
+  if (!response.ok) throw new Error(`Razorpay verification failed (HTTP ${response.status}). Check the configured company account.`);
+  return response.json();
+}
 
 export function createPublicStatusToken() {
   const token = randomBytes(32).toString("base64url");
@@ -18,8 +28,12 @@ export function createPublicStatusToken() {
 export async function createInvoicePaymentLink(input: {
   invoiceId: string; invoiceNo: string; leadId: string; leadName: string; leadEmail: string;
   amount: number; currency: string;
+  expiresAt?: number;
+  callbackUrl?: string;
+  revision?: number;
 }) {
   const amountPaise = Math.round(input.amount * 100);
+  if (input.currency !== "INR") throw new Error("Razorpay invoice payments must use INR. USD invoices use Stripe.");
   if (amountPaise < 100) throw new Error("Invoice total must be at least ₹1 to create a Razorpay Payment Link.");
   const response = await fetch("https://api.razorpay.com/v1/payment_links", {
     method: "POST",
@@ -28,9 +42,11 @@ export async function createInvoicePaymentLink(input: {
     body: JSON.stringify({
       amount: amountPaise,
       currency: input.currency,
-      reference_id: input.invoiceId,
+      expire_by: input.expiresAt,
+      reference_id: invoicePaymentReference(input.invoiceId, input.revision),
       description: `Invoice ${input.invoiceNo}`.slice(0, 255),
       customer: { name: input.leadName.slice(0, 100), email: input.leadEmail },
+      ...(input.callbackUrl ? { callback_url: input.callbackUrl, callback_method: "get" } : {}),
       notify: { sms: false, email: false },
       reminder_enable: false,
       notes: { invoice_id: input.invoiceId, lead_id: input.leadId, invoice_no: input.invoiceNo },

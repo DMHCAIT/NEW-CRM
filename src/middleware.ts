@@ -8,6 +8,7 @@ const permissionRoutes: [string, Permission][] = [
   ["/settings/access", "access.manage"], ["/settings", "settings.manage"], ["/users", "users.view"],
   ["/leads/import", "leads.import"], ["/leads", "leads.view"], ["/pipeline", "pipeline.view"],
   ["/meetings", "meetings.view"], ["/invoices", "invoices.view"], ["/reports", "reports.view"],
+  ["/courses", "invoices.view"],
   ["/automations", "automations.view"], ["/integrations", "integrations.view"], ["/", "dashboard.view"],
 ];
 

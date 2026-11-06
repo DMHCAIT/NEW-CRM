@@ -11,7 +11,7 @@ export async function GET() {
     })));
     return NextResponse.json({
       integrations, unsupported: [],
-      note: "Save encrypted credentials in CRM, then run a connection check. Provider permissions, user consent and webhook subscriptions must also be completed.",
+      note: "Save encrypted credentials in CRM, then run a connection check. Provider permissions, user consent or Workspace administrator delegation, and webhook subscriptions must also be completed.",
     }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) { return jsonError(error); }
 }

@@ -4,6 +4,51 @@ const { resolve, join } = require("node:path");
 const { Client } = require("pg");
 
 const root = resolve(__dirname, "..");
+const requiredColumns = [
+  "leads.billing_address", "gmail_connections.auth_mode",
+  "courses.price_inr", "courses.price_usd", "invoice_companies.code",
+  "invoices.course_id", "invoices.company_code", "invoices.company_snapshot",
+  "invoices.billing_address", "invoices.status_token_encrypted",
+  "invoices.stripe_session_id", "invoices.stripe_checkout_url", "payments.stripe_payment_id",
+  "invoices.enrollment_subtotal", "invoices.enrollment_discount", "invoices.enrollment_tax",
+  "invoices.enrollment_tax_percent", "invoices.installment_number",
+  "invoices.payment_expires_at", "invoices.stripe_expires_at", "invoices.tax_review_required",
+  "invoices.pricing_review_note", "invoices.payment_revision", "invoice_checkout_sessions.session_id",
+];
+
+function databaseOptions(env, projectRoot = root) {
+  if (!env.DATABASE_URL) throw new Error("DATABASE_URL is required. Configure it in .env.local for local use or in the live server environment for deployment.");
+  let url;
+  try { url = new URL(env.DATABASE_URL); }
+  catch { throw new Error("DATABASE_URL must be a valid PostgreSQL URL."); }
+  if (!["postgres:", "postgresql:"].includes(url.protocol)) throw new Error("DATABASE_URL must be a PostgreSQL URL.");
+  if (["host", "hostaddr", "port"].some(parameter => url.searchParams.has(parameter))) throw new Error("Set the database host and port in the DATABASE_URL authority, not in query parameters.");
+  const sslMode = env.DATABASE_SSL_MODE || "verify";
+  if (!["verify", "disable"].includes(sslMode)) throw new Error("DATABASE_SSL_MODE must be verify or disable.");
+  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  if (sslMode === "disable" && !loopback) throw new Error("Disabling database TLS is permitted only for a local loopback database.");
+  let ssl = false;
+  if (sslMode === "verify") {
+    let ca;
+    try { ca = readFileSync(resolve(projectRoot, env.DATABASE_CA_CERT_PATH || "supabase-ca.crt"), "utf8"); }
+    catch { throw new Error("Database CA certificate could not be read. Set DATABASE_CA_CERT_PATH to the certificate downloaded from Supabase Database > Settings > SSL Configuration."); }
+    ssl = { ca, rejectUnauthorized: true };
+  }
+  for (const parameter of ["sslmode", "sslcert", "sslkey", "sslrootcert", "ssl", "uselibpqcompat"]) url.searchParams.delete(parameter);
+  return {
+    connectionString: url.toString(), ssl,
+    connectionTimeoutMillis: 20000, query_timeout: 120000,
+    application_name: "dmhca-crm-migrations",
+  };
+}
+
+async function missingSchemaColumns(client) {
+  const tables = [...new Set(requiredColumns.map(name => name.split(".")[0]))];
+  const { rows } = await client.query(`select table_name || '.' || column_name as name
+    from information_schema.columns where table_schema='public' and table_name=any($1::text[])`, [tables]);
+  const available = new Set(rows.map(row => row.name));
+  return requiredColumns.filter(name => !available.has(name));
+}
 
 function migrationBody(sql) {
   return sql.replace(/^\s*begin;\s*/i, "").replace(/\s*commit;\s*$/i, "");
@@ -31,27 +76,20 @@ async function inspect(client) {
 }
 
 async function main() {
-  require("@next/env").loadEnvConfig(root);
   const action = process.argv[2];
   if (!["check", "migrate"].includes(action)) throw new Error("Use npm run db:check or npm run db:migrate.");
-  if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required in .env.local.");
-  const url = new URL(process.env.DATABASE_URL);
-  if (!["postgres:", "postgresql:"].includes(url.protocol)) throw new Error("DATABASE_URL must be a PostgreSQL URL.");
-  const caPath = resolve(root, process.env.DATABASE_CA_CERT_PATH || "supabase-ca.crt");
-  const ca = readFileSync(caPath, "utf8");
-  // Set TLS explicitly so connection-string SSL parameters cannot disable verification.
-  for (const parameter of ["sslmode", "sslcert", "sslkey", "sslrootcert", "ssl", "uselibpqcompat"]) url.searchParams.delete(parameter);
-  const client = new Client({
-    connectionString: url.toString(),
-    ssl: { ca, rejectUnauthorized: true },
-    connectionTimeoutMillis: 20000,
-    query_timeout: 120000,
-    application_name: "dmhca-crm-migrations",
-  });
+  const flags = process.argv.slice(3);
+  if (flags.some(flag => flag !== "--live")) throw new Error("Only the --live option is supported. Live mode reads server environment variables, not local environment files.");
+  const live = flags.includes("--live");
+  if (!live) require("@next/env").loadEnvConfig(root, true);
+  const options = databaseOptions(process.env);
+  const client = new Client(options);
   let transaction = false;
+  let connected = false;
   try {
     await client.connect();
-    console.log("Database connection: certificate and hostname verified.");
+    connected = true;
+    console.log(options.ssl ? "Database connection: certificate and hostname verified." : "Database connection: local loopback, TLS explicitly disabled.");
     const directory = join(root, "supabase", "migrations");
     const files = readdirSync(directory).filter((name) => /^\d+_[a-z0-9_]+\.sql$/.test(name)).sort().map((filename) => {
       const sql = readFileSync(join(directory, filename), "utf8");
@@ -70,6 +108,10 @@ async function main() {
     if (action === "check") {
       if (!state.tracked && state.tables.length) console.log("Existing untracked tables detected. Migration execution will refuse automatic changes.");
       for (const file of pending) console.log("Pending: " + file.filename);
+      const missing = await missingSchemaColumns(client);
+      if (missing.length) console.log("Missing required schema columns: " + missing.join(", "));
+      if (pending.length || missing.length) throw new Error(`Database schema is not ready. Run npm run db:migrate${live ? ":live" : ""} against this database before starting or deploying the app. Reconcile untracked schemas first.`);
+      console.log("Database schema is ready.");
       return;
     }
     if (!state.history.length) {
@@ -93,6 +135,8 @@ async function main() {
       await client.query(migrationBody(file.sql));
       await client.query("insert into crm_migrations.history(filename,sha256) values($1,$2)", [file.filename, file.sha256]);
     }
+    const missing = await missingSchemaColumns(client);
+    if (missing.length) throw new Error("Migration history and database schema disagree. Missing columns: " + missing.join(", ") + ". Reconcile the schema before deployment.");
     await client.query("notify pgrst,'reload schema'");
     await client.query("commit");
     transaction = false;
@@ -104,6 +148,7 @@ async function main() {
       try { await client.query("rollback"); console.error("Migration transaction rolled back."); }
       catch { console.error("Rollback could not be confirmed; inspect migration history before retrying."); }
     }
+    if (!connected) throw new Error(`Database connection failed (${error.code || "timeout/configuration"}). Check the exact Supabase Session pooler host, port, username and database password, network/firewall access and CA certificate. Direct connections require IPv6 on some projects. No migrations were applied.`);
     if (error.code) throw new Error(`Database operation failed (${error.code}). Inspect the database configuration and migration SQL.`);
     throw error;
   } finally {
@@ -120,4 +165,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { migrationBody, pendingMigrations };
+module.exports = { migrationBody, pendingMigrations, databaseOptions, missingSchemaColumns };

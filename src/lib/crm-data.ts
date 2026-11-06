@@ -3,7 +3,7 @@ import { isCrmRole } from "@/lib/permissions";
 import type { Lead, Profile } from "@/lib/types";
 
 export const LEAD_SELECT = [
-  "id,name,phone,country_code,alt_phone,email,country,course,qualification,category,stage_id,source,assignee_id,created_by,modified_by",
+  "id,name,phone,country_code,alt_phone,email,country,billing_address,course,qualification,category,stage_id,source,assignee_id,created_by,modified_by",
   "closure_fee,next_followup_at,last_visit_at,merged_into_id,is_archived,created_at,modified_at,has_been_edited,edited_at",
   "stage:lead_stages(name)",
   "assignee:profiles!leads_assignee_id_fkey(full_name)",
@@ -27,6 +27,7 @@ export type LeadRow = {
   alt_phone: string | null;
   email: string | null;
   country: string | null;
+  billing_address?: string | null;
   course: string | null;
   qualification: string | null;
   category?: string | null;
@@ -114,6 +115,7 @@ export function mapLead(row: LeadRow): Lead {
     mergedIntoId: row.merged_into_id ?? undefined,
     isArchived: row.is_archived,
     closureFee: Number(row.closure_fee),
+    billingAddress: row.billing_address ?? "",
   };
 }
 

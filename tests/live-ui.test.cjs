@@ -104,6 +104,10 @@ async function renderPage(file, { states, overrides = {}, shellUser = user } = {
 }
 
 const operations = {
+  "/api/courses": { courses: [{ id: "course-1", name: "Clinical research", price_inr: 25000, price_usd: 250, is_active: true }], companies: [
+    { code: "DMHCA", legal_name: "DMHCA", address: "Company billing address", tax_id: "", primary_color: "#800020", accent_color: "#f7cbd7" },
+    { code: "IBMP", legal_name: "IBMP", address: "Company billing address", tax_id: "", primary_color: "#0b1e3b", accent_color: "#d7b770" },
+  ], canManage: true },
   "/api/meetings": { meetings: [{ id: "meeting-1", title: "Admissions consultation", lead_id: lead.id, host_id: id, join_url: null, start_at: "2026-10-21T09:00:00Z", duration_min: 30, status: "scheduled", zoom_meeting_id: null }], leads: [lead], userId: id, canManage: true, zoom: unconfigured },
   "/api/invoices": { invoices: [{ id: "invoice-1", invoice_no: "DMHCA-2026-001", lead_id: lead.id, created_by: id, subtotal: 25000, total: 25000, tax_amount: 0, discount_amount: 0, discount_percent: 0, payment_type: "one_shot", course_total: 25000, parent_invoice_id: null, payment_verified_by: null, razorpay_short_url: null, razorpay_payment_link_id: null, email_message_id: null, email_lock_at: null, status: "pending_approval", created_at: "2026-10-21T09:00:00Z", due_date: "2026-11-01", invoice_items: [{ description: "Clinical research admission", quantity: 1, unit_price: 25000, amount: 25000 }], invoice_approvals: [] }], leads: [lead], profiles: [{ id, full_name: profile.fullName }], userId: id, canCreate: true, canApprove: true, razorpay: unconfigured, smtp: configured },
   "/api/automations": { automations: [{ id: "rule-1", name: "Follow-up reminder", trigger_config: { type: "manual" }, actions_json: [{ type: "notify_me", days: 1 }], is_active: true }], logs: [], leads: [lead], canManage: true, canEditLeads: true },
@@ -111,7 +115,7 @@ const operations = {
   "/api/integrations/settings": { canManage: true, settings: integrationSettings, appUrl: "https://crm.example" },
   "/api/integrations/facebook-pages": { pages: [{ page_id: "12345678", page_name: "Admissions India", is_active: true, tokenConfigured: true, tokenMask: "********", created_at: "2026-10-23T09:00:00Z", updated_at: "2026-10-23T09:00:00Z" }] },
   "/api/integrations/sources": { sources: [{ id: "source-1", name: "Website enquiry", is_active: true, allowed_origins: [], intake_source_settings: { channel: "website", owner_id: id, stage_id: "stage-1", facebook_page_id: null, facebook_form_id: null } }], owners: [{ id, full_name: profile.fullName }], stages, canManage: true },
-  "/api/integrations/gmail": { connection: null, messages: [], canManage: true, canConnect: true },
+  "/api/integrations/gmail": { connection: null, messages: [], canSync: true, canConnect: true },
 };
 const opMock = { ...op, useOperationalData: (url) => operational(operations[url]) };
 const emptyIntegrationOperations = {
@@ -195,7 +199,8 @@ const cases = [
   ["report-list", "src\\app\\reports\\[id]\\[mode]\\page.tsx", { overrides: { "@/components/reports-data-provider": { useReportsData: () => ({ user, leads: [lead], reports: [report] }) } } }],
   ["report-count", "src\\app\\reports\\[id]\\[mode]\\page.tsx", { overrides: { "next/navigation": { useParams: () => ({ id: report.id, mode: "count" }) }, "@/components/reports-data-provider": { useReportsData: () => ({ user, leads: [lead], reports: [report] }) } } }],
   ["meetings", "src\\app\\meetings\\page.tsx", { states: [true, "", null, "", new Date(2026, 9, 1)], overrides: { "../integrations/operational-ui": opMock } }],
-  ["invoices", "src\\app\\invoices\\page.tsx", { states: [true, "", "", "", lead.id, "2", "12500", "1800", "500"], overrides: { "@/app/integrations/operational-ui": opMock } }],
+  ["invoices", "src\\app\\invoices\\page.tsx", { states: [true, "", "", "", lead.id, null, "", "", "course-1", "DMHCA", "INR", "one_shot"], overrides: { "@/app/integrations/operational-ui": opMock } }],
+  ["courses", "src\\app\\courses\\page.tsx", { overrides: { "@/app/integrations/operational-ui": opMock } }],
   ["invoice-detail", "src\\app\\invoices\\page.tsx", { states: [false, "", "", "invoice-1"], overrides: { "@/app/integrations/operational-ui": opMock } }],
   ["lead-invoices", "src\\app\\leads\\[id]\\page.tsx", { states: [false,false,"","","","",false,false,"","","invoices"], overrides: {
     "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({ data: { ...live, lead, notes: [], activities: [], emails: [] }, loading: false, error: "", reload() {}, setError() {} }) },
@@ -358,7 +363,7 @@ function elements(node) {
   return [node, ...elements(node.props?.children)];
 }
 
-function invoiceHarness(data = operations["/api/invoices"], initial = [], overrides = {}) {
+function invoiceHarness(data = operations["/api/invoices"], initial = [], overrides = {}, stateOverrides = {}) {
   const states = [...initial], requests = [], urls = [];
   let index = 0;
   const { InvoiceWorkspace } = load("src\\components\\invoice-workspace.tsx", {
@@ -366,26 +371,46 @@ function invoiceHarness(data = operations["/api/invoices"], initial = [], overri
     react: { ...React, useEffect() {}, useRef: () => ({ current: null }), useState(initial) { const key = index++; if (!(key in states)) states[key] = initial; return [states[key], value => { states[key] = value; }]; } },
     "@/app/integrations/operational-ui": { ...op, ...overrides, useOperationalData: url => {
       urls.push(url);
-      return { ...operational(data), mutate: async (...args) => { requests.push(args); return true; } };
+      return { ...operational(data), ...stateOverrides, mutate: async (...args) => { requests.push(args); return true; } };
     } },
   });
   return { states, requests, urls, render(props = {}) { index = 0; return InvoiceWorkspace(props); } };
 }
 
 test("invoice form scopes to the lead, previews percentage discounts and submits the invoice contract", async () => {
-  const payload = { lead_id: lead.id, quantity: "2", unit_price: "12500", tax_amount: "1800", discount_percent: "2", description: "Admission", due_date: "2026-12-01" };
-  const ui = invoiceHarness(undefined, [true, "", "", "", lead.id, "2", "12500", "1800", "2"], { formValues: () => payload });
-  let nodes = elements(ui.render({ leadId: lead.id }));
+  const payload = { lead_id: lead.id, course_id: "course-1", company_code: "DMHCA", currency: "INR", billing_address: "Lead address",
+    tax_amount: "4410.00", discount_percent: "2", due_date: "2026-12-01", save_billing_address: "on" };
+  const ui = invoiceHarness(undefined, [true, "", "", ""]);
+  const form = elements(ui.render({ leadId: lead.id })).find(node => node.type?.name === "InvoiceCreateForm");
   assert.equal(ui.urls[0], "/api/invoices?leadId=lead-1");
+  assert.equal(form.props.leadId,lead.id);
+  const { InvoiceCreateForm } = load("src\\components\\invoice-create-form.tsx", {
+    react: hookStates([lead.id,{lead:{id:lead.id,name:lead.name,email:lead.email,billing_address:"Lead address",phone:"+91 98765 43210",owner_name:"Dilip Yerra"},canSaveAddress:true},"","Lead address","course-1","DMHCA","INR","one_shot","","","2","18"]),
+    "@/app/integrations/operational-ui":{...opMock,formValues:()=>payload},
+  });
+  const nodes=elements(InvoiceCreateForm(form.props));
   assert.equal(nodes.find(node => node.props?.name === "lead_id").props.value, lead.id);
-  assert.ok(!nodes.some(node => node.props?.ariaLabel === "Invoice lead"));
+  assert.ok(nodes.some(node => node.props?.ariaLabel === "Invoice course"));
+  assert.ok(!nodes.some(node => node.props?.name === "unit_price"));
   assert.equal(nodes.find(node => node.props?.name === "discount_reason").props.required, true);
   assert.equal(nodes.find(node => node.props?.name === "discount_percent").props.max, 100);
-  assert.ok(nodes.some(node => node.type === "dd" && /26,300/.test(node.props.children)));
+  const field = label => nodes.find(node => node.props?.["aria-label"] === label).props.value;
+  assert.equal(field("Lead Owner"), "Dilip Yerra");
+  assert.equal(field("Mobile"), "+91 98765 43210");
+  assert.equal(field("Total Price"), "25000.00");
+  assert.equal(field("Total Discount"), "500.00");
+  assert.equal(field("Total Tax"), "4410.00");
+  assert.equal(field("Total Amount"), "28910.00");
+  assert.equal(nodes.find(node=>node.props?.["aria-label"]==="Tax %").props.readOnly,true);
+  assert.equal(nodes.find(node=>node.props?.["aria-label"]==="Tax %").props.onChange,undefined);
+  assert.equal(nodes.find(node=>node.props?.["aria-label"]==="Due Date").props.readOnly,true);
+  assert.equal(nodes.find(node=>node.props?.["aria-label"]==="Due Date").props.onChange,undefined);
+  assert.equal(nodes.find(node=>node.props?.name==="discount_percent").props.readOnly,false);
+  assert.equal(nodes.find(node => node.props?.name === "tax_amount").props.value, "4410.00");
+  assert.equal(field("Approver"), "Admin / Super Admin");
   await nodes.find(node => node.type === "form").props.onSubmit({ preventDefault() {}, currentTarget: {} });
-  assert.deepEqual(ui.requests, [["/api/invoices", "POST", payload]]);
+  assert.deepEqual(ui.requests, [["/api/invoices", "POST", {...payload,parent_invoice_id:"",discount_percent:2,tax_percent:18,save_billing_address:true}]]);
   assert.equal(ui.states[0], false);
-  assert.equal(ui.states[5], "1");
 });
 
 test("invoice details always reflect current record status, provider locks and permissions", () => {
@@ -407,15 +432,67 @@ test("invoice details always reflect current record status, provider locks and p
   assert.ok(nodes.some(node => node.type === "a" && node.props.href === "/api/invoices/invoice-1/pdf"));
 });
 
-test("installment form only offers server-approved paid course invoices and shows remaining balance", () => {
+test("admin invoice register provides confirmed approval without opening details", t => {
+  const previous = global.confirm;
+  t.after(() => { if (previous === undefined) delete global.confirm; else global.confirm = previous; });
   const data = structuredClone(operations["/api/invoices"]);
-  data.installmentParents = [{ id: "root-invoice", invoice_no: "INV-ROOT", course_total: 300, currency: "INR", balance: 200 }];
+  const invoice = data.invoices[0];
+  const ui = invoiceHarness(data);
+  const approval = elements(ui.render()).find(node => node.props?.["aria-label"] === `Approve and send invoice ${invoice.invoice_no}`);
+  assert.ok(approval, "approval must be visible directly in the register");
+  assert.equal(approval.props.disabled, false);
+  let message;
+  global.confirm = value => { message = value; return false; };
+  approval.props.onClick();
+  assert.equal(ui.requests.length, 0);
+  assert.match(message, /emailed automatically/);
+  global.confirm = () => true;
+  approval.props.onClick();
+  assert.deepEqual(ui.requests, [[`/api/invoices/${invoice.id}`, "PATCH", { action: "approve" }]]);
+});
+
+test("register approval respects permission, tax review, decided states and busy operations", () => {
+  const data = structuredClone(operations["/api/invoices"]);
+  const invoice = data.invoices[0];
+  const approvalLabel = `Approve and send invoice ${invoice.invoice_no}`;
+  const nodes = () => elements(invoiceHarness(data).render());
+  data.canApprove = false;
+  assert.ok(!nodes().some(node => node.props?.["aria-label"] === approvalLabel));
+  data.canApprove = true; invoice.tax_review_required = true;
+  assert.ok(!nodes().some(node => node.props?.["aria-label"] === approvalLabel));
+  const ui = invoiceHarness(data);
+  const review = elements(ui.render()).find(node => node.props?.children === "Review tax before approval");
+  assert.ok(review);
+  review.props.onClick();
+  assert.equal(ui.states[3], invoice.id);
+  assert.equal(ui.requests.length, 0, "tax review opens details without approving or changing pricing");
+  invoice.tax_review_required = false;
+  for (const status of ["sent", "paid", "expired", "rejected", "cancelled"]) {
+    invoice.status = status;
+    assert.ok(!nodes().some(node => node.props?.["aria-label"] === approvalLabel), status);
+  }
+  invoice.status = "pending_approval";
+  const busy = invoiceHarness(data, [], {}, { busy: true });
+  assert.equal(elements(busy.render()).find(node => node.props?.["aria-label"] === approvalLabel).props.disabled, true);
+});
+
+test("installment form continues the matching enrollment with its remaining balance and approved pricing", () => {
+  const data = structuredClone(operations["/api/invoices"]);
+  data.installmentParents = [{ id: "root-invoice", invoice_no: "INV-ROOT", course_total: 300, currency: "INR", balance: 200, lead_id:lead.id,course_id:"course-1",company_code:"DMHCA",
+    enrollment_subtotal:300,enrollment_discount:0,enrollment_tax:0,tax_percent:0,discount_percent:0,next_installment:2,pending:false },
+    { id:"other-company",invoice_no:"IBMP-ROOT",course_total:300,currency:"INR",balance:200,lead_id:lead.id,course_id:"course-1",company_code:"IBMP" }];
   data.courseBalances = { "root-invoice": 200 };
-  const ui = invoiceHarness(data, [true, "", "", "", lead.id, "1", "100", "0", "0", "installments", "root-invoice"]);
-  const nodes = elements(ui.render());
-  assert.ok(nodes.some(node => node.type === "option" && node.props.value === "root-invoice" && /200/.test(node.props.children)));
-  assert.ok(nodes.some(node => node.type === "input" && node.props.name === "course_total" && node.props.value === 300));
-  assert.ok(nodes.some(node => node.type === "p" && /Remaining course balance after verified payments/.test(node.props.children)));
+  const {InvoiceCreateForm}=load("src\\components\\invoice-create-form.tsx",{
+    react:hookStates([lead.id,null,"","Address","course-1","DMHCA","INR","installments","root-invoice","100","0","0"]),
+    "@/app/integrations/operational-ui":opMock,
+  });
+  const nodes=elements(InvoiceCreateForm({leads:[lead],parents:data.installmentParents,busy:false,onSubmit:async()=>true,onClose(){}}));
+  assert.ok(nodes.some(node => node.type === "option" && node.props.value === "root-invoice" && /200/.test(JSON.stringify(node.props.children))));
+  assert.ok(!nodes.some(node=>node.type==="option"&&node.props.value==="other-company"));
+  assert.equal(nodes.find(node=>node.props?.name==="installment_amount").props.max,200);
+  assert.equal(nodes.find(node=>node.props?.["aria-label"]==="Price").props.value,"300.00");
+  assert.ok(nodes.some(node => node.type === "dt" && node.props.children === "Already paid"));
+  assert.ok(nodes.some(node => node.props?.label==="Installment 2 Amount (including tax)"));
 });
 
 test("invoice timeline uses only persisted events with actors and never renders billing controls", () => {
@@ -430,6 +507,47 @@ test("invoice timeline uses only persisted events with actors and never renders 
   assert.doesNotMatch(html, /<form|Create invoice|Invoice register|invoice-metrics/);
   assert.ok(html.indexOf("Payment received") < html.indexOf("Invoice issued"));
   assert.equal((html.match(/class="invoice-event"/g) ?? []).length, 4);
+});
+
+test("first installment previews full catalog pricing separately from the payable amount",()=>{
+  const {InvoiceCreateForm}=load("src\\components\\invoice-create-form.tsx",{
+    react:hookStates([lead.id,{lead:{id:lead.id,email:lead.email},canSaveAddress:true},"","Address","course-1","DMHCA","INR","installments","","5000","10","18"]),
+    "@/app/integrations/operational-ui":opMock,
+  });
+  const nodes=elements(InvoiceCreateForm({leads:[lead],parents:[],busy:false,onSubmit:async()=>true,onClose(){}}));
+  assert.equal(nodes.find(node=>node.props?.["aria-label"]==="Price").props.value,"25000.00");
+  assert.equal(nodes.find(node=>node.props?.["aria-label"]==="Total Amount").props.value,"26550.00");
+  assert.equal(nodes.find(node=>node.props?.name==="installment_amount").props.value,"5000");
+  assert.equal(nodes.find(node=>node.props?.name==="installment_amount").props.max,26550);
+  assert.ok(nodes.some(node=>node.props?.label==="Installment 1 Amount (including tax)"));
+});
+
+test("matching paid enrollments continue automatically, and pending installments block creation",()=>{
+  const parent={id:"root",invoice_no:"INV-ROOT",lead_id:lead.id,course_id:"course-1",company_code:"DMHCA",currency:"INR",
+    course_total:300,balance:200,enrollment_subtotal:300,enrollment_discount:0,enrollment_tax:0,
+    discount_percent:0,tax_percent:0,next_installment:2,pending:true};
+  const {InvoiceCreateForm}=load("src\\components\\invoice-create-form.tsx",{
+    react:hookStates([lead.id,{lead:{id:lead.id,email:lead.email},canSaveAddress:true},"","Address","course-1","DMHCA","INR","installments","","100","99","99"]),
+    "@/app/integrations/operational-ui":opMock,
+  });
+
+  test("USD course invoices always show read-only zero tax while allowing a discount approval request",()=>{
+    const {InvoiceCreateForm}=load("src\\components\\invoice-create-form.tsx",{
+      react:hookStates([lead.id,{lead:{id:lead.id,email:lead.email},canSaveAddress:true},"","Address","course-1","DMHCA","USD","one_shot","","","5"]),
+      "@/app/integrations/operational-ui":opMock,
+    });
+    const nodes=elements(InvoiceCreateForm({leads:[lead],parents:[],busy:false,onSubmit:async()=>true,onClose(){}}));
+    const tax=nodes.find(node=>node.props?.["aria-label"]==="Tax %");
+    assert.equal(tax.props.value,0);assert.equal(tax.props.readOnly,true);assert.equal(tax.props.onChange,undefined);
+    assert.equal(nodes.find(node=>node.props?.name==="discount_percent").props.readOnly,false);
+    assert.equal(nodes.find(node=>node.props?.name==="discount_reason").props.required,true);
+  });
+  const nodes=elements(InvoiceCreateForm({leads:[lead],parents:[parent],busy:false,onSubmit:async()=>true,onClose(){}}));
+  assert.equal(nodes.find(node=>node.props?.name==="parent_invoice_id").props.value,"root");
+  assert.equal(nodes.find(node=>node.props?.name==="installment_amount").props.max,200);
+  assert.equal(nodes.find(node=>node.props?.["aria-label"]==="Discount %").props.readOnly,true);
+  assert.equal(nodes.find(node=>node.props?.["aria-label"]==="Tax %").props.value,0);
+  assert.equal(nodes.find(node=>node.type==="button"&&node.props.type!=="button").props.disabled,true);
 });
 
 test("invoice search and status filters combine, while metrics keep currencies separate", () => {
@@ -477,7 +595,7 @@ test("compact lead overview uses one uninterrupted field grid without section di
   for (const name of ["Lead name", "Email", "Phone", "Alternate phone", "Country", "Course", "Qualification", "Category", "Source", "Stage", "Lead owner", "Closure fee", "Next follow-up", "Preferred campus", "Counselor note"])
     assert.ok(html.includes(`aria-label="${name}"`), name);
   assert.doesNotMatch(html, /aria-label="Country code"/);
-  assert.equal((html.match(/class="lead-inline-field"/g) ?? []).length, 15);
+  assert.equal((html.match(/class="lead-inline-field"/g) ?? []).length, 16);
   assert.match(html, /type="datetime-local"/);
   assert.match(html, /Autosave enabled/);
   assert.match(html, /Last modified/);
@@ -500,6 +618,29 @@ test("email composer combines addresses and connection controls without changing
     const html = await renderPage("src\\app\\leads\\[id]\\page.tsx", {
       states: [false,false,"","Message body","Course information","",false,false,"","","email"],
       overrides: { "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({ data: { ...data, user: { ...user, email: profile.email } }, loading: false, error: "", reload() {}, setError() {} }) } },
+    });
+
+    test("managed email composer needs no employee Connect Gmail and blocks out-of-domain mailboxes", async () => {
+      for (const eligible of [true, false]) {
+        const mailbox = eligible ? { email: profile.email, managed: true } :
+          { email: "", managed: true, reason: "Managed Gmail is restricted to your Workspace domain." };
+        const html = await renderPage("src\\app\\leads\\[id]\\page.tsx", {
+          states: [false, false, "", "Message body", "Course information", "", false, false, "", "", "email"],
+          overrides: { "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({
+            data: { ...live, lead, notes: [], activities: [], emails: [], mailbox },
+            loading: false, error: "", reload() {}, setError() {},
+          }) } },
+        });
+        assert.doesNotMatch(html, />Connect Gmail<|>Reconnect Gmail</);
+        if (eligible) {
+          assert.match(html, /Workspace-managed/);
+          assert.doesNotMatch(html, /disabled=""[^>]*>Send email/);
+          assert.match(html, /no individual Google connection is required/);
+        } else {
+          assert.match(html, /restricted to your Workspace domain/);
+          assert.match(html, /disabled=""[^>]*>Send email/);
+        }
+      }
     });
     assert.match(html, /lead-email-envelope/);
     assert.match(html, /lead-mailbox-control/);
@@ -891,6 +1032,16 @@ test("integration setup exposes masked credentials, login warnings and separate 
     assert.doesNotMatch(html, /Your mailbox is not connected|<table/);
   });
 
+  test("lead editors can sync their mailbox while integration viewers are not required", async () => {
+    const mailbox = { ...operations["/api/integrations/gmail"], canConnect: false, canSync: true, connection: {
+      email: "counselor@example.com", last_synced_at: null, last_error: null, initialSync: false, hasPendingPage: false, syncInProgress: false,
+    } };
+    const mock = { ...op, useOperationalData: url => operational({ ...emptyIntegrationOperations, "/api/integrations/gmail": mailbox }[url]) };
+    const html = await renderPage("src\\app\\integrations\\page.tsx", { overrides: { "./operational-ui": mock, "@/app/integrations/operational-ui": mock } });
+    assert.match(html, /Sync inbox/);
+    assert.doesNotMatch(html, /Connect Gmail|Disconnect locally/);
+  });
+
   test("source form cancel preserves the existing channel and makes the header action available again", () => {
     const states = [];
     let index = 0;
@@ -1014,6 +1165,24 @@ test("read-only integration viewers receive setup guidance without credential fo
     "@/app/integrations/operational-ui": { ...opMock, useOperationalData: () => operational({ canManage: false, settings: [], appUrl: "https://crm.example" }) },
   });
 
+  test("managed integration form shows domain and write-only JSON instead of OAuth client credentials", () => {
+    const { IntegrationConnections } = load("src\\components\\integration-connections.tsx", {
+      react: hookStates(["gmail", false, "", "", false, "", "All integrations", "workspace"]),
+      "@/app/integrations/operational-ui": { ...opMock, useOperationalData: () => operational({
+        canManage: true, appUrl: "https://crm.example",
+        settings: [{ provider: "gmail", source: "crm", revision: "saved",
+          values: { GOOGLE_MAILBOX_MODE: "workspace", GOOGLE_WORKSPACE_DOMAIN: "dmhca.in" },
+          saved: { GOOGLE_SERVICE_ACCOUNT_JSON: true } }],
+      }) },
+    });
+    const html = renderToStaticMarkup(React.createElement(IntegrationConnections, { integrations: [], onChange() {} }));
+    assert.match(html, /name="GOOGLE_WORKSPACE_DOMAIN"/);
+    assert.match(html, /<textarea[^>]*name="GOOGLE_SERVICE_ACCOUNT_JSON"/);
+    assert.match(html, /Leave blank to keep saved secret/);
+    assert.match(html, /organization-wide mailbox authority/);
+    assert.doesNotMatch(html, /name="GOOGLE_CLIENT_ID"|name="GOOGLE_CLIENT_SECRET"|name="GOOGLE_REDIRECT_URI"/);
+  });
+
   const html = renderToStaticMarkup(React.createElement(IntegrationConnections, { integrations: [], onChange() {} }));
   assert.match(html, /Only an Admin or Super Admin/);
   assert.match(html, /Setup guide/);
@@ -1045,7 +1214,7 @@ test("integration catalog searches, filters, restores selection and confirms uns
   const cards = () => render().filter(node => node.props?.className?.includes("panel integration-card"));
   const click = text => render().find(node => node.type === "button" && node.props.children === text).props.onClick();
   const search = value => render().find(node => node.props?.["aria-label"] === "Search integrations").props.onChange({ target: { value } });
-  assert.equal(cards().length, 6);
+  assert.equal(cards().length, 7);
   click("Email");
   assert.equal(cards().length, 2);
   search("  GMAIL ");
@@ -1066,7 +1235,7 @@ test("integration catalog searches, filters, restores selection and confirms uns
   click("SMTP");
   assert.ok(render().some(node => node.props?.["aria-label"] === "SMTP configuration"));
   render().find(node => node.props?.["aria-label"] === "Close integration settings").props.onClick();
-  assert.equal(cards().length, 6);
+  assert.equal(cards().length, 7);
 });
 
 test("every provider has actionable setup, field guidance, verification and troubleshooting", () => {

@@ -40,6 +40,7 @@ export const leadInput = z.object({
   altPhone: z.string().trim().max(30).optional().default(""),
   email: z.union([z.literal(""), z.string().trim().email().max(254)]).optional().default(""),
   country: z.string().trim().max(100).optional().default(""),
+  billingAddress: z.string().trim().max(2000).optional().default(""),
   course: z.string().trim().max(200).optional().default(""),
   qualification: z.string().trim().max(200).optional().default(""),
   category: z.string().trim().max(100).optional().default(""),
@@ -60,7 +61,7 @@ export function parseLead(value: unknown) {
     name: v.name, phone: `${v.phone.startsWith("+") || /\(\+\d+/.test(v.countryCode) ? "+" : ""}${normalizedPhone}`,
     country_code: v.countryCode || null, normalized_phone: normalizedPhone,
     alt_phone: v.altPhone || null, email: v.email || null, normalized_email: v.email?.toLowerCase() || null,
-    country: v.country || null, course: v.course || null, qualification: v.qualification || null, category: v.category || null,
+    country: v.country || null, billing_address: v.billingAddress, course: v.course || null, qualification: v.qualification || null, category: v.category || null,
     source: v.source, stage_id: v.stageId, assignee_id: v.assigneeId,
     next_followup_at: v.followUpAt || null, closure_fee: v.closureFee, custom_fields: v.customFields,
   };

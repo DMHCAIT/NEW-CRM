@@ -88,6 +88,7 @@ export interface Lead {
   mergedIntoId?: string;
   isArchived?: boolean;
   closureFee: number;
+  billingAddress?: string;
 }
 
 export interface Profile {

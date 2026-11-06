@@ -19,7 +19,7 @@ type DetailData = {
   lead: Lead & { customFields: Record<string, string> }; stages: StageRow[]; profiles: Profile[]; user: CurrentUser; configuration: LeadConfiguration;
   notes: Timeline[]; activities: Timeline[];
   emails: { id: string; subject: string; body: string; status: string; from_email: string | null; to_email: string; direction: string; created_at: string; user_id: string | null }[];
-  mailbox: { email: string } | null;
+  mailbox: { email: string; managed?: boolean; reason?: string } | null;
   scheduledCalls: { id: string; user_id: string; scheduled_at: string; status: string; created_at: string }[];
   duplicates: DuplicateOwner[];
   canScheduleCall: boolean;
@@ -120,6 +120,7 @@ export default function LeadDetailPage() {
     { id: "email", label: "Emails", icon: Mail, count: data.emails.length },
     { id: "calls", label: "Calls", icon: Phone, count: scheduledCalls.length },
     ...(can("invoices.view") ? [{ id: "invoices", label: "Invoices", icon: FileText, count: null }] : []),
+    ...(can("invoices.view") ? [{ id: "courses", label: "Courses", icon: FileText, count: null }] : []),
   ];
   function selectTab(value: string) { setTab(value); setOverviewTab("overview"); }
   const sectionLabel = tabs.find(item => item.id === tab)?.label ?? "Overview";
@@ -211,6 +212,7 @@ export default function LeadDetailPage() {
           {field("name", "Lead name", lead.name)}{field("email", "Email", lead.email, undefined, "email")}
           {field("phone", "Phone", lead.phone, undefined, "tel")}
           {field("altPhone", "Alternate phone", lead.altPhone ?? "", undefined, "tel")}{picklist("country", "Country")}
+          {field("billingAddress", "Billing address", lead.billingAddress ?? "")}
           {picklist("course", "Course")}{picklist("qualification", "Qualification")}{picklist("category", "Category")}{picklist("source", "Source")}
           {field("stageId", "Stage", lead.stageId ?? "", data.stages.map(stage => ({ value: stage.id, label: stage.name })))}
           {field("assigneeId", "Lead owner", lead.assigneeId ?? "", [{ value: "", label: "Unassigned" }, ...data.profiles.map(profile => ({ value: profile.id, label: profile.fullName }))])}
@@ -231,17 +233,18 @@ export default function LeadDetailPage() {
     </section>}
     {tab === "calls" && overviewTab === "timeline" && <section aria-label="Calls timeline" className="lead-section-history"><div className="detail-history-heading">{sectionIntro("Calls timeline", "Scheduling, rescheduling and outcomes, newest first", Phone)}</div>{history(data.activities.filter(row => row.type === "call"), "No recorded call changes yet. Older appointments may not have a change log.")}</section>}
     {tab === "invoices" && can("invoices.view") && <InvoiceWorkspace key={id} leadId={id} timelineOnly={overviewTab === "timeline"} />}
+    {tab === "courses" && can("invoices.view") && <section className="panel"><h2>Course catalog</h2><p>Select a course and its standard INR/USD price when creating an invoice for this lead.</p><Link className="button button-secondary" href="/courses">View courses and company profiles</Link><button className="button button-primary" onClick={() => { setTab("invoices"); setOverviewTab("overview"); }}>Open lead invoices</button></section>}
     {["note", "email"].includes(tab) && overviewTab === "overview" && !can("leads.edit") && <section className="detail-overview"><h2>{sectionLabel}</h2><p>Read only. Open Timeline to view this lead&apos;s {tab === "note" ? "notes" : "email history"}.</p></section>}
     {["note", "email"].includes(tab) && overviewTab === "overview" && can("leads.edit") && <section className={`detail-overview lead-compose-section lead-compose-${tab}`}>{sectionIntro(tab === "note" ? "Add a note" : "Compose email", tab === "note" ? "Capture your conversation, decisions and next steps. Notes stay with this lead." : "Write to this lead from your connected Google Workspace mailbox.", tab === "note" ? FileText : Mail)}<form onSubmit={(e) => { e.preventDefault(); const action = tab; void act(async () => {
       await apiRequest(`/api/leads/${id}/actions`, { body: { action, subject: action === "email" ? subject : "", content: action === "email" ? emailContent : noteContent } });
       if (action === "email") { setEmailContent(""); setSubject(""); } else setNoteContent("");
       await reload(); setNotice(action === "email" ? "Gmail accepted your email. This does not confirm recipient delivery." : "Note added."); setOverviewTab("timeline");
     }); }} className="live-update-form">
-      {tab === "email" && <><div className="lead-email-envelope"><div className="lead-email-addresses"><p><strong>From</strong> {data.user.email}</p><p><strong>To</strong> {lead.email || "No lead email address"}</p></div><div className="lead-mailbox-control"><span className={`lead-mailbox-state${mailboxMatchesLogin ? " is-connected" : ""}`}>{mailboxMatchesLogin ? "Gmail connected" : "Mailbox not connected"}</span><button type="button" className="button button-secondary" disabled={busy} onClick={() => void act(async () => {
+      {tab === "email" && <><div className="lead-email-envelope"><div className="lead-email-addresses"><p><strong>From</strong> {data.user.email}</p><p><strong>To</strong> {lead.email || "No lead email address"}</p></div><div className="lead-mailbox-control"><span className={`lead-mailbox-state${mailboxMatchesLogin ? " is-connected" : ""}`}>{data.mailbox?.managed ? mailboxMatchesLogin ? "Workspace-managed" : "Managed mailbox unavailable" : mailboxMatchesLogin ? "Gmail connected" : "Mailbox not connected"}</span>{!data.mailbox?.managed && <button type="button" className="button button-secondary" disabled={busy} onClick={() => void act(async () => {
         const result = await apiRequest<{ url: string }>("/api/integrations/gmail/connect", { method: "POST" }); window.location.assign(result.url);
-      })}>{data.mailbox ? "Reconnect Gmail" : "Connect Gmail"}</button></div></div><p className="lead-compose-hint">{mailboxMatchesLogin ? "Your Google Workspace mailbox is connected. Emails are sent from your CRM login address." : `Authorize Google Workspace for ${data.user.email} once to send from your login address. CRM sign-in alone does not grant mailbox access.`} No shared SMTP sender is used.</p><label className="form-field">Subject<input value={subject} maxLength={200} required placeholder="Add a subject" onChange={e => setSubject(e.target.value)} /></label></>}
+      })}>{data.mailbox ? "Reconnect Gmail" : "Connect Gmail"}</button>}</div></div><p className="lead-compose-hint">{data.mailbox?.managed ? data.mailbox.reason || "Your administrator has configured Workspace-managed access. Gmail authorization is checked when sending; no individual Google connection is required." : mailboxMatchesLogin ? "Your Google Workspace mailbox is connected. Emails are sent from your CRM login address." : `Authorize Google Workspace for ${data.user.email} once to send from your login address. CRM sign-in alone does not grant mailbox access.`} No shared SMTP sender is used.</p><label className="form-field">Subject<input value={subject} maxLength={200} required placeholder="Add a subject" onChange={e => setSubject(e.target.value)} /></label></>}
       <label className="form-field">{tab === "email" ? "Message" : "Note"}<textarea required maxLength={tab === "email" ? 20000 : 10000} rows={5} value={tab === "email" ? emailContent : noteContent} onChange={e => tab === "email" ? setEmailContent(e.target.value) : setNoteContent(e.target.value)} /></label>
-      {tab === "email" && (!lead.email || !mailboxMatchesLogin) && <p className="lead-compose-warning" role="alert">{!lead.email ? "Add an email address to the lead before sending." : data.mailbox ? `The connected account (${data.mailbox.email}) does not match your login. Reconnect Gmail using ${data.user.email}.` : `Connect Gmail using ${data.user.email} before sending.`}</p>}
+      {tab === "email" && (!lead.email || !mailboxMatchesLogin) && <p className="lead-compose-warning" role="alert">{!lead.email ? "Add an email address to the lead before sending." : data.mailbox?.reason || (data.mailbox ? `The connected account (${data.mailbox.email}) does not match your login. Reconnect Gmail using ${data.user.email}.` : `Connect Gmail using ${data.user.email} before sending.`)}</p>}
       <div className="lead-compose-footer"><span>{(tab === "email" ? emailContent : noteContent).length.toLocaleString()} / {tab === "email" ? "20,000" : "10,000"} characters</span><button className="button button-primary" disabled={busy || !(tab === "email" ? emailContent : noteContent).trim() || (tab === "email" && (!subject.trim() || !lead.email || !mailboxMatchesLogin))}>{busy ? tab === "email" ? "Sending..." : "Saving..." : tab === "email" ? "Send email" : "Add note"}</button></div>
     </form></section>}
     {tab === "note" && overviewTab === "timeline" && <section aria-label="Notes timeline" className="lead-section-history"><div className="detail-history-heading">{sectionIntro("Notes timeline", "Notes and conversations, newest first", FileText)}</div>{history(data.notes, "No notes yet. Open Notes to add your first note.")}</section>}

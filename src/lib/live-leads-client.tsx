@@ -149,6 +149,7 @@ export type LeadDraft = {
   name: string; phone: string; countryCode: string; altPhone: string; email: string; country: string; course: string; qualification: string; category: string;
   source: string; stageId: string | null; assigneeId: string | null; followUpAt: string | null; closureFee: number;
   customFields: Record<string, string>;
+  billingAddress?: string;
 };
 export function leadDraft(lead?: Lead & { customFields?: Record<string, string> }): LeadDraft {
   return {
@@ -157,6 +158,7 @@ export function leadDraft(lead?: Lead & { customFields?: Record<string, string> 
     source: lead?.source ?? "", stageId: lead?.stageId ?? null, assigneeId: lead?.assigneeId ?? null,
     followUpAt: lead?.followUpAt ?? null, closureFee: lead?.closureFee ?? 0,
     customFields: lead?.customFields ?? {},
+    billingAddress: lead?.billingAddress ?? "",
   };
 }
 

@@ -147,6 +147,31 @@ test("Google callback and Meta version are validated before saving", async () =>
   assert.throws(() => settings.validateIntegrationConfig("facebook", { FACEBOOK_APP_ID: "12", FACEBOOK_APP_SECRET: "secret", FACEBOOK_WEBHOOK_VERIFY_TOKEN: "token", FACEBOOK_GRAPH_VERSION: "latest" }), /Graph version/);
   assert.throws(() => settings.validateIntegrationConfig("intake", { LEAD_INTAKE_SIGNING_KEY: "short" }), /32 characters/);
 });
+test("Gmail callback is environment-specific while saved OAuth client credentials remain shared", async t => {
+  const previous = process.env.GOOGLE_REDIRECT_URI;
+  t.after(() => {
+    if (previous === undefined) delete process.env.GOOGLE_REDIRECT_URI;
+    else process.env.GOOGLE_REDIRECT_URI = previous;
+  });
+  const { settings, rows, route, post, requests } = fixture();
+  const saved = {
+    GOOGLE_CLIENT_ID: "shared-client", GOOGLE_CLIENT_SECRET: "shared-secret",
+    GOOGLE_REDIRECT_URI: "https://crm.example/api/auth/gmail/callback",
+  };
+  rows.set("gmail", { provider: "gmail", encrypted_values: settings.encryptIntegrationValues(saved) });
+  process.env.GOOGLE_REDIRECT_URI = "http://localhost:3000/api/auth/gmail/callback";
+  assert.deepEqual(await settings.getIntegrationConfig("gmail"), { ...saved, GOOGLE_REDIRECT_URI: process.env.GOOGLE_REDIRECT_URI });
+  process.env.GOOGLE_REDIRECT_URI = "https://crm.example/api/auth/gmail/callback";
+  assert.deepEqual(await settings.getIntegrationConfig("gmail"), saved);
+  rows.get("gmail").encrypted_values = settings.encryptIntegrationValues({ ...saved, GOOGLE_REDIRECT_URI: "http://localhost:3000/api/auth/gmail/callback" });
+  rows.get("gmail").revision = "10000000-0000-4000-8000-000000000011";
+  const result = await route.GET();
+  assert.equal(result.data.settings.find(item => item.provider === "gmail").values.GOOGLE_REDIRECT_URI, saved.GOOGLE_REDIRECT_URI);
+  assert.equal((await post({ provider: "gmail", action: "test", revision: rows.get("gmail").revision })).status, 200);
+  assert.equal(requests.find(item => Array.isArray(item) && item[0] === "gmail")[1].GOOGLE_REDIRECT_URI, saved.GOOGLE_REDIRECT_URI);
+  delete process.env.GOOGLE_REDIRECT_URI;
+  assert.deepEqual(await settings.getIntegrationConfig("gmail"), { ...saved, GOOGLE_REDIRECT_URI: "http://localhost:3000/api/auth/gmail/callback" });
+});
 test("SMTP destination checks reject private, local and mapped addresses", () => {
   const transport = load("src\\lib\\server\\smtp-transport.ts", {
     "@/lib/server/env": { ConfigurationError },

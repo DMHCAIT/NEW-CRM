@@ -1,5 +1,5 @@
-export type IntegrationProvider = "zoom" | "razorpay" | "smtp" | "gmail" | "intake" | "facebook";
-export type IntegrationField = { key: string; label: string; secret?: boolean; required?: boolean; placeholder?: string };
+export type IntegrationProvider = "zoom" | "razorpay" | "stripe" | "smtp" | "gmail" | "intake" | "facebook";
+export type IntegrationField = { key: string; label: string; secret?: boolean; required?: boolean; placeholder?: string; multiline?: boolean };
 export type IntegrationDefinition = { id: IntegrationProvider; name: string; category: string; detail: string; fields: IntegrationField[]; endpoint?: string; help: string };
 
 export const integrationDefinitions: IntegrationDefinition[] = [
@@ -23,9 +23,12 @@ export const integrationDefinitions: IntegrationDefinition[] = [
   ], help: "Use a public SMTP hostname. TLS is required; private or loopback servers are not supported. Test the saved connection, then send a test email to check provider acceptance, not guaranteed inbox delivery. These settings also send login verification codes: incorrect credentials can prevent future sign-ins. Lead emails continue to use each user's Gmail." },
   { id: "gmail", name: "Gmail mailbox", category: "Personal email", detail: "Send lead emails from each signed-in user's own Google mailbox.", endpoint: "/api/auth/gmail/callback",
     fields: [
-      { key: "GOOGLE_CLIENT_ID", label: "Google OAuth client ID", required: true }, { key: "GOOGLE_CLIENT_SECRET", label: "Google OAuth client secret", required: true, secret: true },
-      { key: "GOOGLE_REDIRECT_URI", label: "Authorized callback URL", required: true },
-    ], help: "Enable Gmail API in Google Cloud and add this exact callback to your Web application OAuth client. Each CRM user must separately consent using their login email. The setup check is local only; Connect Gmail verifies authorization. Changing the OAuth client requires existing users to reconnect. App credentials cannot bypass user consent or Google verification." },
+      { key: "GOOGLE_MAILBOX_MODE", label: "Mailbox authorization mode" },
+      { key: "GOOGLE_CLIENT_ID", label: "Google OAuth client ID" }, { key: "GOOGLE_CLIENT_SECRET", label: "Google OAuth client secret", secret: true },
+      { key: "GOOGLE_REDIRECT_URI", label: "Authorized callback URL" },
+      { key: "GOOGLE_WORKSPACE_DOMAIN", label: "Managed Workspace domain", placeholder: "dmhca.in" },
+      { key: "GOOGLE_SERVICE_ACCOUNT_JSON", label: "Service account JSON key", secret: true, multiline: true },
+    ], help: "Choose per-user OAuth, or Workspace-managed access approved once by a Google Workspace super administrator through domain-wide delegation. Managed access uses each active CRM user's exact login mailbox within the configured domain. Never share service account keys with employees." },
   { id: "intake", name: "Website / chatbot", category: "Lead capture", detail: "Connect multiple websites and chatbots with independent source keys.", endpoint: "/api/webhooks/lead-intake",
     fields: [{ key: "LEAD_INTAKE_SIGNING_KEY", label: "Backend HMAC signing key", required: true, secret: true }],
     help: "Use a random signing key of at least 32 characters. Create one source for each website or chatbot below. Send signed requests from a trusted backend, never browser JavaScript. A local signature check does not prove your external website is wired correctly." },
@@ -35,4 +38,15 @@ export const integrationDefinitions: IntegrationDefinition[] = [
       { key: "FACEBOOK_WEBHOOK_VERIFY_TOKEN", label: "Webhook verification token", required: true, secret: true },
       { key: "FACEBOOK_GRAPH_VERSION", label: "Graph API version", required: true, placeholder: "v25.0" },
     ], help: "One Meta app can connect multiple Pages. Save each Page token separately, then create sources for individual forms or a Page-wide fallback. App review, leads_retrieval access and Page leadgen subscriptions must be configured in Meta." },
+  { id: "stripe", name: "Stripe", category: "Payments", detail: "Collect USD invoice payments with Stripe Checkout.", endpoint: "/api/webhooks/stripe",
+    fields: [
+      { key: "STRIPE_SECRET_KEY", label: "Stripe secret API key", required: true, secret: true },
+      { key: "STRIPE_WEBHOOK_SECRET", label: "Stripe endpoint signing secret", required: true, secret: true },
+    ], help: "Use matching test/live credentials. Subscribe this endpoint to checkout.session.completed and checkout.session.async_payment_succeeded. Only signed, fully paid sessions with the exact invoice amount are recorded. No payment is collected by the connection check." },
 ];
+
+export function gmailRequiredFields(values: Record<string, string>) {
+  return values.GOOGLE_MAILBOX_MODE === "workspace"
+    ? ["GOOGLE_WORKSPACE_DOMAIN", "GOOGLE_SERVICE_ACCOUNT_JSON"]
+    : ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI"];
+}

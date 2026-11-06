@@ -11,7 +11,9 @@ function load(path, dependencies = {}) {
   vm.runInNewContext(ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021, jsx: ts.JsxEmit.ReactJSX },
   }).outputText, {
-    exports, require: (name) => name in dependencies ? dependencies[name] : name === "@/lib/server/login" ? { checkOrigin: () => {} } : require(name),
+    exports, require: (name) => name in dependencies ? dependencies[name] :
+      name === "@/lib/server/login" ? { checkOrigin: () => {} } :
+      name === "@/lib/server/operational-gmail" ? { currentGmailMailbox: async () => null } : require(name),
     Date, Set, Response, Buffer, console,
   });
   return exports;

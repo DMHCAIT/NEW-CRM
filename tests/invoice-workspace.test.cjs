@@ -14,19 +14,20 @@ function load(relative, mocks) {
   new Function("exports", "require", source)(exports, name => name in mocks ? mocks[name] : require(name));
   return exports;
 }
-function fixture({ denied = false, profileError = false, originAllowed = true, beforeRead = (_name, value) => Promise.resolve(value) } = {}) {
+function fixture({ denied = false, profileError = false, originAllowed = true, invoiceRows, role = "counselor", beforeRead = (_name, value) => Promise.resolve(value) } = {}) {
   const calls = [];
   const supabase = {
     from(table) {
       calls.push(["from", table]);
-      const result = { data: table === "profiles" ? [{ id: "actor", full_name: "Counselor" }] : [{ id: "invoice", lead_id: leadId, payment_type: "one_shot" }], error: table === "profiles" && profileError ? new Error("Profile query failed") : null };
+      const result = { data: table === "profiles" ? [{ id: "actor", full_name: "Counselor" }] : invoiceRows ?? [{ id: "invoice", lead_id: leadId, payment_type: "one_shot" }], error: table === "profiles" && profileError ? new Error("Profile query failed") : null };
       const query = {
         select(value) { calls.push(["select", value]); return query; },
         eq(key, value) { calls.push(["eq", key, value]); return query; },
         in(key, value) { calls.push(["in", key, value]); return query; },
         order(key) { calls.push(["order", key]); return query; },
         maybeSingle() { return Promise.resolve({ data: { id: "new-invoice", status: "pending_approval" }, error: null }); },
-        limit(value) { calls.push(["limit", value]); return beforeRead(table, result); },
+        limit(value) { calls.push(["limit", value]); return beforeRead(table, {...result,data:result.data.slice(0,value)}); },
+        range(start,end) { calls.push(["range",start,end]);return beforeRead(table,{...result,data:result.data.slice(start,end+1)}); },
         then(resolve, reject) { return beforeRead(table, result).then(resolve, reject); },
       };
       return query;
@@ -37,7 +38,7 @@ function fixture({ denied = false, profileError = false, originAllowed = true, b
     "@/lib/server/integration-settings": { integrationStatus: provider => beforeRead(provider, { configured: true, missing: [], required: [] }) },
     "next/server": { NextResponse: { json: (data, options) => ({ data, status: options?.status ?? 200 }) } },
     "@/lib/server/auth": {
-      requireUser: async permission => { calls.push(["permission", permission]); return { supabase, user: { id: "actor", permissions: ["invoices.create"] } }; },
+      requireUser: async permission => { calls.push(["permission", permission]); return { supabase, user: { id: "actor", profile: { role }, permissions: ["invoices.create","invoices.approve"] } }; },
       jsonError: error => ({ status: 400, error: error.message }),
       readJson: request => request.json(),
     },
@@ -55,6 +56,9 @@ function fixture({ denied = false, profileError = false, originAllowed = true, b
     "@/lib/server/razorpay": {},
     "@/lib/server/mailer": {},
     "@/lib/server/invoice-delivery": { deliverInvoice: async () => ({ messageId: "message" }), sendPaymentReceipt: async () => "receipt" },
+    "@/lib/server/invoice-payment-verification": {},
+    "@/lib/server/invoice-link-cancellation": {},
+    "@/lib/invoice-policy": load("src\\lib\\invoice-policy.ts",{}),
   };
   return { calls, route: load("src\\app\\api\\invoices\\route.ts", mocks), detail: load("src\\app\\api\\invoices\\[id]\\route.ts", mocks) };
 }
@@ -78,6 +82,27 @@ test("global invoices preserve RLS-scoped listing and accessible lead choices", 
   assert.ok(!calls.some(call => call[0] === "eq"));
   assert.deepEqual(calls[0], ["permission", "invoices.view"]);
 });
+test("the register fetches every invoice batch and does not hide records after the latest 200",async()=>{
+  const invoiceRows=Array.from({length:401},(_,index)=>({id:`invoice-${index}`,lead_id:leadId,payment_type:"one_shot"}));
+  const {route,calls}=fixture({invoiceRows,role:"admin"});
+  const result=await route.GET(new Request("https://crm.example/api/invoices"));
+  assert.equal(result.status,200);
+  assert.equal(result.data.invoices.length,401);
+  assert.equal(result.data.canApprove,true);
+  assert.deepEqual(calls.filter(call=>call[0]==="range"),[["range",200,399],["range",400,599]]);
+});
+test("installment balances subtract only paid invoices and expose blockers plus frozen course pricing",async()=>{
+  const root={id:"root",invoice_no:"INV-ROOT",lead_id:leadId,course_id:"course",company_code:"DMHCA",
+    payment_type:"installments",parent_invoice_id:null,status:"paid",currency:"INR",total:100,course_total:300,
+    enrollment_subtotal:300,enrollment_discount:0,enrollment_tax:0,enrollment_tax_percent:0,discount_percent:0};
+  const {route}=fixture({invoiceRows:[root,{...root,id:"next",parent_invoice_id:"root",status:"sent",total:75}]});
+  const result=await route.GET(new Request("https://crm.example/api/invoices"));
+  assert.equal(result.data.courseBalances.root,200);
+  assert.equal(result.data.courseBalances.next,200,"awaiting payment is not money received");
+  assert.equal(result.data.installmentParents[0].pending,true);
+  assert.equal(result.data.installmentParents[0].next_installment,2);
+  assert.equal(result.data.installmentParents[0].enrollment_subtotal,300);
+});
 test("invalid, empty or hidden lead filters never fall back to the global register", async () => {
   for (const suffix of ["", "not-a-uuid", leadId]) {
     const { route, calls } = fixture({ denied: suffix === leadId });
@@ -100,7 +125,7 @@ test("independent invoice reads start together and all must finish before return
   let finished = false;
   const response = route.GET(new Request("https://crm.example/api/invoices")).then(result => { finished = true; return result; });
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual([...pending.keys()].sort(), ["invoices", "leads", "profiles", "razorpay", "smtp"]);
+  assert.deepEqual([...pending.keys()].sort(), ["invoices", "leads", "profiles", "razorpay", "smtp", "stripe"]);
   for (const [name, release] of pending) if (name !== "smtp") release();
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(finished, false);

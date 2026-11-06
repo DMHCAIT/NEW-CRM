@@ -6,16 +6,23 @@ const vm = require("node:vm");
 const ts = require("typescript");
 const crypto = require("node:crypto");
 
-function transpile(file, dependencies) {
+function transpile(file, dependencies, logger = console) {
   const exports = {};
   vm.runInNewContext(ts.transpileModule(readFileSync(join(__dirname, "..", file), "utf8"), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021 },
-  }).outputText, { exports, require: (name) => dependencies[name] ?? require(name), Buffer, console, URL, process: { env: {} } });
+  }).outputText, { exports, require: (name) => dependencies[name] ?? require(name), Buffer, console: logger, URL, process: { env: {} } });
   return exports;
 }
 
-function harness({ wrongPassword = false, sendFails = false, wrongCode = false, auditFails = false, deviceId } = {}) {
+function harness({ wrongPassword = false, sendFails = false, wrongCode = false, auditFails = false, rateLimited = false, deviceId, databaseFailure, throws = false, failureCode = "42501" } = {}) {
   const events = [];
+  const logs = [];
+  function databaseError(stage) {
+    if (databaseFailure !== stage) return null;
+    const error = { code: failureCode, message: "private database details", details: "private-access" };
+    if (throws) throw error;
+    return error;
+  }
   const cookies = new Map();
   if (deviceId) cookies.set("crm-device", deviceId);
   const writes = [];
@@ -28,7 +35,7 @@ function harness({ wrongPassword = false, sendFails = false, wrongCode = false, 
   const key = cryptoApi.encryptionKey("ab".repeat(32));
   const admin = {
     rpc: async (name) => {
-      if (name === "allow_login_attempt") return { data: true, error: null };
+      if (name === "allow_login_attempt") return { data: !rateLimited, error: databaseError("LOGIN_RATE_LIMIT") };
       events.push("consume");
       if (wrongCode || !challenge) return { data: [], error: null };
       const row = challenge; challenge = undefined;
@@ -36,10 +43,12 @@ function harness({ wrongPassword = false, sendFails = false, wrongCode = false, 
     },
     from: (table) => ({
       select: () => ({ eq: () => ({
-        maybeSingle: async () => ({ data: { status: "active", deleted_at: null }, error: null }),
+        maybeSingle: async () => ({ data: { status: "active", deleted_at: null }, error: databaseError("LOGIN_PROFILE") }),
         single: async () => ({ data: { status: "active", deleted_at: null }, error: null }),
       }) }),
       insert: async (value) => {
+        const error = table === "login_challenges" ? databaseError("LOGIN_CHALLENGE") : null;
+        if (error) return { error };
         writes.push({ table, value });
         events.push(`insert:${table}`);
         if (table === "login_challenges" || table === "login_sessions") {
@@ -49,7 +58,11 @@ function harness({ wrongPassword = false, sendFails = false, wrongCode = false, 
         if (table === "login_challenges") challenge = value;
         return { error: table === "login_sessions" && auditFails ? new Error("DB unavailable") : null };
       },
-      delete: () => ({ eq: async () => { challenge = undefined; return { error: null }; } }),
+      delete: () => ({ eq: async () => {
+        const error = databaseError("LOGIN_CHALLENGE_CLEANUP");
+        if (!error) challenge = undefined;
+        return { error };
+      } }),
     }),
   };
   const api = transpile("src\\lib\\server\\login.ts", {
@@ -72,8 +85,8 @@ function harness({ wrongPassword = false, sendFails = false, wrongCode = false, 
     "@/lib/server/mailer": { emailLayout: (_, html) => html, sendMail: async () => { events.push("email"); if (sendFails) throw new Error("SMTP unavailable"); } },
     "@/lib/server/login-crypto": cryptoApi,
     "@/lib/device": transpile("src\\lib\\device.ts", {}),
-  });
-  return { api, events, cookies, key, writes };
+  }, { error: (...args) => logs.push(args) });
+  return { api, events, cookies, key, writes, logs };
 }
 const request = { headers: new Headers({ "user-agent": "Regression browser" }) };
 
@@ -83,6 +96,43 @@ test("password login sends email but never grants a CRM session", async () => {
   assert.deepEqual(events, ["insert:login_challenges", "email", "cookie", "cookie"]);
   assert.equal(cookies.size, 2);
   assert.equal(events.includes("authenticated-cookie"), false);
+});
+
+test("database failures show safe stage references and never grant cookies", async () => {
+  for (const databaseFailure of ["LOGIN_RATE_LIMIT", "LOGIN_PROFILE", "LOGIN_CHALLENGE", "LOGIN_CHALLENGE_CLEANUP"]) {
+    for (const throws of [false, true]) {
+      const { api, cookies, events, logs } = harness({ databaseFailure, throws });
+      if (databaseFailure === "LOGIN_CHALLENGE_CLEANUP") cookies.set("crm-login-challenge", "aa".repeat(32));
+      await assert.rejects(api.startLogin(request, "user@example.com", "password"), error => {
+        assert.equal(error.status, 503);
+        assert.ok(error.message.includes(databaseFailure));
+        assert.equal(error.message.includes("private"), false);
+        return true;
+      });
+      assert.equal(events.includes("cookie"), false);
+      assert.equal(events.includes("authenticated-cookie"), false);
+      assert.equal(logs.length, 1);
+      assert.equal(logs[0][1].reference, databaseFailure);
+      assert.equal(logs[0][1].code, "42501");
+      assert.equal(JSON.stringify(logs).includes("private"), false);
+    }
+  }
+});
+
+test("database diagnostics do not log arbitrary provider code contents", async () => {
+  const { api, logs } = harness({ databaseFailure: "LOGIN_RATE_LIMIT", failureCode: "secret token content" });
+  await assert.rejects(api.startLogin(request, "user@example.com", "password"), /LOGIN_RATE_LIMIT/);
+  assert.equal(logs[0][1].code, "UNKNOWN");
+  assert.equal(JSON.stringify(logs).includes("secret token content"), false);
+});
+
+test("invalid credentials and exhausted rate limits retain their original statuses", async () => {
+  for (const [options, status] of [[{ wrongPassword: true }, 401], [{ rateLimited: true }, 429]]) {
+    const { api, cookies, logs } = harness(options);
+    await assert.rejects(api.startLogin(request, "user@example.com", "password"), error => error.status === status);
+    assert.equal(cookies.size, 0);
+    assert.equal(logs.length, 0);
+  }
 });
 
 test("bad password and failed SMTP cannot grant even a pending cookie", async () => {

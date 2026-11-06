@@ -7,7 +7,7 @@ const ts = require("typescript");
 const { createHmac } = require("node:crypto");
 
 function load(relativePath, mocks, overrides = {}) {
-  mocks = { "@/lib/server/integration-settings": {
+  mocks = { "@/lib/invoice-policy": {invoicePaymentReference:(id,revision=1)=>revision>1?`${id.slice(0,28)}-v${revision}`:id}, "@/lib/server/integration-settings": {
     getIntegrationConfig: async () => ({ RAZORPAY_WEBHOOK_SECRET: "operational-test-webhook-key", ZOOM_WEBHOOK_SECRET_TOKEN: "operational-test-webhook-key" }),
     requireIntegrationValue: (values, key) => values[key],
     integrationStatus: async () => ({ configured: true, missing: [], required: [] }),
@@ -53,13 +53,17 @@ test("Razorpay creates fixed-amount Payment Links with invoice correlation, not 
   });
   const link = await provider.createInvoicePaymentLink({
     invoiceId: "10000000-0000-4000-8000-000000000001", invoiceNo: "INV-1", leadId: "lead-1",
-    leadName: "Lead", leadEmail: "lead@example.com", amount: 125, currency: "INR",
+    leadName: "Lead", leadEmail: "lead@example.com", amount: 125, currency: "INR",expiresAt:1900000000,
+    callbackUrl: "https://crm.example/invoice-status/token",
   });
   assert.equal(link.short_url, "https://rzp.io/i/123");
   assert.equal(request.url, "https://api.razorpay.com/v1/payment_links");
   const body = JSON.parse(request.init.body);
   assert.equal(body.amount, 12500);
   assert.equal(body.currency, "INR");
+  assert.equal(body.expire_by,1900000000);
+  assert.equal(body.callback_url,"https://crm.example/invoice-status/token");
+  assert.equal(body.callback_method,"get");
   assert.equal(body.reference_id, "10000000-0000-4000-8000-000000000001");
   assert.equal(body.customer.email, "lead@example.com");
   assert.equal(body.notes.invoice_id, body.reference_id);

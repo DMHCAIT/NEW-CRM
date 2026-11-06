@@ -19,6 +19,19 @@ function secretKey() {
   catch (error) { throw new ConfigurationError(error instanceof Error ? error.message : "Invalid authentication configuration."); }
 }
 
+async function loginDatabaseRequest<T extends { error: unknown }>(reference: string, operation: () => PromiseLike<T>): Promise<T> {
+  try {
+    const result = await operation();
+    if (result.error) throw result.error;
+    return result;
+  } catch (error) {
+    const code = typeof error === "object" && error !== null && "code" in error &&
+      typeof error.code === "string" && /^[A-Z0-9_]{1,32}$/.test(error.code) ? error.code : "UNKNOWN";
+    console.error("Login database request failed", { reference, code });
+    throw new HttpError(503, `Sign-in could not reach the required database service. Contact your administrator. Reference: ${reference}.`);
+  }
+}
+
 export function checkOrigin(request: Request) {
   const origin = request.headers.get("origin");
   let expected: string;
@@ -38,8 +51,8 @@ export async function startLogin(request: Request, email: string, password: stri
   const admin = getSupabaseAdminClient();
   const limits = [{ value: `email:${email.toLowerCase()}`, max: 8 }];
   for (const limit of limits) {
-    const { data, error } = await admin.rpc("allow_login_attempt", { rate_key: loginHash(limit.value, key), max_attempts: limit.max });
-    if (error) throw error;
+    const { data } = await loginDatabaseRequest("LOGIN_RATE_LIMIT", () =>
+      admin.rpc("allow_login_attempt", { rate_key: loginHash(limit.value, key), max_attempts: limit.max }));
     if (!data) throw new HttpError(429, "Too many sign-in attempts. Please wait 15 minutes and try again.");
   }
   const isolated = createClient(requireEnv("NEXT_PUBLIC_SUPABASE_URL"), requireEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY"), {
@@ -47,21 +60,20 @@ export async function startLogin(request: Request, email: string, password: stri
   });
   const { data, error } = await isolated.auth.signInWithPassword({ email, password });
   if (error || !data.session || !data.user.email) throw new HttpError(401, "Invalid email or password, or account unavailable.");
-  const { data: profile, error: profileError } = await admin.from("profiles").select("status,deleted_at").eq("id", data.user.id).maybeSingle();
-  if (profileError) throw profileError;
+  const { data: profile } = await loginDatabaseRequest("LOGIN_PROFILE", () =>
+    admin.from("profiles").select("status,deleted_at").eq("id", data.user.id).maybeSingle());
   if (!profile || profile.status !== "active" || profile.deleted_at) throw new HttpError(401, "Invalid email or password, or account unavailable.");
   const id = randomBytes(32).toString("hex");
   const code = randomInt(100000, 1000000).toString();
   const store = await cookies();
   const previousDevice = store.get(deviceCookie)?.value;
   const deviceId = previousDevice && /^[a-f0-9]{64}$/.test(previousDevice) ? previousDevice : randomBytes(32).toString("hex");
-  const { error: insertError } = await admin.from("login_challenges").insert({
+  await loginDatabaseRequest("LOGIN_CHALLENGE", () => admin.from("login_challenges").insert({
     id: loginHash(id, key), user_id: data.user.id, code_hash: loginHash(`${id}:${code}`, key),
     encrypted_session: encryptSession(JSON.stringify({ access_token: data.session.access_token, refresh_token: data.session.refresh_token }), key),
     device: deviceLabel(request.headers.get("user-agent")),
     device_id: loginHash(`device:${deviceId}`, key),
-  });
-  if (insertError) throw insertError;
+  }));
   try {
     await sendMail({
       to: data.user.email, subject: "Your DMHCA CRM verification code",
@@ -75,8 +87,8 @@ export async function startLogin(request: Request, email: string, password: stri
   }
   const previous = store.get(challengeCookie)?.value;
   if (previous) {
-    const { error: cleanupError } = await admin.from("login_challenges").delete().eq("id", loginHash(previous, key));
-    if (cleanupError) throw cleanupError;
+    await loginDatabaseRequest("LOGIN_CHALLENGE_CLEANUP", () =>
+      admin.from("login_challenges").delete().eq("id", loginHash(previous, key)));
   }
   store.set(challengeCookie, id, cookieOptions);
   store.set(deviceCookie, deviceId, { ...cookieOptions, maxAge: 365 * 24 * 60 * 60 });
