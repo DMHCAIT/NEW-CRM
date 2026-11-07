@@ -9,6 +9,10 @@ import { apiRequest } from "@/lib/crm-data";
 import { emptyFilter, leadQueryPath, useDebouncedValue, useLiveLeadData, type LiveLeadData } from "@/lib/live-leads-client";
 import type { LeadCursor, LeadPage } from "@/lib/server/lead-query";
 
+type PipelineData = Pick<LiveLeadData, "leads" | "stages" | "profiles" | "user"> & {
+  stagePages: (LeadPage & { stage: string })[];
+};
+
 export default function PipelinePage() {
   const [query, setQuery] = useState("");
   const [mine, setMine] = useState(false);
@@ -22,7 +26,7 @@ export default function PipelinePage() {
   const search = useDebouncedValue(query);
   const filter = { ...emptyFilter(), query: search, quickView: mine ? "My Leads" : "All accessible leads" };
   const path = leadQueryPath(filter, { view: "pipeline", owner, stage: stageFilter, sort });
-  const { data, error, loading, reload, setError } = useLiveLeadData<LiveLeadData & { stagePages: (LeadPage & { stage: string })[] }>(path);
+  const { data, error, loading, reload, setError } = useLiveLeadData<PipelineData>(path);
   const [columnPages, setColumnPages] = useState<Record<string, { path: string; source: typeof data; index: number; cursors: (LeadCursor | null)[]; page: LeadPage }>>({});
   const currentColumn = (stage: string) => {
     const saved = columnPages[stage];

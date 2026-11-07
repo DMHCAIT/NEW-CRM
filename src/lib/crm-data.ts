@@ -175,12 +175,28 @@ export function errorMessage(error: unknown, fallback: string): string {
 /** Calls a CRM API route and throws with the server's error message on failure. */
 const browserReads = new Map<string, { value: unknown; savedAt: number }>();
 const pendingBrowserReads = new Map<string, Promise<unknown>>();
+const preparedBrowserReads = new Map<string, { promise: Promise<unknown>; expiresAt: number }>();
 let readGeneration = 0;
 
 export function clearApiReadCache() {
   readGeneration++;
   browserReads.clear();
   pendingBrowserReads.clear();
+  preparedBrowserReads.clear();
+}
+
+export function prefetchApiRead(path: string): Promise<unknown> {
+  if (typeof window === "undefined" || !path.startsWith("/api/") || path.startsWith("/api/auth/")) return apiRequest(path);
+  const saved = preparedBrowserReads.get(path);
+  if (saved && Date.now() < saved.expiresAt) return saved.promise;
+  const promise = apiRequest(path);
+  const entry = { promise, expiresAt: Infinity };
+  if (preparedBrowserReads.size >= 20) preparedBrowserReads.delete(preparedBrowserReads.keys().next().value!);
+  preparedBrowserReads.set(path, entry);
+  void promise.then(() => { entry.expiresAt = Date.now() + 5000; }, () => {
+    if (preparedBrowserReads.get(path) === entry) preparedBrowserReads.delete(path);
+  });
+  return promise;
 }
 
 export function getCachedApiRead<T>(path: string, maxAgeMs = 30000): T | undefined {
@@ -191,11 +207,14 @@ export function getCachedApiRead<T>(path: string, maxAgeMs = 30000): T | undefin
   return undefined;
 }
 
-export async function apiRequest<T = unknown>(path: string, init: { method?: string; body?: unknown; maxAgeMs?: number } = {}): Promise<T> {
+export async function apiRequest<T = unknown>(path: string, init: { method?: string; body?: unknown; maxAgeMs?: number; usePrefetched?: boolean } = {}): Promise<T> {
   const method = (init.method ?? (init.body === undefined ? "GET" : "POST")).toUpperCase();
   const browserRead = typeof window !== "undefined" && method === "GET" && path.startsWith("/api/") && !path.startsWith("/api/auth/");
   const maxAgeMs = Math.min(Math.max(init.maxAgeMs ?? 0, 0), 30000);
   if (browserRead) {
+    const prepared = preparedBrowserReads.get(path);
+    preparedBrowserReads.delete(path);
+    if (init.usePrefetched && prepared && Date.now() < prepared.expiresAt) return prepared.promise as Promise<T>;
     const saved = getCachedApiRead<T>(path, maxAgeMs);
     if (saved !== undefined) return saved;
     browserReads.delete(path);

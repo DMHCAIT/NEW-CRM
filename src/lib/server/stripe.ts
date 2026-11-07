@@ -26,7 +26,7 @@ export async function createStripeCheckout(input: {
 }) {
   const amount = Math.round(input.amount * 100);
   if (!Number.isSafeInteger(amount) || amount < 100) throw new HttpError(400, "USD payments require at least $1.");
-  const statusUrl = `${appUrl()}/invoice-status/${encodeURIComponent(input.statusToken)}`;
+  const statusUrl = `${appUrl("invoice")}/invoice-status/${encodeURIComponent(input.statusToken)}`;
   const body = new URLSearchParams({
     mode: "payment", client_reference_id: input.invoiceId, customer_email: input.email,
     success_url: statusUrl, cancel_url: statusUrl,

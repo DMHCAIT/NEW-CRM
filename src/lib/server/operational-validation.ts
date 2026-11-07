@@ -2,6 +2,10 @@ import { z } from "zod";
 
 const twoDecimals = (value: number) => Math.abs(value * 100 - Math.round(value * 100)) < 0.00001;
 const money = z.coerce.number().finite().min(0).max(99999999).refine(twoDecimals, "Use at most two decimal places.");
+const calendarDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(value => {
+  const date = new Date(`${value}T00:00:00Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}, "Invalid invoice date");
 export const invoiceInput = z.object({
   lead_id: z.string().uuid(),
   course_id: z.preprocess(value => value === "" ? undefined : value, z.string().uuid().optional()),
@@ -10,6 +14,8 @@ export const invoiceInput = z.object({
   billing_address: z.string().trim().max(2000).optional(),
   save_billing_address: z.boolean().default(false),
   installment_amount: money.optional(),
+  request_id: z.string().uuid().optional(),
+  installments: z.array(z.object({ amount: money.refine(value => value >= 1, "Each installment must be at least one currency unit."), invoice_date: calendarDate })).min(1).max(36).optional(),
   parent_invoice_id: z.preprocess((value) => value === "" ? undefined : value, z.string().uuid().nullable().optional()),
   description: z.string().trim().min(1).max(500).default("Catalog course"),
   quantity: z.coerce.number().positive().max(10000).refine(twoDecimals, "Use at most two decimal places.").default(1),
@@ -37,12 +43,18 @@ export const invoiceInput = z.object({
     ctx.addIssue({ code: "custom", message: "Online payments require an invoice total of at least one currency unit.", path: ["unit_price"] });
   if ((value.course_id || value.parent_invoice_id) && (!value.company_code || !value.billing_address))
     ctx.addIssue({ code: "custom", message: "Choose an invoice company and enter the billing address.", path: ["billing_address"] });
-  if ((value.course_id || value.parent_invoice_id) && value.payment_type === "installments" && (!value.installment_amount || value.installment_amount < 1))
+  if ((value.course_id || value.parent_invoice_id) && value.payment_type === "installments" && !value.installments && (!value.installment_amount || value.installment_amount < 1))
     ctx.addIssue({ code: "custom", message: "Enter the amount for this installment (at least one currency unit).", path: ["installment_amount"] });
   if (value.course_total !== undefined && total > value.course_total)
     ctx.addIssue({ code: "custom", message: "Installment cannot exceed the course total.", path: ["course_total"] });
   if (value.quantity * value.unit_price + value.tax_amount > 9999999999.99)
     ctx.addIssue({ code: "custom", message: "Invoice amount is too large.", path: ["unit_price"] });
+  if (value.payment_type === "installments" && (!value.installments || !value.request_id))
+    ctx.addIssue({ code: "custom", message: "Add an installment schedule and request ID.", path: ["installments"] });
+  if (value.installments && value.payment_type !== "installments")
+    ctx.addIssue({ code: "custom", message: "Schedules are only available for installment payments.", path: ["installments"] });
+  if (value.installments?.some((row, index, rows) => index > 0 && row.invoice_date < rows[index - 1].invoice_date))
+    ctx.addIssue({ code: "custom", message: "Enter installment dates in chronological order.", path: ["installments"] });
 });
 
 export function invoiceTotals(input: z.infer<typeof invoiceInput>) {

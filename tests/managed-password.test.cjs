@@ -114,6 +114,7 @@ function usersForm({ self = false, mismatch = false, creating = false, download 
   const calls = [], redirects = [];
   let index = 0;
   const api = load("src\\app\\users\\page.tsx", {
+    "@/components/section-loading": load("src\\components\\section-loading.tsx", {}),
     react: { ...React, useEffect() {}, useState: () => {
       const position = index++;
       return [states[position], (value) => { states[position] = value; }];

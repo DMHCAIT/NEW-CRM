@@ -14,6 +14,8 @@ const requiredColumns = [
   "invoices.enrollment_tax_percent", "invoices.installment_number",
   "invoices.payment_expires_at", "invoices.stripe_expires_at", "invoices.tax_review_required",
   "invoices.pricing_review_note", "invoices.payment_revision", "invoice_checkout_sessions.session_id",
+  "invoices.invoice_date", "invoices.scheduled_for", "invoices.plan_request_id",
+  "invoices.delivery_error", "invoices.delivery_attempted_at",
 ];
 
 function databaseOptions(env, projectRoot = root) {

@@ -5,6 +5,7 @@ import { apiRequest, errorMessage, formatDateTime } from "@/lib/crm-data";
 import type { Profile } from "@/lib/types";
 import { createCredentialPdf, downloadCredentialPdf } from "@/lib/credential-pdf";
 import { KeyRound, Plus, Search, Trash2, Users } from "lucide-react";
+import { SectionLoading } from "@/components/section-loading";
 
 type UserData = { profiles: Profile[]; activity: { user_id: string; signed_in_at: string; last_seen_at: string }[]; canManage: boolean; currentUserId: string };
 const blank: Omit<Profile, "id" | "deletedAt"> = { fullName: "", email: "", phone: "", role: "counselor", reportingTo: null, status: "active", ivrExtension: "" };
@@ -24,14 +25,15 @@ export default function UsersPage() {
   const [deleteTarget, setDeleteTarget] = useState<Profile | null>(null);
   const [deleteEmail, setDeleteEmail] = useState("");
   function clearPassword() { setPassword(""); setConfirmPassword(""); }
-  async function load() { setData(await apiRequest<UserData>("/api/users")); }
-  useEffect(() => { load().catch((error) => setError(errorMessage(error, "Could not load users."))); }, []);
+  async function load(usePrefetched = false) { setData(await apiRequest<UserData>("/api/users", { usePrefetched })); }
+  useEffect(() => { load(true).catch((error) => setError(errorMessage(error, "Could not load users."))); }, []);
   async function action(callback: () => Promise<unknown>, success: string) {
     setError(""); setMessage(""); setBusy(true);
     try { await callback(); clearPassword(); setPasswordTarget(null); setEditing(null); setMessage(success); await load(); }
     catch (error) { setError(errorMessage(error, "User operation failed.")); await load().catch((loadError) => setError(errorMessage(loadError, "Could not refresh users."))); }
     finally { setBusy(false); }
   }
+  if (!data && !error) return <SectionLoading title="Users" />;
   return <>
     <div className="page-heading"><div><h1>Users & hierarchy</h1><p>Manage your admissions team, reporting relationships and account access.</p></div>{data?.canManage && <button disabled={busy} className="button button-primary" onClick={() => { setForm(blank); setPasswordTarget(null); setDeleteTarget(null); setDownloadCredentials(true); clearPassword(); setError(""); setMessage(""); setEditing("new"); }}><Plus size={16} />Add user</button>}</div>
     {error && <p className="form-error" role="alert">{error}</p>}{message && <p className="form-success" role="status">{message}</p>}

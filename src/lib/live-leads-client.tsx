@@ -39,7 +39,9 @@ export function useLiveLeadData<T = LiveLeadData>(path = "/api/leads") {
     }
     finally { if (current === requestId.current) setLoading(false); }
   }, [path]);
-  const reload = useCallback(() => load(0), [load]);
+  const latestLoad = useRef(load);
+  latestLoad.current = load;
+  const reload = useCallback(() => latestLoad.current(0), []);
   useEffect(() => {
     const sequence = requestId;
     const saved = getCachedApiRead<T>(path);

@@ -66,7 +66,9 @@ export function databaseFilter(filter: SavedLeadFilter, timezone: string, dashbo
   }) };
 }
 
-export async function fetchLeadPage(client: SupabaseClient, query: LeadQuery, pageSize = 50): Promise<LeadPage> {
+type LeadPageIds = Omit<LeadPage, "leads"> & { ids: string[] };
+
+async function fetchLeadPageIds(client: SupabaseClient, query: LeadQuery, pageSize: number): Promise<LeadPageIds> {
   const { data, error } = await client.rpc("crm_lead_page", {
     filter_json: databaseFilter(query.filter, query.dashboard ? "UTC" : query.timezone, query.dashboard),
     timezone_name: query.dashboard ? "UTC" : query.timezone,
@@ -83,12 +85,30 @@ export async function fetchLeadPage(client: SupabaseClient, query: LeadQuery, pa
   const cursor = data.nextCursor;
   if (data.hasMore && (!cursor || typeof cursor.id !== "string" || typeof cursor.createdAt !== "string"
     || !Number.isFinite(Date.parse(cursor.createdAt)))) throw new HttpError(500, "Invalid lead page cursor.");
-  if (!ids.length) return { leads: [], hasMore: false, nextCursor: null, ...(query.countOnly ? { total: data.total } : {}) };
-  const result = await client.from("leads").select(LEAD_SELECT).in("id", ids).eq("is_archived", false).returns<LeadRow[]>();
-  dbError(result.error);
-  const byId = new Map((result.data ?? []).map(row => [row.id, row]));
-  const leads = ids.flatMap(id => { const row = byId.get(id); return row ? [mapLead(row)] : []; });
-  return { leads, hasMore: data.hasMore, nextCursor: data.hasMore ? {
+  if (!ids.length) return { ids, hasMore: false, nextCursor: null, ...(query.countOnly ? { total: data.total } : {}) };
+  return { ids, hasMore: data.hasMore, nextCursor: data.hasMore ? {
     createdAt: cursor.createdAt, id: cursor.id, name: cursor.name, followUpAt: cursor.followUpAt,
   } : null };
+}
+
+export async function fetchLeadPages(client: SupabaseClient, queries: LeadQuery[], pageSize = 25): Promise<LeadPage[]> {
+  const pages = await Promise.all(queries.map(query => fetchLeadPageIds(client, query, pageSize)));
+  const ids = [...new Set(pages.flatMap(page => page.ids))];
+  const batches: string[][] = [];
+  // Bound PostgREST URL length and row counts while sharing reads across stages.
+  for (let offset = 0; offset < ids.length; offset += 100) batches.push(ids.slice(offset, offset + 100));
+  const records = await Promise.all(batches.map(async batch => {
+    const result = await client.from("leads").select(LEAD_SELECT).in("id", batch).eq("is_archived", false).returns<LeadRow[]>();
+    dbError(result.error);
+    return (result.data ?? []).map(mapLead);
+  }));
+  const byId = new Map(records.flat().map(lead => [lead.id, lead]));
+  return pages.map(({ ids: pageIds, ...page }) => ({
+    ...page, leads: pageIds.flatMap(id => { const lead = byId.get(id); return lead ? [lead] : []; }),
+  }));
+}
+
+export async function fetchLeadPage(client: SupabaseClient, query: LeadQuery, pageSize = 50): Promise<LeadPage> {
+  const [page] = await fetchLeadPages(client, [query], pageSize);
+  return page;
 }

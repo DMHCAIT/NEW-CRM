@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const { readdirSync, readFileSync } = require("node:fs");
 const { join } = require("node:path");
 const { PGlite } = require("@electric-sql/pglite");
+const { randomUUID } = require("node:crypto");
 
 let db;
 const adminId = "10000000-0000-4000-8000-000000000001";
@@ -18,6 +19,19 @@ const installmentCourseId = "40000000-0000-4000-8000-000000000002";
 const loanCourseId = "40000000-0000-4000-8000-000000000003";
 const paymentCourseId = "40000000-0000-4000-8000-000000000004";
 const invoiceDefaults = { company_code: "DMHCA", currency: "INR", billing_address: "Lead billing address", course_id: courseId };
+const scheduleToday = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+const planInput = input => ({ ...input, request_id: randomUUID(), installments: [{ amount: input.installment_amount, invoice_date: scheduleToday() }] });
+const createInstallment = input => asUser(counselorId, counselorSession, tx => tx.query(
+  "select (public.operational_create_installment_plan($1::jsonb))[1] as id", [JSON.stringify(planInput(input))]));
+async function newPlanFixture(discount = 0) {
+  const course = (await db.query("insert into public.courses(name,price_inr,price_usd) values($1,100,10) returning id", [`Scheduled plan ${randomUUID()}`])).rows[0].id;
+  const date = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+  return { ...invoiceDefaults, lead_id: leadId, course_id: course, payment_type: "installments",
+    discount_percent: discount, discount_reason: discount ? "Enrollment concession" : "",
+    request_id: randomUUID(), installments: [{ amount: discount ? 50 : 59, invoice_date: date }, { amount: discount ? 56.20 : 59, invoice_date: date }] };
+}
+const savePlan = async input => (await asUser(counselorId, counselorSession, tx => tx.query(
+  "select public.operational_create_installment_plan($1::jsonb) as ids", [JSON.stringify(input)]))).rows[0].ids;
 
 before(async () => {
   db = new PGlite();
@@ -60,6 +74,158 @@ before(async () => {
 });
 
 after(async () => { if (db) await db.close(); });
+
+test("scheduled plans are atomic, idempotent and preserve exact amounts and India-time deadlines", async () => {
+  const input = await newPlanFixture();
+  await assert.rejects(savePlan({ ...input, installments: [{ ...input.installments[0], amount: 60 }, input.installments[1]] }), /unallocated course balance/);
+  assert.equal((await db.query("select id from public.invoices where course_id=$1", [input.course_id])).rows.length, 0);
+  const ids = await savePlan(input);
+  assert.equal(ids.length, 2);
+  assert.deepEqual(await savePlan(input), ids);
+  const rows = (await db.query(`select *,extract(epoch from payment_expires_at-scheduled_for) as window_seconds
+    from public.invoices where id=any($1) order by installment_number`, [ids])).rows;
+  assert.deepEqual(rows.map(row => row.status), ["scheduled", "scheduled"]);
+  assert.deepEqual(rows.map(row => row.total), ["59.00", "59.00"]);
+  assert.equal(rows[1].parent_invoice_id, ids[0]);
+  assert.equal(new Date(rows[0].scheduled_for).getUTCHours(), 3);
+  assert.equal(new Date(rows[0].scheduled_for).getUTCMinutes(), 30);
+  assert.equal(Number(rows[0].window_seconds), 345600);
+  assert.equal((await db.query("select due_date=invoice_date+4 as correct from public.invoices where id=$1", [ids[0]])).rows[0].correct, true);
+  await assert.rejects(savePlan({ ...input, request_id: randomUUID(), installments: [{ ...input.installments[0], amount: 1 }] }), /unallocated course balance/);
+});
+
+test("partial schedules extend the same course enrollment while other courses keep independent totals", async () => {
+  const input = await newPlanFixture();
+  const date = input.installments[0].invoice_date;
+  const first = await savePlan({ ...input, installments: [{ amount: 10, invoice_date: date }, { amount: 20, invoice_date: date }] });
+  const second = await savePlan({ ...input, request_id: randomUUID(), installments: [{ amount: 25, invoice_date: date }, { amount: 15, invoice_date: date }] });
+  assert.equal(second.length, 2);
+  const rows = (await db.query("select id,parent_invoice_id,course_total,installment_number from public.invoices where course_id=$1 order by installment_number", [input.course_id])).rows;
+  assert.equal(rows.length, 4);
+  assert.deepEqual(rows.map(row => row.installment_number), [1, 2, 3, 4]);
+  assert.deepEqual(rows.map(row => row.parent_invoice_id), [null, first[0], first[0], first[0]]);
+  assert.ok(rows.every(row => row.course_total === "118.00"));
+  const otherInput = await newPlanFixture();
+  const other = await savePlan(otherInput);
+  assert.notEqual(other[0], first[0]);
+  await asUser(adminId, adminSession, tx => tx.query("select public.operational_confirm_external_payment($1,'BANK-PARTIAL-TEST','Verified by finance')", [second[0]]));
+  const balance = (await db.query(`select max(course_total)-sum(total) filter(where status='paid') as balance,
+    max(course_total)-sum(total) filter(where status not in ('cancelled','rejected')) as unallocated
+    from public.invoices where coalesce(parent_invoice_id,id)=$1`, [first[0]])).rows[0];
+  assert.deepEqual(balance, { balance: "93.00", unallocated: "48.00" });
+  assert.equal((await db.query("select count(*)::int as count from public.invoices where id=any($1) and status='paid'", [other])).rows[0].count, 0);
+});
+
+test("courses support more than 36 installments over successive saves and never silently reopen after payment", async () => {
+  const input = await newPlanFixture();
+  const row = { amount: 1, invoice_date: input.installments[0].invoice_date };
+  const first = await savePlan({ ...input, installments: Array.from({ length: 36 }, () => row) });
+  const next = await savePlan({ ...input, request_id: randomUUID(), installments: Array.from({ length: 4 }, () => row) });
+  assert.equal(next.length, 4);
+  assert.equal((await db.query("select installment_number from public.invoices where id=$1", [next[3]])).rows[0].installment_number, 40);
+  const last = await savePlan({ ...input, request_id: randomUUID(), installments: [{ ...row, amount: 78 }] });
+  await db.query("update public.invoices set status='paid' where course_id=$1", [input.course_id]);
+  await assert.rejects(savePlan({ ...input, request_id: randomUUID(), installments: [row] }), /unallocated course balance/);
+  assert.equal((await db.query("select count(*)::int as count from public.invoices where course_id=$1 and parent_invoice_id is null", [input.course_id])).rows[0].count, 1);
+  assert.equal((await db.query("select parent_invoice_id from public.invoices where id=$1", [last[0]])).rows[0].parent_invoice_id, first[0]);
+});
+
+test("verified external links and finance confirmations settle approved scheduled or expired installments only once", async () => {
+  const ids = await savePlan(await newPlanFixture(10));
+  const record = (id, paymentId, amount) => asService(tx => tx.query(
+    "select public.operational_record_verified_url($1,'razorpay',$2,'plink_external',$3,'INR','https://rzp.io/i/external','{}') as recorded", [id, paymentId, amount]));
+  await assert.rejects(record(ids[1], "pay_scheduled_external", 5620), /approved invoice/);
+  await assert.rejects(asUser(adminId, adminSession, tx => tx.query("select public.operational_confirm_external_payment($1,'BANK-UNAPPROVED','Evidence')", [ids[1]])), /approved unpaid/);
+  await asUser(adminId, adminSession, tx => tx.query("select public.operational_decide_invoice($1,'approved','Approved')", [ids[0]]));
+  assert.equal((await record(ids[1], "pay_scheduled_external", 5620)).rows[0].recorded, true);
+  assert.equal((await record(ids[1], "pay_scheduled_external", 5620)).rows[0].recorded, false);
+  await db.query("update public.invoices set status='expired' where id=$1", [ids[0]]);
+  await asUser(adminId, adminSession, tx => tx.query("select public.operational_confirm_external_payment($1,'BANK-EXPIRED-TEST','Verified bank receipt')", [ids[0]]));
+  assert.equal((await db.query("select sum(total) as paid from public.invoices where id=any($1) and status='paid'", [ids])).rows[0].paid, "106.20");
+  const other = await savePlan(await newPlanFixture());
+  await assert.rejects(record(other[0], "pay_scheduled_external", 5900), /duplicate key/);
+  await assert.rejects(asUser(counselorId, counselorSession, tx => tx.query("select public.operational_confirm_external_payment($1,'FORGED','Evidence')", [other[0]])), /Not authorized/);
+  await db.query("update public.invoices set tax_review_required=true where id=$1", [other[0]]);
+  await assert.rejects(record(other[1], "pay_tax_review", 5900), /approved invoice/);
+});
+
+test("saving selected installments releases today's approved invoices only and retains future schedules", async () => {
+  const input = await newPlanFixture();
+  input.installments[0].invoice_date = scheduleToday();
+  const ids = await savePlan(input);
+  const other = await savePlan({ ...await newPlanFixture(), installments: [{ amount: 59, invoice_date: scheduleToday() }] });
+  const release = values => asService(tx => tx.query("select id,scheduled_for,payment_expires_at from public.operational_release_due_invoices($1::uuid[])", [values]));
+  await assert.rejects(asUser(counselorId, counselorSession, tx => tx.query("select id from public.operational_release_due_invoices($1::uuid[])", [ids])), /permission denied/);
+  await db.query("update public.invoices set scheduled_for=now()+interval '1 hour' where id=$1", [ids[0]]);
+  const released = await release(ids);
+  assert.deepEqual(released.rows.map(row => row.id), [ids[0]]);
+  assert.ok(new Date(released.rows[0].scheduled_for).getTime() <= Date.now());
+  assert.equal(new Date(released.rows[0].payment_expires_at) - new Date(released.rows[0].scheduled_for), 96 * 60 * 60 * 1000);
+  assert.equal((await release(ids)).rows.length, 0, "immediate duplicate attempts must not resend");
+  assert.equal((await db.query("select status from public.invoices where id=$1", [other[0]])).rows[0].status, "scheduled");
+  assert.equal((await db.query("select status from public.invoices where id=$1", [ids[1]])).rows[0].status, "scheduled");
+  const discounted = await newPlanFixture(10);
+  discounted.installments[0].invoice_date = scheduleToday();
+  const pending = await savePlan(discounted);
+  assert.equal((await release(pending)).rows.length, 0);
+  await asUser(adminId, adminSession, tx => tx.query("select public.operational_decide_invoice($1,'approved','Approved')", [pending[0]]));
+  assert.deepEqual((await release(pending)).rows.map(row => row.id), [pending[0]]);
+  await assert.rejects(release([]), /between 1 and 36/);
+  await assert.rejects(release(null), /between 1 and 36/);
+  await db.query("update public.invoices set email_message_id='accepted' where id=any($1)", [[ids[0], pending[0]]]);
+});
+
+test("one discount decision unlocks every due installment without waiting for earlier payment", async () => {
+  const ids = await savePlan(await newPlanFixture(10));
+  assert.equal((await db.query("select count(*)::int as count from public.invoice_approvals where invoice_id=any($1)", [ids])).rows[0].count, 1);
+  await db.query("update public.invoices set scheduled_for=now()-interval '1 minute' where id=any($1)", [ids]);
+  assert.equal((await asService(tx => tx.query("select id from public.operational_release_due_invoices() where id=any($1)", [ids]))).rows.length, 0);
+  await asUser(adminId, adminSession, tx => tx.query("select public.operational_decide_invoice($1,'approved','Approved enrollment')", [ids[0]]));
+  const released = await asService(tx => tx.query("select id from public.operational_release_due_invoices() where id=any($1)", [ids]));
+  assert.equal(released.rows.length, 2);
+  assert.deepEqual((await db.query("select status from public.invoices where id=any($1)", [ids])).rows.map(row => row.status), ["sent", "sent"]);
+  assert.equal((await asService(tx => tx.query("select id from public.operational_release_due_invoices() where id=any($1)", [ids]))).rows.length, 0, "claimed attempts must not immediately repeat");
+  await db.query("update public.invoices set delivery_attempted_at=now()-interval '16 minutes' where id=any($1)", [ids]);
+  assert.equal((await asService(tx => tx.query("select id from public.operational_release_due_invoices() where id=any($1)", [ids]))).rows.length, 2, "safe failures may retry");
+  await db.query("update public.invoices set email_message_id='accepted' where id=any($1)", [ids]);
+  assert.equal((await asService(tx => tx.query("select id from public.operational_release_due_invoices() where id=any($1)", [ids]))).rows.length, 0);
+});
+
+test("rejection cancels scheduled children and workers cannot bypass approval or delivery locks", async () => {
+  const ids = await savePlan(await newPlanFixture(10));
+  await asUser(adminId, adminSession, tx => tx.query("select public.operational_decide_invoice($1,'rejected','Not approved')", [ids[0]]));
+  assert.deepEqual((await db.query("select status from public.invoices where id=any($1) order by installment_number", [ids])).rows.map(row => row.status), ["rejected", "cancelled"]);
+  await assert.rejects(asUser(counselorId, counselorSession, tx => tx.query("select public.operational_release_due_invoices()")), /permission denied/);
+  const input = await newPlanFixture();
+  await assert.rejects(asUser(counselorId, unverifiedSession, tx => tx.query("select public.operational_create_installment_plan($1::jsonb)", [JSON.stringify(input)])), /Not authorized/);
+  const locked = await savePlan(input);
+  await db.query("update public.invoices set scheduled_for=now()-interval '1 minute',email_lock_at=now() where id=any($1)", [locked]);
+  assert.equal((await asService(tx => tx.query("select id from public.operational_release_due_invoices() where id=any($1)", [locked]))).rows.length, 0);
+  await db.query("update public.invoices set payment_expires_at=now()-interval '1 minute' where id=any($1)", [locked]);
+  await asService(tx => tx.query("select public.operational_release_due_invoices()"));
+  assert.equal((await db.query("select status,delivery_error from public.invoices where id=$1", [locked[0]])).rows[0].status, "expired");
+});
+
+test("schedule validation rejects past, unordered, tiny and overprecise installments without partial writes", async () => {
+  const input = await newPlanFixture();
+  for (const installments of [
+    [{ amount: 1, invoice_date: "2020-01-01" }],
+    [{ amount: 0.99, invoice_date: input.installments[0].invoice_date }],
+    [{ amount: 1.001, invoice_date: input.installments[0].invoice_date }],
+    [{ amount: 59, invoice_date: "2099-01-01" }, input.installments[1]],
+  ]) await assert.rejects(savePlan({ ...input, installments }));
+  assert.equal((await db.query("select id from public.invoices where course_id=$1", [input.course_id])).rows.length, 0);
+  await assert.rejects(asUser(counselorId, counselorSession, tx => tx.query("select public.operational_create_unscheduled_invoice('{}')")), /permission denied/);
+});
+
+test("closing the expired first installment does not block later approved scheduled payments", async () => {
+  const ids = await savePlan(await newPlanFixture());
+  await db.query("update public.invoices set status='cancelled',payment_expires_at=now()-interval '1 minute' where id=$1", [ids[0]]);
+  await db.query("update public.invoices set scheduled_for=now()-interval '1 minute' where id=$1", [ids[1]]);
+  const released = await asService(tx => tx.query("select id from public.operational_release_due_invoices() where id=any($1)", [ids]));
+  assert.deepEqual(released.rows.map(row => row.id), [ids[1]]);
+  await db.query("update public.invoices set email_message_id='accepted' where id=$1", [ids[1]]);
+});
 
 test("verified repeat login replaces only the same account and device, preserving history", async () => {
   const rollback = new Error("rollback device replacement test");
@@ -251,10 +417,8 @@ test("un-discounted invoices issue immediately while discounts require approver 
   )), /already decided/);
 });
 
-test("installments reserve one unpaid invoice and cannot exceed the original course balance", async () => {
-  const create = input => asUser(counselorId, counselorSession, tx => tx.query(
-    "select public.operational_create_invoice($1::jsonb) as id", [JSON.stringify({ ...invoiceDefaults, ...input, course_id: installmentCourseId, installment_amount: input.unit_price })],
-  ));
+test("installments reserve every unpaid invoice and cannot exceed the original course balance", async () => {
+  const create = input => createInstallment({ ...invoiceDefaults, ...input, course_id: installmentCourseId, installment_amount: input.unit_price });
   const base = { lead_id: leadId, quantity: 1, tax_amount: 0, payment_type: "installments", description: "Course installment", due_date: "2026-12-31" };
   const first = await create({ ...base, unit_price: 100, course_total: 300 });
   const firstId = first.rows[0].id;
@@ -262,15 +426,15 @@ test("installments reserve one unpaid invoice and cannot exceed the original cou
   assert.equal(rootRow.course_total, "354.00");
   assert.equal(rootRow.lead_id, leadId);
   assert.equal(rootRow.payment_type, "installments");
-  await assert.rejects(create({ ...base, unit_price: 50, parent_invoice_id: firstId }), /unpaid or pending installment/);
+  await assert.rejects(create({ ...base, unit_price: 255, parent_invoice_id: firstId }), /unallocated course balance/);
   await db.query("update public.invoices set status='paid',paid_at=now() where id=$1", [firstId]);
-  await assert.rejects(create({ ...base, unit_price: 255, parent_invoice_id: firstId }), /remaining course balance/);
+  await assert.rejects(create({ ...base, unit_price: 255, parent_invoice_id: firstId }), /unallocated course balance/);
   await assert.rejects(create({...base,unit_price:50,parent_invoice_id:firstId,company_code:"IBMP"}),/original course, company and currency/);
   await assert.rejects(create({...base,unit_price:50,parent_invoice_id:firstId,currency:"USD"}),/original course, company and currency/);
   await db.query("update public.courses set price_inr=50,is_active=false where id=$1",[installmentCourseId]);
   const second = await create({ ...base, unit_price: 150, parent_invoice_id: firstId });
   assert.equal((await db.query("select parent_invoice_id,course_total from public.invoices where id=$1", [second.rows[0].id])).rows[0].parent_invoice_id, firstId);
-  await assert.rejects(create({...base,unit_price:50,parent_invoice_id:second.rows[0].id}),/Invalid installment parent/);
+  await assert.rejects(create({...base,unit_price:50,parent_invoice_id:second.rows[0].id}),/Enrollment is unavailable/);
   await db.query("update public.courses set price_inr=300,is_active=true where id=$1",[installmentCourseId]);
 });
 
@@ -278,15 +442,14 @@ test("tax-inclusive discounted installments preserve the course agreement throug
   const course = (await db.query("insert into public.courses(name,price_inr,price_usd) values('Gross installment test',140000,1400) returning id")).rows[0].id;
   const base = {...invoiceDefaults,course_id:course,lead_id:leadId,payment_type:"installments",discount_percent:10,
     discount_reason:"Approved course concession",tax_percent:18,tax_amount:1,course_total:1,due_date:"2026-12-31"};
-  const create = input => asUser(counselorId,counselorSession,tx=>tx.query(
-    "select public.operational_create_invoice($1::jsonb) as id",[JSON.stringify({...base,...input})]));
+  const create = input => createInstallment({...base,...input});
   const first = (await create({installment_amount:40000})).rows[0].id;
   let invoice = (await db.query("select * from public.invoices where id=$1",[first])).rows[0];
   assert.equal(invoice.total,"40000.00","entered payment must not be discounted or taxed again");
   assert.equal(invoice.course_total,"148680.00");
   assert.equal(invoice.status,"pending_approval");
   assert.equal(invoice.installment_number,1);
-  await assert.rejects(create({installment_amount:20000}),/unpaid or pending installment/);
+  await assert.rejects(create({installment_amount:148680}),/unallocated course balance/);
   await asUser(superId,superSession,tx=>tx.query("select public.operational_decide_invoice($1,'approved','Approved')",[first]));
   await db.query("update public.invoices set status='paid',paid_at=now() where id=$1",[first]);
   await db.query("update public.courses set price_inr=200000,is_active=false where id=$1",[course]);
@@ -297,11 +460,11 @@ test("tax-inclusive discounted installments preserve the course agreement throug
   assert.equal(invoice.discount_percent,"10.00");
   assert.equal(invoice.enrollment_tax_percent,"18.00");
   assert.equal(invoice.total,"50000.00");
-  assert.equal(invoice.status,"sent","unchanged approved course pricing does not require reapproval");
+  assert.equal(invoice.status,"scheduled","unchanged approved course pricing does not require reapproval");
   assert.equal(invoice.installment_number,2);
   assert.equal((await db.query("select count(*) from public.invoice_approvals where invoice_id=$1",[second])).rows[0].count,0);
   await db.query("update public.invoices set status='paid',paid_at=now() where id=$1",[second]);
-  await assert.rejects(create({installment_amount:58680.01}),/remaining course balance/);
+  await assert.rejects(create({installment_amount:58680.01}),/unallocated course balance/);
   await assert.rejects(create({installment_amount:58679.50}),/less than one currency unit/);
   const third = (await create({installment_amount:58680})).rows[0].id;
   await db.query("update public.invoices set status='paid',paid_at=now() where id=$1",[third]);
@@ -309,7 +472,7 @@ test("tax-inclusive discounted installments preserve the course agreement throug
     from public.invoices where coalesce(parent_invoice_id,id)=$1 and status='paid'`,[first])).rows[0];
   assert.deepEqual(sums,{base:"140000.00",discount:"14000.00",tax:"22680.00",total:"148680.00"});
   assert.equal((await db.query("select installment_number from public.invoices where id=$1",[third])).rows[0].installment_number,3);
-  await assert.rejects(create({parent_invoice_id:first,installment_amount:1}),/remaining course balance/);
+  await assert.rejects(create({parent_invoice_id:first,installment_amount:1}),/unallocated course balance/);
 });
 
 test("verified external URLs are service-only, exact-amount, idempotent and cannot reuse a payment", async () => {
@@ -340,8 +503,8 @@ test("currency tax and the four-day deadline are server controlled even with for
 
 test("admin review recalculates wholly unpaid legacy tax then requires approval before issue",async()=>{
   const id=(await asUser(counselorId,counselorSession,tx=>tx.query("select public.operational_create_invoice($1::jsonb) as id",
-    [JSON.stringify({...invoiceDefaults,lead_id:leadId,payment_type:"installments",installment_amount:100,due_date:"2026-12-31"})]))).rows[0].id;
-  await db.query(`update public.invoices set enrollment_tax=0,enrollment_tax_percent=0,enrollment_discount=0,
+    [JSON.stringify({...invoiceDefaults,lead_id:leadId,due_date:"2026-12-31"})]))).rows[0].id;
+  await db.query(`update public.invoices set payment_type='installments',enrollment_tax=0,enrollment_tax_percent=0,enrollment_discount=0,
     enrollment_subtotal=200,course_total=200,total=100,subtotal=100,tax_amount=0,tax_review_required=true where id=$1`,[id]);
   await assert.rejects(asUser(counselorId,counselorSession,tx=>tx.query("select public.operational_review_invoice_tax($1)",[id])),/Not authorized/);
   await db.query("update public.invoices set razorpay_payment_link_id='plink_old' where id=$1",[id]);
@@ -406,6 +569,35 @@ test("verified Payment Link recording checks reference/amount and is idempotent"
   await assert.rejects(record("pay-test-3"), /already paid/);
 });
 
+test("installment provider payments mark only the exact installment Paid and retain the course outstanding balance", async () => {
+  for (const currency of ["INR", "USD"]) {
+    const input = await newPlanFixture();
+    Object.assign(input, { currency, installments: [
+      { amount: currency === "INR" ? 59 : 5, invoice_date: scheduleToday() },
+      { amount: currency === "INR" ? 59 : 5, invoice_date: scheduleToday() },
+    ] });
+    const ids = await savePlan(input);
+    await asService(tx => tx.query("select * from public.operational_release_due_invoices($1::uuid[])", [ids]));
+    const id = ids[0];
+    const amount = currency === "INR" ? 5900 : 500;
+    await db.query(currency === "INR"
+      ? "update public.invoices set razorpay_payment_link_id='plink-installment' where id=$1"
+      : "update public.invoices set stripe_session_id='cs_installment' where id=$1", [id]);
+    const record = cents => asService(tx => tx.query(currency === "INR"
+      ? "select public.operational_record_payment_link($1,'plink-installment','pay-installment',$2,'INR','card','{}')"
+      : "select public.operational_record_stripe_payment($1,'cs_installment','pi_installment',$2,'usd','{}')", [id, cents]));
+    await assert.rejects(record(amount * 2), /does not match/);
+    assert.equal((await db.query("select status from public.invoices where id=$1", [id])).rows[0].status, "sent");
+    await record(amount);
+    const rows = (await db.query("select id,status,paid_at,course_total,total from public.invoices where id=any($1)", [ids])).rows;
+    assert.equal(rows.find(row => row.id === id).status, "paid");
+    assert.ok(rows.find(row => row.id === id).paid_at);
+    assert.equal(rows.find(row => row.id === ids[1]).status, "sent");
+    assert.equal(Number(rows[0].course_total) - rows.filter(row => row.status === "paid").reduce((sum, row) => sum + Number(row.total), 0),
+      currency === "INR" ? 59 : 5);
+  }
+});
+
 test("catalog prices override forged browser amounts and snapshot billing/company details", async () => {
   const result = await asUser(counselorId,counselorSession,tx => tx.query(
     "select public.operational_create_invoice($1::jsonb) as id",
@@ -441,9 +633,9 @@ test("historical installments continue at their original fee without fabricated 
     [legacyId,leadId,counselorId]);
   await db.query("insert into public.invoice_items(invoice_id,description,quantity,unit_price,amount) values($1,'Original course',1,100,100)",[legacyId]);
   const input={...invoiceDefaults,course_id:undefined,lead_id:leadId,parent_invoice_id:legacyId,payment_type:"installments",installment_amount:200,due_date:"2026-12-31"};
-  const create=values=>asUser(counselorId,counselorSession,tx=>tx.query("select public.operational_create_invoice($1::jsonb) as id",[JSON.stringify({...input,...values})]));
-  await assert.rejects(create({currency:"USD"}),/Historical installments/);
-  await assert.rejects(create({company_code:"IBMP"}),/Historical installments/);
+  const create=values=>createInstallment({...input,...values});
+  await assert.rejects(create({currency:"USD"}),/original course, company and currency/);
+  await assert.rejects(create({company_code:"IBMP"}),/original course, company and currency/);
   const id=(await create({})).rows[0].id;
   const invoice=(await db.query("select * from public.invoices where id=$1",[id])).rows[0];
   assert.equal(invoice.course_id,null);

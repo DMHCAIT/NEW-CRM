@@ -59,4 +59,6 @@ test("schema inspection detects billing and mailbox columns missing from an olde
   assert.ok(!missing.includes("leads.billing_address"));
   assert.ok(!missing.includes("gmail_connections.auth_mode"));
   assert.ok(missing.includes("invoices.course_id"), "a partial schema update must not pass readiness checks");
+  for (const column of ["invoice_date", "scheduled_for", "plan_request_id", "delivery_error", "delivery_attempted_at"])
+    assert.ok(missing.includes(`invoices.${column}`), "the installment editor must not deploy against an older billing schema");
 });

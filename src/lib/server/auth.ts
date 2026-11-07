@@ -39,6 +39,14 @@ export async function requireUser(permission?: Permission) {
   return { supabase, user };
 }
 
+/** Server Components reuse the request-only identity verified by middleware. */
+export async function requirePageUser(permission?: Permission) {
+  const [supabase, user] = await Promise.all([getSupabaseServerClient(), getCurrentUser()]);
+  if (!user) throw new HttpError(401, "Sign in with an active CRM account.");
+  if (permission && !user.permissions.includes(permission)) throw new HttpError(403, "You do not have permission for this action.");
+  return { supabase, user };
+}
+
 export function jsonError(error: unknown) {
   if (error instanceof HttpError) return NextResponse.json({ error: error.message }, { status: error.status });
   if (error instanceof ConfigurationError) return NextResponse.json({ error: error.message }, { status: 503 });

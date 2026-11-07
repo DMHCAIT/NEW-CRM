@@ -1,13 +1,13 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { requireUser } from "@/lib/server/auth";
+import { requirePageUser } from "@/lib/server/auth";
 import { formatDateTime } from "@/lib/crm-data";
 import { RevokeSession } from "@/components/revoke-session";
 
 export const dynamic = "force-dynamic";
 
 export default async function LoginActivityPage({ searchParams }: { searchParams: Promise<{ page?: string }> }) {
-  const { supabase, user } = await requireUser();
+  const { supabase, user } = await requirePageUser();
   if (user.profile.role !== "admin" && user.profile.role !== "super_admin") notFound();
   const query = await searchParams;
   const page = Math.max(1, Number.parseInt(query.page ?? "1", 10) || 1);

@@ -36,7 +36,7 @@ export default function SettingsPage() {
   const [picklistDrafts, setPicklistDrafts] = useState<Record<LeadPicklistKey, string>>({
     countryCode: "", country: "", qualification: "", category: "", course: "", source: "",
   });
-  useEffect(() => { apiRequest<Configuration>("/api/settings").then(setConfig).catch((error) => setError(errorMessage(error, "Could not load settings."))); }, []);
+  useEffect(() => { apiRequest<Configuration>("/api/settings", { usePrefetched: true }).then(setConfig).catch((error) => setError(errorMessage(error, "Could not load settings."))); }, []);
   async function save() {
     setBusy(true); setError(""); setMessage("");
     try { await apiRequest("/api/settings", { method: "PUT", body: config }); setMessage("Settings saved."); setConfig(await apiRequest<Configuration>("/api/settings")); }

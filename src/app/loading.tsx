@@ -1,3 +1,5 @@
+import { SectionLoading } from "@/components/section-loading";
+
 export default function Loading() {
-  return <p className="loading-state" role="status" aria-live="polite">Loading workspace...</p>;
+  return <SectionLoading />;
 }

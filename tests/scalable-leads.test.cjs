@@ -77,6 +77,106 @@ test("count-only reads never request lead records and database failures are not 
   await assert.rejects(leadQuery.fetchLeadPage({ rpc: async () => ({ data: { ids: Array(51).fill("id"),hasMore: false },error: null }) },base()),/Invalid lead query response/);
 });
 
+test("twelve pipeline stages share three bounded record reads instead of one read per stage", async () => {
+  const rpcCalls = [], selections = [];
+  const queries = Array.from({ length: 12 }, (_, index) => ({ ...base(), stage: `stage-${index}` }));
+  const client = {
+    rpc: async (name, args) => {
+      rpcCalls.push({ name, args });
+      const ids = Array.from({ length: 25 }, (_, index) => `${args.stage_filter}-${index}`);
+      return { data: { ids, hasMore: true, nextCursor: { id: ids[24], createdAt: "2026-10-20T00:00:00Z", name: args.stage_filter, followUpAt: null } }, error: null };
+    },
+    from: table => {
+      assert.equal(table, "leads");
+      let ids;
+      const chain = { select: () => chain, in: (key, values) => { assert.equal(key, "id"); ids = values; selections.push([...values]); return chain; },
+        eq: (key, value) => { assert.equal(key, "is_archived"); assert.equal(value, false); return chain; },
+        returns: async () => ({ data: [...ids].reverse().filter(id => id !== "stage-2-3").map(id => ({ id })), error: null }) };
+      return chain;
+    },
+  };
+  const pages = await leadQuery.fetchLeadPages(client, queries, 25);
+  assert.equal(rpcCalls.length, 12);
+  assert.ok(rpcCalls.every(call => call.args.page_size === 25));
+  assert.equal(selections.length, 3, "record reads reduced by 75% for twelve stages");
+  assert.ok(selections.every(ids => ids.length <= 100), "PostgREST URLs and responses stay bounded");
+  assert.equal(pages.length, 12);
+  for (let index = 0; index < pages.length; index++) {
+    const expected = Array.from({ length: 25 }, (_, row) => `stage-${index}-${row}`).filter(id => id !== "stage-2-3");
+    assert.deepEqual(normalized(pages[index].leads.map(lead => lead.id)), expected);
+    assert.equal(pages[index].hasMore, true);
+    assert.equal(pages[index].nextCursor.id, `stage-${index}-24`);
+  }
+});
+
+test("pipeline batch reads deduplicate IDs, skip empty stages and surface SQL or hydration failures", async () => {
+  let reads = 0;
+  const client = {
+    rpc: async (_name, args) => ({ data: { ids: args.stage_filter === "empty" ? [] : ["shared"], hasMore: false }, error: null }),
+    from: () => {
+      const chain = { select: () => chain, in: (_key, ids) => { assert.deepEqual(normalized(ids), ["shared"]); return chain; }, eq: () => chain,
+        returns: async () => { reads++; return { data: [{ id: "shared" }], error: null }; } };
+      return chain;
+    },
+  };
+  const pages = await leadQuery.fetchLeadPages(client, ["first", "second", "empty"].map(stage => ({ ...base(), stage })));
+  assert.equal(reads, 1);
+  assert.equal(pages[0].leads[0].id, "shared");
+  assert.equal(pages[1].leads[0].id, "shared");
+  assert.equal(pages[2].leads.length, 0);
+  await leadQuery.fetchLeadPages(client, [{ ...base(), stage: "empty" }]);
+  assert.equal(reads, 1);
+  client.from = () => ({ select() { return this; }, in() { return this; }, eq() { return this; },
+    returns: async () => ({ error: { message: "Record access failed" } }) });
+  await assert.rejects(leadQuery.fetchLeadPages(client, [base()]), /Record access failed/);
+  client.rpc = async () => ({ error: { message: "Stage query failed" } });
+  await assert.rejects(leadQuery.fetchLeadPages(client, [base()]), /Stage query failed/);
+});
+
+test("pipeline starts stage pages before slow profiles finish and never reads unused lead preferences", async () => {
+  const events = [];
+  let finishProfiles, finishPages;
+  const route = load("src\\app\\api\\leads\\route.ts", {
+    "next/server": { NextResponse: Response },
+    "@/lib/crm-data": {
+      fetchStages: async () => [{ id: "fresh" }, { id: "won" }],
+      fetchProfiles: () => new Promise(resolve => { events.push("profiles"); finishProfiles = resolve; }),
+    },
+    "@/lib/server/auth": { ...auth, requireUser: async permission => {
+      assert.equal(permission, "pipeline.view");
+      return { user: { id: "actor" }, supabase: { from: () => { throw new Error("Unused metadata read"); } } };
+    } },
+    "@/lib/live-leads": { fetchLeadConfiguration: () => { throw new Error("Pipeline does not use lead configuration"); } },
+    "@/lib/server/login": {}, "@/lib/lead-filters": filters,
+    "@/lib/server/lead-query": { queryParameters: leadQuery.queryParameters, fetchLeadPages: (_client, queries, size) => {
+      assert.equal(size, 25);
+      events.push("pages");
+      assert.deepEqual(normalized(queries.map(query => query.stage)), ["fresh", "won", "__none"]);
+      return new Promise(resolve => { finishPages = resolve; });
+    } },
+  });
+  const response = route.GET(new Request("https://crm.example/api/leads?view=pipeline"));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(events, ["profiles", "pages"], "pipeline reads do not wait for profiles or saved configuration");
+  finishPages([
+    { leads: [{ id: "first" }], hasMore: true, nextCursor: { id: "first", createdAt: "2026-10-20T00:00:00Z" } },
+    { leads: [], hasMore: false, nextCursor: null }, { leads: [], hasMore: false, nextCursor: null },
+  ]);
+  finishProfiles([{ id: "owner" }]);
+  const result = await response;
+  assert.equal(result.status, 200);
+  assert.equal(result.headers.get("Cache-Control"), "private, no-store");
+  assert.match(result.headers.get("Server-Timing"), /auth;dur=\d+, data;dur=\d+/);
+  const data = await result.json();
+  assert.equal(data.stagePages[0].stage, "fresh");
+  assert.equal(data.stagePages[0].hasMore, true);
+  assert.equal(data.stagePages[0].nextCursor.id, "first");
+  assert.deepEqual(data.leads, [{ id: "first" }]);
+  assert.equal("configuration" in data, false);
+  assert.equal("filters" in data, false);
+  assert.equal("columns" in data, false);
+});
+
 test("new/import metadata requests never invoke the lead query", async () => {
   let queries = 0;
   const route = load("src\\app\\api\\leads\\route.ts", {

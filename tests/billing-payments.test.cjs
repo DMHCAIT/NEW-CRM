@@ -100,13 +100,15 @@ function deliveryFixture(currency="INR",paymentType="one_shot"){
     creator_email:"creator@example.com",owner_email:"owner@example.com",created_at:new Date().toISOString(),due_date:null,
     payment_expires_at:new Date(Date.now()+4*86400000).toISOString()};
   const calls=[],updates=[],emails=[];
-  let smtpFailure=false,saveFailure=false;
+  let smtpFailure=false,saveFailure=false,pdfFailure=false,ownerEmail="owner@example.com",ownerError=null,stripeConfigured=true;
   const admin={from:table=>{
-    assert.equal(table,"invoices");
+    assert.ok(["invoices","leads","profiles"].includes(table));
     let update;
     const query={
       update:values=>{update=values;return query;},eq:()=>query,is:()=>query,select:()=>query,
       maybeSingle:async()=>{
+        if(table==="leads")return {data:{id:"lead",name:"Lead",email:"live@example.com",assignee_id:"current-owner"},error:null};
+        if(table==="profiles")return {data:{email:ownerEmail},error:ownerError};
         if(update){
           updates.push(update);
           if(saveFailure&&(update.stripe_session_id||update.razorpay_payment_link_id))return {data:null,error:new Error("Persistence unavailable")};
@@ -120,7 +122,7 @@ function deliveryFixture(currency="INR",paymentType="one_shot"){
   }};
   const helpers=load("src\\lib\\server\\invoice-delivery.ts",{
     "@/lib/server/integration-settings":{
-      integrationStatus:async()=>({configured:true,missing:[]}),
+      integrationStatus:async provider=>({configured:provider!=="stripe"||stripeConfigured,missing:provider==="stripe"&&!stripeConfigured?["STRIPE_SECRET_KEY","STRIPE_WEBHOOK_SECRET"]:[]}),
       encryptIntegrationValues:values=>Buffer.from(JSON.stringify(values)).toString("base64"),
       decryptIntegrationValues:value=>JSON.parse(Buffer.from(value,"base64").toString()),
     },
@@ -136,7 +138,8 @@ function deliveryFixture(currency="INR",paymentType="one_shot"){
       return invoice.stripe_checkout_url;
     }},
     "@/lib/server/invoice-pdf":{buildInvoicePdf:async(record,lead,paymentUrl)=>{
-      calls.push({pdf:true,paymentUrl});return Buffer.from("pdf");
+      if(pdfFailure)throw new Error("PDF preparation failed");
+      calls.push({pdf:true,paymentUrl,record});return Buffer.from("pdf");
     }},
     "@/lib/server/mailer":{
       emailLayout:(_title,body)=>body,escapeHtml:value=>value,
@@ -146,6 +149,8 @@ function deliveryFixture(currency="INR",paymentType="one_shot"){
   return {invoice,admin,calls,updates,emails,helpers,
     send:()=>helpers.deliverInvoice(admin,invoice,{id:"lead",name:"Live Name",email:"live@example.com"},"creator@example.com"),
     failSmtp:()=>{smtpFailure=true;},failPersistence:()=>{saveFailure=true;},
+    failPdf:()=>{pdfFailure=true;},setOwnerEmail:value=>{ownerEmail=value;},failOwner:()=>{ownerError=new Error("Owner lookup failed");},
+    disableStripe:()=>{stripeConfigured=false;},
   };
 }
 test("invoice delivery routes INR to Razorpay, USD to Stripe and copies creator plus assigned owner",async()=>{
@@ -154,11 +159,12 @@ test("invoice delivery routes INR to Razorpay, USD to Stripe and copies creator 
     await f.send();
     assert.equal(f.calls[0].provider,currency==="INR"?"razorpay":"stripe");
     assert.equal(f.calls.filter(call=>call.provider).length,1);
-    assert.equal(f.calls.find(call=>call.pdf).paymentUrl,"https://crm.example/invoice-status/random-public-status-token");
-    assert.match(f.emails[0].html,/>Pay Now · View invoice<\/a>/);
+    assert.equal(f.calls.find(call=>call.pdf).paymentUrl,currency==="INR"?"https://rzp.io/i/test":"https://crm.example/api/invoice-status/random-public-status-token/pay");
+    assert.match(f.emails[0].html,/>Pay Now /);
     assert.equal(f.emails[0].to,"saved@example.com");
     assert.equal(f.emails[0].cc,"creator@example.com, owner@example.com");
-    assert.match(f.emails[0].html,/https:\/\/crm.example\/invoice-status\/random-public-status-token/);
+    assert.ok(f.emails[0].html.includes(`href="${currency==="INR"?"https://rzp.io/i/test":"https://crm.example/api/invoice-status/random-public-status-token/pay"}"`));
+    assert.doesNotMatch(f.emails[0].html,/View complete invoice|Pay Now · View invoice/);
     assert.doesNotMatch(f.emails[0].html,/View invoice payment status/);
     if(currency==="INR") assert.equal(f.calls.find(call=>call.provider==="razorpay").input.callbackUrl,"https://crm.example/invoice-status/random-public-status-token");
     assert.equal(f.invoice.status_token_hash,"hashed-token");
@@ -178,11 +184,119 @@ test("Loan/EMI delivery includes status link but creates no online payment; copi
     assert.equal(f.helpers.invoiceRecipients("Lead@Example.com","LEAD@example.com","Owner@example.com","owner@example.com"),"owner@example.com");
   }
 });
+test("missing Stripe keys do not block either brand's INR invoice or paid email",async()=>{
+  for(const code of ["DMHCA","IBMP"]){
+    const f=deliveryFixture("INR");
+    f.invoice.company_code=code;
+    f.disableStripe();
+    await f.send();
+    assert.equal(f.emails.length,1);
+    assert.equal(f.calls.filter(call=>call.provider==="razorpay").length,1);
+    assert.equal(f.calls.filter(call=>call.provider==="stripe").length,0);
+    assert.match(f.emails[0].html,/Pay securely with Razorpay/);
+    f.invoice.status="paid";
+    f.invoice.paid_at=new Date().toISOString();
+    await f.helpers.sendPaymentReceipt(f.admin,invoiceId);
+    assert.equal(f.emails.length,2);
+    assert.match(f.emails[1].html,/Status: <strong>Paid<\/strong>/);
+    assert.doesNotMatch(f.emails[1].html,/Pay Now/);
+  }
+  const usd=deliveryFixture("USD");
+  usd.disableStripe();
+  await assert.rejects(usd.send(),/Payment setup missing: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET/);
+  assert.equal(usd.emails.length,0,"unconfigured USD checkout must report setup failure, not send a broken payment invoice");
+  assert.equal(usd.calls.filter(call=>call.provider).length,0);
+});
 test("approval delivery copies the original creator rather than replacing them with the approving administrator",async()=>{
   const f=deliveryFixture();
   await f.helpers.deliverInvoice(f.admin,f.invoice,{id:"lead",name:"Live name",email:"live@example.com"},"approver@example.com");
   assert.equal(f.emails[0].cc,"creator@example.com, owner@example.com");
 });
+test("invoice email uses the full branded document and embeds the correct logo for both companies",async()=>{
+  for(const [code,primary,accent] of [["DMHCA","#1c1d4e","#a91e2c"],["IBMP","#091b3c","#188574"]]){
+    const f=deliveryFixture();
+    f.invoice.company_code=code;
+    f.invoice.company_snapshot={code,legal_name:`${code} Education`,address:"Company address",tax_id:"GST-123",primary_color:"#ffffff",accent_color:"#ffffff"};
+    f.invoice.invoice_items=[{description:"Clinical Cardiology",quantity:1,unit_price:100,amount:100}];
+    await f.send();
+    const mail=f.emails[0];
+    for(const value of ["BILL TO","INVOICE DETAILS","Clinical Cardiology","Subtotal","Discount","GST","PAYMENT SCHEDULE","PAYMENT DETAILS","Company address",primary,accent]){
+      assert.ok(mail.html.includes(value),value);
+    }
+    assert.match(mail.html,/src="cid:invoice-logo"/);
+    assert.equal(mail.fromName,`${code} Education`);
+    assert.equal(mail.attachments[0].contentType,"application/pdf");
+    assert.equal(mail.attachments[1].filename,`${code}-logo.png`);
+    assert.equal(mail.attachments[1].cid,"invoice-logo");
+    assert.ok(mail.attachments[1].content.length>1000);
+    assert.equal(f.invoice.delivery_error,null);
+    assert.equal(f.invoice.email_message_id,"smtp-message");
+  }
+});
+test("delivery copies the current owner, not a stale invoice owner snapshot",async()=>{
+  const f=deliveryFixture();
+  f.invoice.owner_email="former-owner@example.com";
+  f.setOwnerEmail("Current.Owner@example.com");
+  await f.send();
+  assert.equal(f.emails[0].cc,"creator@example.com, current.owner@example.com");
+  assert.doesNotMatch(f.emails[0].cc,/former-owner/);
+});
+test("missing or unreadable owner emails stop sending and save an actionable delivery error",async()=>{
+  for(const mode of ["missing","query-error"]){
+    const f=deliveryFixture();
+    if(mode==="missing")f.setOwnerEmail("");else f.failOwner();
+    await assert.rejects(f.send(),mode==="missing"?/valid email.*lead owner/:/Owner lookup failed/);
+    assert.equal(f.emails.length,0);
+    assert.equal(f.calls.filter(call=>call.provider).length,0);
+    assert.ok(f.invoice.delivery_error);
+    assert.ok(!f.invoice.email_lock_at);
+  }
+});
+test("document preparation failure releases the email lease but uncertain SMTP does not",async()=>{
+  const f=deliveryFixture();f.failPdf();
+  await assert.rejects(f.send(),/PDF preparation failed/);
+  assert.equal(f.invoice.email_lock_at,null);
+  assert.equal(f.invoice.delivery_error,"PDF preparation failed");
+  assert.equal(f.emails.length,0);
+});
+test("shared invoice document escapes billing content and only offers payment for eligible invoices",()=>{
+  const {buildInvoiceHtml}=load("src\\lib\\invoice-document.ts");
+  const invoice=deliveryFixture().invoice;
+  invoice.billing_name='<script>alert("name")</script>';
+  invoice.invoice_items=[{description:'<img src=x onerror="alert(1)">',quantity:1,unit_price:100,amount:100}];
+  invoice.notes="<script>notes</script>";
+  const options={paymentUrl:"https://crm.example/invoice-status/opaque",remainingBalance:90000};
+  const html=buildInvoiceHtml(invoice,options);
+  assert.match(html,/&lt;script&gt;/);
+  assert.doesNotMatch(html,/<script>|<img src=x/);
+  assert.match(html,/Pay Now /);
+  assert.match(html,/Remaining course balance/);
+  assert.match(html,/₹90,000\.00/);
+  for(const status of ["pending_approval","scheduled","expired","paid","cancelled","rejected"]){
+    assert.doesNotMatch(buildInvoiceHtml({...invoice,status},options),/Pay Now /);
+  }
+  assert.doesNotMatch(buildInvoiceHtml({...invoice,tax_review_required:true},options),/Pay Now /);
+  assert.doesNotMatch(buildInvoiceHtml(invoice,{paymentUrl:"javascript:alert(1)"}),/javascript:|Pay Now /);
+});
+test("invoice billing panels improve hierarchy and distinguish paid status for both brands",()=>{
+  const {buildInvoiceHtml}=load("src\\lib\\invoice-document.ts");
+  for(const company_code of ["DMHCA","IBMP"]){
+    const invoice={...deliveryFixture().invoice,company_code,billing_name:"Customer & Partners",billing_address:"Line 1\nLine 2"};
+    const html=buildInvoiceHtml(invoice);
+    assert.match(html,/class="invoice-parties"/);
+    assert.match(html,/table-layout:fixed/);
+    assert.match(html,/font-size:19px;line-height:1\.35/);
+    assert.match(html,/Customer &amp; Partners/);
+    assert.match(html,/white-space:pre-line/);
+    assert.match(html,/background:#fff4dd;color:#805b13/);
+    assert.match(html,/Status: <strong>Awaiting payment<\/strong>/);
+    const paid=buildInvoiceHtml({...invoice,status:"paid",paid_at:"2026-11-07T09:00:00Z"});
+    assert.match(paid,/background:#e7f5ee;color:#176443/);
+    assert.match(paid,/Status: <strong>Paid<\/strong>/);
+    assert.match(paid,/Paid on: 7 Nov 2026/);
+  }
+});
+
 test("uncertain payment persistence and SMTP delivery retain leases instead of allowing duplicate sends",async()=>{
   const persistence=deliveryFixture("USD");persistence.failPersistence();
   await assert.rejects(persistence.send(),/reconcile|Reconcile/);
@@ -220,8 +334,35 @@ test("both invoice company PDFs use matching layout with snapshot names, address
   }
 });
 
+test("both brands use prominent header names and show invoice numbers only in details",async()=>{
+  const {buildInvoiceHtml}=load("src\\lib\\invoice-document.ts");
+  const {buildInvoicePdf}=load("src\\lib\\server\\invoice-pdf.ts");
+  const {PDFDocument,PDFRawStream,decodePDFRawStream}=require("pdf-lib");
+  for(const code of ["DMHCA","IBMP"]){
+    const invoice={...deliveryFixture().invoice,invoice_no:`${code}-TEST-001`,company_code:code};
+    const html=buildInvoiceHtml(invoice);
+    const header=html.slice(0,html.indexOf('padding:24px'));
+    assert.match(header,/font-size:28px;line-height:1\.2;font-weight:800;letter-spacing:1px/);
+    assert.ok(header.includes(`>${code}</td>`));
+    assert.match(header,/>INVOICE<\/strong><\/td>/);
+    assert.ok(!header.includes(invoice.invoice_no));
+    assert.equal(html.split(invoice.invoice_no).length-1,1);
+    assert.match(html,new RegExp(`<strong[^>]*>${invoice.invoice_no}</strong>`));
+    const pdf=await PDFDocument.load(await buildInvoicePdf(invoice,null));
+    const streams=pdf.getPage(0).node.Contents();
+    let commands="";
+    for(let i=0;i<streams.size();i++)
+      commands+=Buffer.from(decodePDFRawStream(streams.lookup(i,PDFRawStream)).decode()).toString();
+    const nameHex=Buffer.from(code).toString("hex").toUpperCase();
+    assert.match(commands,new RegExp(`/[^\\s]+ 22 Tf[\\s\\S]*?<${nameHex}> Tj`));
+    const numberHex=Buffer.from(invoice.invoice_no).toString("hex").toUpperCase();
+    assert.ok(!commands.includes(`<${numberHex}> Tj`),"no standalone number beneath PDF title");
+    assert.ok(commands.includes(Buffer.from(`Invoice No: ${invoice.invoice_no}`).toString("hex").toUpperCase()));
+  }
+});
+
 test("PDF payment buttons are absent before approval, after payment or expiry, and for financing",async()=>{
-  const {PDFDocument,PDFName}=require("pdf-lib");
+  const {PDFDocument,PDFName,PDFArray}=require("pdf-lib");
   const pdf=load("src\\lib\\server\\invoice-pdf.ts");
   const base={invoice_no:"INV-GATED",status:"sent",lead_id:"lead",created_at:new Date().toISOString(),due_date:null,
     subtotal:100,total:118,currency:"INR",discount_amount:0,discount_reason:null,tax_amount:18,notes:null,payment_type:"one_shot"};
@@ -229,7 +370,8 @@ test("PDF payment buttons are absent before approval, after payment or expiry, a
     {tax_review_required:true},{created_at:"2020-01-01"},{payment_type:"loan"},{payment_type:"emi"}]){
     const bytes=await pdf.buildInvoicePdf({...base,...override},null,"https://rzp.io/i/test");
     const document=await PDFDocument.load(bytes);
-    assert.equal(document.getPages()[0].node.get(PDFName.of("Annots")),undefined,JSON.stringify(override));
+    const annotations=document.getPages()[0].node.lookupMaybe(PDFName.of("Annots"),PDFArray);
+    assert.equal(annotations?.size()??0,0,JSON.stringify(override));
   }
   await assert.rejects(pdf.buildInvoicePdf(base,null,"javascript:alert(1)"),/HTTPS/);
 });
@@ -249,7 +391,7 @@ test("PDF course descriptions and notes paginate with repeated branded headers a
   }
 });
 
-test("downloaded PDFs link to the invoice page for both providers without creating payments",async()=>{
+test("downloaded PDFs link directly to provider checkout for both providers without creating payments",async()=>{
   const base={id:invoiceId,status:"sent",currency:"INR",payment_type:"one_shot",created_at:new Date().toISOString(),
     lead_id:"lead",invoice_no:"INV-DOWNLOAD",razorpay_short_url:"https://rzp.io/i/saved",status_token_encrypted:"encrypted"};
   for(const override of [{},{currency:"USD"},{status:"pending_approval"},{status:"paid"},{tax_review_required:true},{created_at:"2020-01-01"},{payment_type:"loan"}]){
@@ -265,8 +407,90 @@ test("downloaded PDFs link to the invoice page for both providers without creati
     const response=await api.GET(new Request("https://crm.example"),{params:Promise.resolve({id:invoiceId})});
     assert.equal(response.status,200);
     assert.equal(passed,["sent",undefined].includes(invoice.status)&&!invoice.tax_review_required&&invoice.payment_type==="one_shot"
-      &&new Date(invoice.created_at).getTime()>Date.now()-4*86400000?"https://crm.example/invoice-status/stable-token":null);
+      &&new Date(invoice.created_at).getTime()>Date.now()-4*86400000?invoice.currency==="INR"?invoice.razorpay_short_url:"https://crm.example/api/invoice-status/stable-token/pay":null);
   }
+});
+test("PDF and CRM payment links use the public invoice origin and reject invalid saved tokens",()=>{
+  let origin;
+  const api=load("src\\lib\\server\\invoice-payment-url.ts",{
+    "@/lib/server/env":{appUrl:purpose=>{origin=purpose;return "https://invoice.example.com";}},
+    "@/lib/server/integration-settings":{decryptIntegrationValues:value=>value==="invalid"?{}:{token:"saved-public-token"}},
+  });
+  test("INR payment URLs bypass the public host and token dependency with validated saved Razorpay links",()=>{
+    const api=load("src\\lib\\server\\invoice-payment-url.ts",{
+      "@/lib/server/env":{appUrl:()=>assert.fail("INR must not depend on deployed CRM routes")},
+      "@/lib/server/integration-settings":{decryptIntegrationValues:()=>assert.fail("INR must not depend on token decryption")},
+    });
+    const base={status:"sent",payment_type:"one_shot",currency:"INR",created_at:new Date().toISOString(),status_token_encrypted:"invalid"};
+    for(const host of ["rzp.io","rzp.in","payments.razorpay.com","pages.razorpay.com"]){
+      const invoice={...base,razorpay_short_url:`https://${host}/i/payment`};
+      assert.equal(api.invoicePaymentUrl(invoice),invoice.razorpay_short_url);
+      assert.equal(api.invoicePaymentUrl({...invoice,status:"paid"}),null);
+      assert.equal(api.invoicePaymentUrl({...invoice,created_at:"2020-01-01"}),null);
+    }
+    for(const url of ["javascript:alert(1)","https://rzp.io.evil.example/pay","https://rzp.io:444/pay","http://rzp.io/pay","https://user:pass@rzp.io/pay"])
+      assert.throws(()=>api.invoicePaymentUrl({...base,razorpay_short_url:url}),/URL is invalid/);
+  });
+  const invoice={status:"sent",payment_type:"installments",currency:"INR",created_at:new Date().toISOString(),status_token_encrypted:"valid"};
+  assert.equal(api.invoicePaymentUrl(invoice),"https://invoice.example.com/api/invoice-status/saved-public-token/pay");
+  assert.equal(origin,"invoice");
+  assert.throws(()=>api.invoicePaymentUrl({...invoice,status_token_encrypted:"invalid"}),/token is invalid/);
+  for(const change of [{status:"paid"},{payment_type:"loan"},{currency:"EUR"},{status_token_encrypted:null},{created_at:"2020-01-01"}]){
+    assert.equal(api.invoicePaymentUrl({...invoice,...change}),null);
+  }
+});
+test("Pay Now redirects directly to the selected provider for full payment and installments, never another invoice",async()=>{
+  const token=Buffer.alloc(32,12).toString("base64url");
+  let queries=0,checkouts=0;
+  let invoice={id:invoiceId,status:"sent",payment_type:"one_shot",currency:"INR",total:59,course_total:118,
+    payment_expires_at:new Date(Date.now()+86400000).toISOString(),razorpay_short_url:"https://rzp.io/i/installment"};
+  let stripeUrl="https://checkout.stripe.com/c/pay/installment";
+  const api=load("src\\app\\api\\invoice-status\\[token]\\pay\\route.ts",{
+    "next/server":{NextResponse:{redirect:(url,options)=>({location:url.href,...options})}},
+    "@/lib/server/razorpay":{statusTokenHash:value=>{assert.equal(value,token);return "hash";}},
+    "@/lib/supabase/server":{getSupabaseAdminClient:()=>{queries++;return {from:table=>{
+      assert.equal(table,"invoices");return {select:()=>({eq:(key,value)=>{
+        assert.equal(key,"status_token_hash");assert.equal(value,"hash");
+        return {maybeSingle:async()=>({data:invoice,error:null})};
+      }})};
+    }};}},
+    "@/lib/server/invoice-checkout":{ensureInvoiceCheckout:async(_admin,row,value)=>{
+      checkouts++;assert.equal(row.total,59);assert.equal(value,token);return stripeUrl;
+    }},
+  });
+  const open=(value=token)=>api.GET(new Request(`https://crm.example/api/invoice-status/${value}/pay`),{params:Promise.resolve({token:value})});
+  for(const payment_type of ["one_shot","installments"]){
+    invoice.payment_type=payment_type;
+    for(const currency of ["INR","USD"]){
+      invoice.currency=currency;
+      const response=await open();
+      assert.equal(response.status,303);
+      assert.equal(response.location,currency==="INR"?invoice.razorpay_short_url:stripeUrl);
+      assert.doesNotMatch(response.location,/invoice-status/);
+      assert.equal(response.headers["Cache-Control"],"private, no-store");
+      assert.equal(response.headers["Referrer-Policy"],"no-referrer");
+    }
+  }
+  assert.equal(checkouts,2);
+  const base={...invoice};
+  for(const override of [{status:"paid"},{status:"pending_approval"},{status:"scheduled"},{status:"cancelled"},
+    {status:"rejected"},{tax_review_required:true},{payment_type:"loan"},{payment_type:"emi"},{currency:"EUR"}]){
+    invoice={...base,...override};assert.equal((await open()).status,409);
+  }
+  invoice={...base,payment_expires_at:new Date(Date.now()-1).toISOString()};
+  assert.equal((await open()).status,410);
+  assert.equal(checkouts,2,"ineligible invoices must never create checkout");
+  invoice={...base,currency:"INR",razorpay_short_url:null};
+  assert.equal((await open()).status,409);
+  for(const url of ["http://rzp.io/i/test","https://rzp.io.evil.example/test","https://user:pass@rzp.io/i/test"]){
+    invoice={...base,currency:"INR",razorpay_short_url:url};assert.equal((await open()).status,502);
+  }
+  invoice={...base};stripeUrl="https://evil.example/checkout";
+  assert.equal((await open()).status,502);
+  invoice=null;assert.equal((await open()).status,404);
+  const before=queries;
+  assert.equal((await open("short")).status,404);
+  assert.equal(queries,before,"invalid tokens must not query the database");
 });
 test("company email branding changes both identity and colors without changing other transactional mail",()=>{
   const mailer=load("src\\lib\\server\\mailer.ts",{
@@ -353,10 +577,34 @@ test("later discounted installments pass API validation without requesting the o
   const {invoiceInput}=load("src\\lib\\server\\operational-validation.ts");
   const input={lead_id:invoiceId,course_id:invoiceId,company_code:"DMHCA",billing_address:"Address",
     parent_invoice_id:invoiceId,payment_type:"installments",installment_amount:25000,
+    request_id:invoiceId,installments:[{amount:25000,invoice_date:"2026-12-27"}],
     discount_percent:10,tax_percent:18,due_date:"2026-12-31"};
   assert.equal(invoiceInput.safeParse(input).success,true);
   assert.equal(invoiceInput.safeParse({...input,parent_invoice_id:undefined}).success,false,"first discount still needs a reason");
   assert.equal(invoiceInput.safeParse({...input,tax_percent:101}).success,false);
+});
+
+test("scheduled delivery rejects early sending and unapproved enrollment without contacting providers", async () => {
+  const future = deliveryFixture();
+  future.invoice.scheduled_for = new Date(Date.now() + 86400000).toISOString();
+  await assert.rejects(future.send(), /not due for delivery/);
+  assert.equal(future.calls.length, 0);
+  for (const root of [
+    { status: "pending_approval", discount_percent: 10 },
+    { status: "rejected", discount_percent: 10 },
+    { status: "sent", discount_percent: 10, approved_at: null },
+    { status: "paid", discount_percent: 0, tax_review_required: true },
+    { status: "cancelled", discount_percent: 0, pricing_review_note: "Tax revised", approved_at: null },
+  ]) {
+    const f = deliveryFixture();
+    f.invoice.scheduled_for = new Date(Date.now() - 60000).toISOString();
+    f.invoice.parent_invoice_id = "root";
+    await assert.rejects(f.helpers.deliverInvoice({
+      from: () => ({ update(values) { Object.assign(f.invoice,values); return this; }, select() { return this; }, eq() { return this; },
+        maybeSingle: async () => ({ data: root, error: null }), then(resolve) { return Promise.resolve({ error: null }).then(resolve); } }),
+    }, f.invoice, { id: "lead", name: "Lead", email: "lead@example.com" }), /enrollment must be approved/);
+    assert.equal(f.calls.length, 0);
+  }
 });
 
 test("invoice policy locks currency tax and the exact 96-hour cutoff including date boundaries",()=>{
@@ -368,6 +616,35 @@ test("invoice policy locks currency tax and the exact 96-hour cutoff including d
   const end=Date.parse(policy.invoiceDeadline(created));
   assert.equal(policy.invoiceWindowExpired({created_at:created},end-1),false);
   assert.equal(policy.invoiceWindowExpired({created_at:created},end),true);
+});
+
+test("unsettled invoices keep refreshing after expiry, but paid and closed invoices stop",()=>{
+  const {invoiceStatusShouldRefresh}=load("src\\lib\\invoice-policy.ts");
+  for(const status of ["sent","pending_approval","pending_review","scheduled","expired"])
+    assert.equal(invoiceStatusShouldRefresh(status),true,status);
+  for(const status of ["paid","cancelled","rejected"])
+    assert.equal(invoiceStatusShouldRefresh(status),false,status);
+});
+
+test("paid emails preserve the standard invoice for both brands without a second receipt layout",async()=>{
+  for(const code of ["DMHCA","IBMP"]){
+    const f=deliveryFixture();
+    Object.assign(f.invoice,{
+      status:"paid",company_code:code,paid_at:"2026-11-07T09:00:00Z",
+      payment_expires_at:"2026-11-06T09:00:00Z",
+      invoice_items:[{description:"Clinical Cardiology",quantity:1,unit_price:100,amount:100}],
+    });
+    await f.helpers.sendPaymentReceipt(f.admin,invoiceId);
+    const mail=f.emails[0];
+    assert.equal((mail.html.match(/class="invoice-document"/g)||[]).length,1);
+    for(const label of ["INVOICE DETAILS","PAYMENT SCHEDULE","PAYMENT DETAILS","Status: <strong>Paid</strong>","Paid on: 7 Nov 2026","Amount paid"])
+      assert.ok(mail.html.includes(label),`${code}: ${label}`);
+    assert.doesNotMatch(mail.html,/Pay Now|Payment deadline|<h1/);
+    assert.match(mail.html,/The same invoice is now Paid/);
+    assert.ok(mail.html.includes(f.invoice.invoice_no));
+    assert.equal(mail.attachments[1].filename,`${code}-logo.png`);
+    assert.equal(mail.cc,"creator@example.com, owner@example.com");
+  }
 });
 
 function checkoutFixture(){
@@ -440,7 +717,7 @@ test("invoice delivery cannot bypass expiry or legacy tax review",async()=>{
   assert.equal(review.calls.length,0);assert.equal(review.emails.length,0);
   const current=deliveryFixture();await current.send();
   assert.equal(current.calls[0].input.expiresAt,Math.floor(Date.parse(current.invoice.payment_expires_at)/1000));
-  assert.match(current.emails[0].html,/Payment link expires/);
+  assert.match(current.emails[0].html,/Payment deadline/);
 });
 
 test("tax review cancellation confirms both providers before detaching links and retains uncertain leases",async()=>{

@@ -4,8 +4,10 @@ import { getSupabaseAdminClient } from "@/lib/supabase/server";
 import { HttpError, jsonError } from "@/lib/server/auth";
 import { checkOrigin } from "@/lib/server/login";
 import { databaseError } from "@/lib/server/operational";
-import { invoiceWindowExpired } from "@/lib/invoice-policy";
+import { invoiceProviderUrlValid, invoiceWindowExpired } from "@/lib/invoice-policy";
 import { ensureInvoiceCheckout } from "@/lib/server/invoice-checkout";
+import { invoiceBranding } from "@/lib/invoice-branding";
+import { legacyCompany } from "@/lib/billing";
 
 export async function GET(_request: Request, context: { params: Promise<{ token: string }> }) {
   const { token } = await context.params;
@@ -13,7 +15,7 @@ export async function GET(_request: Request, context: { params: Promise<{ token:
     return NextResponse.json({ error: "Invoice status is unavailable." }, { status: 404, headers: { "Cache-Control": "no-store" } });
   const supabase = getSupabaseAdminClient();
   const { data, error } = await supabase.from("invoices")
-    .select("invoice_no,created_at,due_date,billing_name,billing_email,billing_address,subtotal,discount_amount,discount_reason,tax_amount,total,currency,status,paid_at,notes,invoice_items(description,quantity,unit_price,amount),company_code,company_snapshot,razorpay_short_url,payment_type,installment_number,course_total,payment_expires_at,tax_review_required")
+    .select("invoice_no,created_at,invoice_date,due_date,billing_name,billing_email,billing_address,subtotal,discount_amount,discount_reason,tax_amount,total,currency,status,paid_at,notes,invoice_items(description,quantity,unit_price,amount),company_code,company_snapshot,razorpay_short_url,payment_type,installment_number,course_total,payment_expires_at,tax_review_required")
     .eq("status_token_hash", statusTokenHash(token)).maybeSingle();
   if (error) {
     console.error("INVOICE_PUBLIC_STATUS", { code: error.code });
@@ -23,9 +25,18 @@ export async function GET(_request: Request, context: { params: Promise<{ token:
     return NextResponse.json({ error: "Invoice status is unavailable." }, { status: 404, headers: { "Cache-Control": "no-store" } });
   const status = data.status === "sent" && invoiceWindowExpired(data) ? "expired"
     : data.tax_review_required && data.status !== "paid" ? "pending_review" : data.status;
+  if (status === "sent" && data.currency === "INR" && data.razorpay_short_url && !invoiceProviderUrlValid(data.razorpay_short_url, "INR")) {
+    console.error("INVOICE_PUBLIC_PAYMENT_URL_INVALID");
+    return NextResponse.json({ error: "The Razorpay payment URL is invalid. Contact finance." }, { status: 502, headers: { "Cache-Control": "no-store" } });
+  }
+  const branding = invoiceBranding({
+    ...legacyCompany, ...data.company_snapshot,
+    code: data.company_snapshot?.code ?? data.company_code ?? "DMHCA",
+    legal_name: data.company_snapshot?.legal_name ?? data.company_code ?? "DMHCA",
+  });
   return NextResponse.json({
     invoiceNo: data.invoice_no,
-    issueDate: data.created_at,
+    issueDate: data.invoice_date ?? data.created_at,
     dueDate: data.due_date,
     billingName: data.billing_name,
     billingEmail: data.billing_email,
@@ -56,10 +67,10 @@ export async function GET(_request: Request, context: { params: Promise<{ token:
       taxId: data.company_snapshot?.tax_id ?? "",
       code: data.company_snapshot?.code ?? data.company_code ?? "DMHCA",
     },
-    primaryColor: data.company_snapshot?.primary_color ?? "#800020",
-    accentColor: data.company_snapshot?.accent_color ?? "#f7cbd7",
-    paymentUrl: status === "sent" ? data.currency === "USD"
-      ? `/api/invoice-status/${encodeURIComponent(token)}` : data.razorpay_short_url : null,
+    primaryColor: branding.primary_color,
+    accentColor: branding.accent_color,
+    paymentUrl: status === "sent" && ["one_shot", "installments"].includes(data.payment_type) && ["USD", "INR"].includes(data.currency)
+      ? data.currency === "INR" && data.razorpay_short_url ? data.razorpay_short_url : `/api/invoice-status/${encodeURIComponent(token)}/pay` : null,
     expiresAt: data.payment_expires_at ?? null,
   }, { headers: { "Cache-Control": "no-store" } });
 }

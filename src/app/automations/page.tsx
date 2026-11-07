@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Play, Workflow } from "lucide-react";
 import { LeadOption, LeadSelect, OperationFeedback, formValues, useOperationalData } from "../integrations/operational-ui";
+import { SectionLoading } from "@/components/section-loading";
 
 type Rule = { id: string; name: string; trigger_config: { type: string }; actions_json: { type: string; days: number }[]; is_active: boolean };
 type Log = { id: string; automation_id: string; lead_id: string; result: string; created_at: string; details: { action?: string } };
@@ -13,6 +14,7 @@ export default function AutomationsPage() {
   const [showForm, setShowForm] = useState(false);
   const [runRule, setRunRule] = useState<Rule | null>(null);
   const data = state.data;
+  if (state.loading && !data) return <SectionLoading title="Automations" />;
   return <>
     <div className="page-heading"><div><h1>Automations</h1><p>Organize follow-up rules and review their execution history.</p></div><div className="heading-actions"><button className="button button-secondary" onClick={() => void state.refresh()}>Refresh</button>{data?.canManage && <button className="button button-primary" onClick={() => setShowForm(!showForm)}>Create rule</button>}</div></div>
     <OperationFeedback {...state} />

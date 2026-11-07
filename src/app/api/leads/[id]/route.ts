@@ -7,27 +7,36 @@ import { getSupabaseAdminClient } from "@/lib/supabase/server";
 import { currentGmailMailbox } from "@/lib/server/operational-gmail";
 
 type Context = { params: Promise<{ id: string }> };
-export async function GET(_request: Request, context: Context) {
+export async function GET(request: Request, context: Context) {
   try {
     const { supabase, user } = await requireUser("leads.view");
     const id = uuid((await context.params).id);
+    const params = new URL(request.url).searchParams;
+    const section = params.get("section");
+    if (section !== null && !["overview", "note", "email", "calls", "invoices", "courses"].includes(section)) throw new HttpError(400, "Invalid lead section.");
+    const all = section === null;
+    const withActivities = all || (params.get("history") === "1" && ["overview", "calls"].includes(section ?? ""));
     const lead = await fetchLead(supabase, id);
     if (!lead || lead.isArchived) throw new HttpError(404, "Lead not found.");
-    const [stages, profiles, notes, activities, emails, configuration, extras, mailbox, scheduledCalls, duplicates] = await Promise.all([
+    const [stages, profiles, notes, activities, emails, configuration, extras, mailbox, scheduledCalls, duplicates, noteCount, emailCount] = await Promise.all([
       fetchStages(supabase), fetchProfiles(supabase),
-      supabase.from("notes").select("id,content,created_at,user_id").eq("lead_id", id).order("created_at", { ascending: false }),
-      supabase.from("activities").select("id,type,description,meta,created_at,user_id").eq("lead_id", id).order("created_at", { ascending: false }),
-      supabase.from("emails").select("id,subject,body,status,from_email,to_email,direction,created_at,user_id").eq("lead_id", id).order("created_at", { ascending: false }),
+      all || section === "note" ? supabase.from("notes").select("id,content,created_at,user_id").eq("lead_id", id).order("created_at", { ascending: false }) : { data: [], error: null },
+      withActivities ? supabase.from("activities").select("id,type,description,meta,created_at,user_id").eq("lead_id", id).order("created_at", { ascending: false }) : { data: [], error: null },
+      all || section === "email" ? supabase.from("emails").select("id,subject,body,status,from_email,to_email,direction,created_at,user_id").eq("lead_id", id).order("created_at", { ascending: false }) : { data: [], error: null },
       fetchLeadConfiguration(supabase),
       supabase.from("leads").select("custom_fields,call_schedule_revision").eq("id", id).single(),
-      currentGmailMailbox(getSupabaseAdminClient(), user.id, user.email),
+      all || section === "email" ? currentGmailMailbox(getSupabaseAdminClient(), user.id, user.email) : null,
       supabase.from("scheduled_calls").select("id,user_id,scheduled_at,status,created_at,schedule_revision").eq("lead_id", id).order("scheduled_at", { ascending: true }),
       supabase.rpc("lead_duplicate_owners", { lead_id: id }),
+      all || section === "note" ? null : supabase.from("notes").select("id", { count: "exact", head: true }).eq("lead_id", id),
+      all || section === "email" ? null : supabase.from("emails").select("id", { count: "exact", head: true }).eq("lead_id", id),
     ]);
     [notes, activities, emails, extras, scheduledCalls, duplicates].forEach((r) => dbError(r.error));
+    if (noteCount) dbError(noteCount.error);
+    if (emailCount) dbError(emailCount.error);
     const latestCall = [...(scheduledCalls.data ?? [])].sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id))[0];
     const canScheduleCall = !latestCall || latestCall.schedule_revision < extras.data!.call_schedule_revision;
-    return NextResponse.json({ lead: { ...lead, customFields: extras.data?.custom_fields ?? {} }, configuration, stages, profiles, notes: notes.data, activities: activities.data, emails: emails.data, mailbox, scheduledCalls: scheduledCalls.data, canScheduleCall, duplicates: duplicates.data, user });
+    return NextResponse.json({ lead: { ...lead, customFields: extras.data?.custom_fields ?? {} }, configuration, stages, profiles, notes: notes.data, activities: activities.data, emails: emails.data, counts: { notes: noteCount?.count ?? notes.data?.length ?? 0, emails: emailCount?.count ?? emails.data?.length ?? 0 }, mailbox, scheduledCalls: scheduledCalls.data, canScheduleCall, duplicates: duplicates.data, user }, { headers: { "Cache-Control": "private, no-store" } });
   } catch (error) { return jsonError(error); }
 }
 

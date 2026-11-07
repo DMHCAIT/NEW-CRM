@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { CalendarDays, ChevronLeft, ChevronRight, Clock, Search } from "lucide-react";
 import { Configuration, OperationFeedback, useOperationalData } from "../integrations/operational-ui";
+import { SectionLoading } from "@/components/section-loading";
 
 type StaffRole = "counselor" | "team_lead" | "manager" | "admin" | "super_admin";
 type Staff = { id: string; name: string; email: string; role: StaffRole };
@@ -52,6 +53,7 @@ export default function MeetingsPage() {
       setSelectedIds(current => [...new Set([...current.filter(item => item !== id), ...(data?.staff ?? []).filter(item => item.role === person.role && item.id !== id).map(item => item.id)])]);
     } else setSelectedIds(current => current.includes(id) ? current.filter(item => item !== id) : [...current, id]);
   };
+  if (state.loading && !data) return <SectionLoading title="Meetings" />;
   return <>
     <div className="page-heading"><div><h1>Meetings</h1><p>Schedule internal staff meetings and share invitations with attendees.</p></div><div className="heading-actions"><button className="button button-secondary" onClick={() => void state.refresh()}>Refresh</button>{data?.canManage && <button className="button button-primary" onClick={() => { setShowForm(!showForm); setSelectedIds([]); setSelectedRoles([]); }}>Schedule meeting</button>}</div></div>
     <OperationFeedback {...state} error={localError || state.error} />

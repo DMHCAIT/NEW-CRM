@@ -49,27 +49,49 @@ Use `npm run build` followed by `npm start` for production-speed serving.
 loading times. Development output is isolated in `.next-dev`; production uses
 `.next`, so building no longer overwrites the running development server's assets.
 `NEXT_DIST_DIR` can override either directory; use distinct values if running both.
+For routine local use, leave the production server running on the configured
+application port; return to `npm run dev` only when editing with hot reload.
+Rebuild and restart the production server after changing code. A loading skeleton
+does not remove development compilation or database latency.
 
 Lead screens reuse browser-memory responses for up to 30 seconds when revisiting
 a page; valid cached data renders immediately instead of flashing a loading screen.
-Sidebar links fully prefetch permitted destinations, including dynamic routes;
-Next's default partial prefetch otherwise stops at the loading boundary.
-Sidebar hover, keyboard focus and touch start also prefetch the selected route. Leads
+Sidebar links prefetch the selected destination on hover, keyboard focus or touch,
+rather than fetching every permitted dynamic page when the sidebar mounts.
+Intended client-rendered sections use Next Link's full prefetch rather than the
+automatic mode that can stop at a dynamic route's loading boundary. Dashboard
+and login activity retain server-rendered freshness instead of full route prefetch.
+Clicking any internal section link immediately updates the navigation and breadcrumb
+and shows a destination-specific skeleton, keeping the previous page hidden and inert
+until the route is ready. Existing route layouts remain mounted during the transition.
+Modified clicks, downloads, external links and same-page anchors retain native behavior.
+A click starts data preparation and one navigation, not a second route prefetch
+competing with navigation. Leads
 and Pipeline also start their existing 30-second cached data request on intent,
 overlapping route loading rather than waiting for the destination to mount.
-Meetings and Invoices start a fresh data read on hover, focus or touch, so an
-in-flight request can be shared with the destination rather than starting after
-route loading. Completed operational responses are not cached: a later visit
-still reads current records and payment status.
+Operational sections start fresh data reads on hover, focus, touch or click.
+The destination consumes that preparation once, even if it finishes before the
+route mounts; a completed preparation expires after five seconds. This bounded,
+20-entry browser-only handoff is not a reusable financial response cache.
+Later visits, manual refreshes, polling and post-write refreshes read current
+records. Identity changes, authorization failures and writes discard preparations,
+including preparations still in flight.
 Concurrent reads share one request. Manual refresh always requests fresh
 data, and API writes invalidate cached reads before and after the write.
 No response cache is persisted or shared between browsers or server requests.
 Invoices, payment status and operational screens continue to request fresh data;
 refreshing existing data happens in place rather than blanking the screen.
+Dashboard drill-down filters are read before the Leads workspace mounts, including
+query-only navigation and browser history. The first request uses the selected
+criteria and role scope; an invalid filter shows an error without requesting all leads.
+Operational pages show a section skeleton until their initial response arrives
+instead of rendering empty/default records. Responses from a previous URL cannot
+replace newer operational data.
 Protected-page middleware loads verified session, active profile and current
 permissions in parallel after authentication. It passes that result to Server
-Components through a request-only header, avoiding a second authentication
-waterfall during rendering. Middleware removes browser-supplied values of that
+Components through a request-only header. Both the root layout and server-page
+guards reuse this verified identity, avoiding a second authentication waterfall
+during rendering. Middleware removes browser-supplied values of that
 header on every matching request, including public and API routes. The result
 is not a cookie, response header or cross-request permission cache.
 API routes never trust the page header: they authenticate,
@@ -87,6 +109,38 @@ A complete page load under 1 ms cannot be guaranteed: network, authentication,
 database access, JavaScript and browser rendering all contribute to load time.
 Measure cold and warm loads in a production build, including the time until data
 is usable, rather than treating a cached function call as a full-page benchmark.
+
+#### Record and billing workspaces
+
+Lead records use related-list navigation for Overview, Notes, Emails, Calls,
+Invoices and Courses. Overview groups contact information, admissions and
+ownership, and additional fields; existing inline-save and permission rules apply.
+Notes and Emails show their existing history alongside the composer (stacked on
+smaller screens). Read-only users can read history without compose controls.
+Call appointments retain local-time scheduling, rescheduling and outcome actions.
+
+The record UI requests `/api/leads/:id?section=overview` initially. Section-specific
+reads omit unrelated note/email bodies and do not resolve Gmail until Emails opens.
+`history=1` loads record/call activity only for the corresponding Timeline view.
+Sidebar note/email counts use RLS-scoped count-only queries. Omitting `section`
+retains the complete response for existing consumers. History initially renders
+25 entries with an explicit option to show older entries. Invoice and catalog
+components load in separate JavaScript chunks when their related lists open.
+
+Search controls share single-row icon/input geometry in tables, Pipeline,
+Integrations, attendee selection, column selection and searchable dropdowns.
+Inputs shrink within their container rather than wrapping below their icons.
+The whole control retains a visible keyboard-focus indicator.
+
+The shared course catalog provides search, availability filters and 25-row pages
+in both lead records and the standalone Courses workspace. Billing-company
+profiles have a separate view. Catalog prices are references, not enrollment
+records; course selection and pricing confirmation still happen in invoice creation.
+Invoice views group all invoices, approvals, awaiting payment and paid records.
+The register renders 25 rows at a time; filtering and totals cover all fetched
+records, including records beyond the first page. Financial data still refreshes
+from the server, and payment, approval, reconciliation and tax policies are unchanged.
+These changes do not constitute a guaranteed Zoho-equivalent response-time SLA.
 
 #### Large lead datasets (1 lakh to 10 lakh)
 
@@ -113,6 +167,15 @@ records into the live database.
   controls. Search, owner, stage, My Leads and sorting run on the server. All three
   sort modes have stable cursors, including null follow-up dates. This bounds the
   DOM on desktop, tablet and mobile instead of rendering the whole database.
+  Pipeline skips saved-filter, column-preference and lead-configuration reads that
+  the board does not use. Stage queries begin as soon as the stage list arrives,
+  without waiting for the staff list. Returned IDs are deduplicated and lead
+  records are fetched in shared batches of at most 100 IDs, still under the
+  caller's RLS policies. Twelve full stages therefore need three record reads,
+  not twelve; stage cursors and ordering are preserved. No new migration is needed.
+- Lead API responses include `Server-Timing` entries for `auth` and `data` so the
+  browser Network panel can distinguish authentication latency from database work.
+  Responses stay private/no-store; timings contain no credentials or record data.
 - Dashboard returns aggregate counts, not lead records. Totals remain exact.
   Country/course charts display the top 30 groups by volume; conversion leaders
   rank across all groups; country/course combinations display the top 30 by
@@ -414,11 +477,10 @@ The page retains configured fields, assignment permissions and duplicate-policy
 confirmation. Saving opens the created lead; Back to leads returns to the list.
 Legacy `/leads?create=1` links redirect to the new page.
 
-Buttons and navigation use ring-free hover, pressed and focus states throughout
-the site. Keyboard focus remains visible through tonal changes rather than
-an outer border. Form input focus indicators and the selected navigation
-marker are retained.
-The sidebar hides its scrollbar while retaining wheel, touch and keyboard
+Buttons use blue primary actions and bordered secondary actions. Keyboard navigation
+has visible focus outlines and a Skip to content link. Form input focus indicators
+and the selected navigation marker are retained.
+The sidebar uses a thin scrollbar and retains wheel, touch and keyboard
 scrolling. Compact-height layouts reduce menu spacing; mobile navigation uses
 a viewport-sized drawer. Help & support is no longer shown in the sidebar.
 The shared sidebar uses compact muted-navy navigation, consistent icons, a
@@ -596,11 +658,12 @@ Save the Razorpay key ID, key secret and separate webhook signing secret in
 signature, invoice/link reference, payment ID, amount, currency and captured state.
 Verified payment recording is idempotent; link existence and browser redirects do
 not mark invoices paid. INR online invoices use Razorpay; USD uses Stripe.
-Invoice email and PDF Pay Now buttons open the same random-token, branded CRM
-invoice page for both providers. It displays the full itemized invoice and verified
-payment status; after payment is verified it shows Paid and removes the payment
-action. Razorpay returns to this page after checkout, and the page refreshes status
-automatically. The page exposes only information printed on that invoice.
+Invoice email, CRM and PDF Pay Now buttons go through a random-token checkout
+redirect directly to Razorpay (INR) or Stripe (USD), without an intermediate
+invoice page. The redirect checks approval, expiry and Paid status before opening
+checkout; Stripe sessions are safely reused or renewed when eligible. Provider
+return pages use the same branded invoice template as CRM and email and refresh
+verified status automatically. They expose only information printed on the invoice.
 
 ### Stripe (USD invoices)
 
@@ -641,8 +704,8 @@ Open **Courses** as an Admin/Super Admin with `settings.manage`:
    no legal/tax details are fabricated.
 3. Invoice PDFs and invoice delivery emails use the supplied logos and their
    palettes: DMHCA navy/red (`#1c1d4e` / `#a91e2c`), IBMP navy/teal
-   (`#091b3c` / `#188574`). Company settings still control the workspace preview
-   and public status page colors. Legal billing details remain snapshotted.
+   (`#091b3c` / `#188574`). CRM, email and public status use one shared invoice
+   template with the same company palette. Legal billing details remain snapshotted.
 
 Invoice PDFs follow the reference's angled header/footer, bill-to and invoice
 details, course table, totals, payment schedule and payment details sections.
@@ -650,8 +713,8 @@ The DMHCA PDF embeds `public/DMHCA-invoice-logo.png`, a lossless PNG conversion
 of `public/DMHCA-Logo.webp` (PDF does not support WebP); IBMP embeds
 `public/IBMP-logo.png`. Both assets are included in server output tracing.
 Approved, unexpired online invoices have a clickable **Pay Now** PDF annotation
-and email button. INR opens the saved Razorpay link; USD opens the stable
-invoice payment page, which creates/reuses an eligible Stripe checkout session.
+and email button. Both open the selected provider directly through the stable
+checkout redirect, which creates/reuses an eligible Stripe session when needed.
 Pending approval, tax review, paid, expired and financing invoices do not expose
 a payable PDF button. Downloading a PDF never creates a payment link or sends mail.
 Bank account details are not invented; payment details describe the configured
@@ -688,24 +751,141 @@ tax are calculated once for the enrollment. Enter the **tax-inclusive amount
 actually payable** for installment one; the discount is not applied a second time
 to that payment. Later installments automatically continue the matching lead,
 course, company and currency enrollment, retaining approved pricing. Their maximum
-is the full course total minus confirmed paid installments. Final-payment rounding
+is the full course total minus paid, unpaid and scheduled reservations. Final-payment rounding
 reconciles the itemized discount and tax across the enrollment. A discounted
 enrollment requires approval once; its unchanged subsequent installments inherit
 that approval. Existing historical totals are not recalculated.
 Each installment is a separate numbered invoice linked to its course invoice. The
-database serializes enrollment creation and prevents overlapping unpaid installments,
-including attempts to bypass the parent selection, and amounts beyond the remaining
+database serializes enrollment creation and prevents over-allocation,
+including attempts to bypass the parent selection, and amounts beyond the unallocated
 course balance. Existing enrollments retain their original total even after
 catalog price changes/deactivation. Historical pre-catalog DMHCA/INR enrollments
 can continue by selecting their original invoice in installment mode without
 inventing a course mapping or changing historical invoices.
+
+#### Dated installment plans and automatic delivery
+
+Before deploying the new editor, apply
+`202611060001_scheduled_invoice_status.sql` and
+`202611060002_installment_plans.sql`, then
+`202611060003_external_installment_payments.sql`, in that order. The enum migration must commit
+before the plan migration runs. These migrations do not send customer emails.
+
+Selecting **Installment** opens a numbered schedule with amounts (including tax),
+invoice/email dates and read-only due dates. Create one installment for part of the
+unallocated balance, or save several installments for part or all of that balance.
+Use **Add next installment** in the register or course invoice details to return
+to the existing enrollment with its course, company and currency preselected.
+Existing numbered installments, amounts, dates and statuses stay visible below
+the payment type. Later installments never create a fresh course balance.
+Each save supports up to 36 rows; there is no lifetime installment-count limit,
+provided the course has enough unallocated balance and each payment is at least
+one currency unit. Fully paid courses cannot silently reopen through installment creation.
+Other courses have independent enrollment totals and balances. New full-payment
+invoices remain separate agreements.
+Dates must be chronological, today or later, and within five years. Each invoice's
+due date is four days after its selected invoice date. Its payment window runs
+from **9:00 AM Asia/Kolkata on that date through 96 hours later**, not from the
+time the plan was entered. Existing non-scheduled invoices retain creation-based
+terms. PDFs, emails, public invoice pages and the register use the selected date.
+
+Plans are persisted atomically with a retry-safe request ID. Scheduled/unpaid
+amounts reserve the course balance without being counted as received money.
+Later invoices retain the enrollment price, tax and discount; only the first
+discount request needs an admin decision. Pending approval blocks scheduled
+delivery. Rejection cancels the scheduled children. Once approved, each due
+installment is sent independently of earlier payments. Approval never extends
+an expired payment window; reconcile expired invoices rather than backdating or
+silently extending them.
+
+Invoice creation includes a company-branded preview and shows the lead and owner
+email recipients before save. The email body and saved CRM preview share the same
+invoice layout: logo header, billing details, course items, discount/tax totals,
+payment schedule and company footer. DMHCA uses its navy/red logo palette; IBMP
+uses navy/teal. Emails embed the company logo and attach the matching PDF.
+Save automatically sends non-discounted invoices to the lead, copying the current
+lead owner and original invoice creator. Discounted invoices stay in CRM awaiting
+approval; approval automatically sends eligible invoices without a second send
+action. Future-dated installments retain their selected schedule. An assigned
+owner with a valid email is required for delivery. Delivery resolves the owner
+at send time, so reassignment never sends a copy to a stale owner.
+SMTP failures remain visible on the saved invoice and as warnings, not success
+notifications. Provider/SMTP leases prevent duplicate sends; uncertain delivery
+requires reconciliation before retrying.
+Ready online-payment invoices include a clickable **Pay Now** button in the CRM
+register, saved invoice, email and PDF. Each button opens Razorpay (INR) or Stripe
+(USD) directly for the exact full-payment or installment amount, never the full
+course total for a partial installment. No second invoice design is displayed.
+PDFs use the configured public invoice origin.
+Verified Razorpay `payment_link.paid` and Stripe `checkout.session.completed` /
+`checkout.session.async_payment_succeeded` webhooks persist Paid status and send
+the receipt. Configure those events and webhook secrets with the providers;
+the public invoice and CRM refresh automatically to show Paid and remove Pay Now.
+Email/PDF copies already delivered remain static; the checkout redirect rejects
+already-paid invoices and prevents another payment. Older copies with invoice-page
+links display the same shared branded template; newly delivered copies open checkout.
+
+Invoice details show the selected course's complete installment schedule and
+course total, paid, outstanding and unallocated amounts. The invoice's remaining
+course balance deducts all created installments (including unpaid installments),
+excluding cancelled or rejected invoices. Outstanding still deducts confirmed
+payments only. Search also matches the
+course name. **Record payment** opens visible fields for an external payment.
+The creator, current lead owner (with `invoices.create`) or an administrator can
+paste a company Razorpay/Stripe URL and choose **Verify link & mark paid**.
+The server checks the configured merchant account, customer/invoice binding,
+currency, exact amount and captured/paid provider state before changing status.
+Payments cannot be reused across invoices. Approved scheduled or expired invoices
+can be settled without waiting for the email scheduler; pending discount/tax
+approval and cancelled/rejected invoices cannot bypass approval this way.
+Other bank/UPI payments require Admin/Super Admin finance confirmation with a
+unique reference and receipt link or verification evidence. A pasted URL alone
+is never proof of payment. Paid records update the course balance on refresh and
+are excluded from scheduled invoice delivery.
+
+Saving a plan immediately attempts delivery of today's approved installments.
+Approval also attempts delivery of today's installments in that enrollment.
+If issued before 9:00 AM, the four-day window starts at immediate issuance instead.
+Each email includes the PDF and a **Pay Now** button, addressed to the lead with
+the lead owner and invoice creator copied. Saved future dates are not sent early.
+For local previews, set server-only `INVOICE_PUBLIC_URL` to the public HTTPS CRM
+origin serving the same database and invoice-status routes. This changes invoice
+and payment-return URLs without changing the local login/request origin.
+Apply `202611060004_immediate_installment_delivery.sql` before deploying this flow.
+Delivery failures are reported after saving and persisted for reconciliation.
+
+Automatic future-date delivery needs a deployed scheduler; leaving a browser open is not
+sufficient. No live scheduler or database is activated by a build.
+
+1. Configure an independent server-only `INVOICE_CRON_SECRET` of at least 32
+   random characters. Never put it in client code or a URL.
+2. Configure a trusted external scheduler to call `GET /api/cron/invoices`
+   on the deployed HTTPS origin **every minute**, with the header
+   `Authorization: Bearer <INVOICE_CRON_SECRET>`. Do not enable HTTP response
+   caching. The hosting platform must allow the route's 300-second execution
+   budget; adjust batch size/scheduler cadence for deployment limits.
+3. Configure finance SMTP and the relevant payment provider in Integrations.
+   The job processes up to five eligible invoices per invocation. Delivery is
+   at or after 9:00 AM, subject to scheduler cadence, backlog and provider latency.
+4. Monitor the response's `processed` and `failed` counts and the register's
+   **Delivery needs attention** notices. Details show the persisted failure.
+   Safe pre-send failures retry after 15 minutes. Provider/SMTP uncertainty
+   retains existing delivery locks for reconciliation instead of risking duplicate
+   charges or messages. Do not clear locks without checking provider records.
+   Accepted SMTP messages are not proof of inbox delivery.
+
+The worker uses service-role-only, row-locked claims; concurrent invocations do
+not claim the same attempt. Already accepted emails are excluded. Undelivered
+scheduled invoices whose four-day window has elapsed become expired with an
+explicit error instead of being emailed with stale payment links.
 
 #### Fixed tax, approvals and four-day payment terms
 
 Apply `202611050002_invoice_tax_deadline.sql` before deploying this policy.
 New agreements use **18% GST for INR and 0% tax for USD**, calculated on the
 discounted course price. Tax and due date are read-only; the database ignores
-browser-supplied rates/amounts and sets the deadline to **creation + 96 hours**.
+browser-supplied rates/amounts and sets the deadline to **creation + 96 hours**
+for immediate invoices, or **scheduled issue time + 96 hours** for dated installments.
 Discount percentage remains editable for new agreements, with a mandatory reason;
 Admin/Super Admin approval is required before any invoice/payment email is sent.
 Existing installment discount agreements remain locked to the original approval.
@@ -724,8 +904,12 @@ Invoices needing tax correction show **Review tax before approval** instead,
 which opens the details for review; expired and already-decided invoices cannot
 be approved from the register. Approval always requires confirmation.
 
-New Razorpay links include the exact provider `expire_by` deadline. USD email
-links open the stable CRM invoice page; **Pay securely with Stripe** reuses an
+New Razorpay links include the exact provider `expire_by` deadline. **Pay Now**
+in the CRM, public invoice, email and PDF opens the validated saved Razorpay link
+directly for INR. This does not depend on a public CRM redirect being deployed.
+USD uses the stable CRM payment redirect to Stripe Checkout. Browser payment buttons
+open a separate tab so the standard invoice remains available to show confirmation.
+Stripe reuses an
 open Checkout session or creates a new one after verified expiry. Stripe supports
 only 30-minute to 24-hour sessions, so each session has its own provider expiry
 and database history. A final session opened near the deadline may run **up to
@@ -768,8 +952,33 @@ confirmation after independently checking funds received. Finance must reconcile
 any other outstanding payment links to avoid collecting twice.
 Missing provider configuration
 is reported, and ambiguous provider/email operations remain locked for reconciliation.
-The public link refreshes every ten seconds while awaiting payment, shows **Paid**
-after verification and removes the payment button. Invoice/receipt email
+The public link refreshes every ten seconds while awaiting confirmation, including
+expired invoices that may receive a late verified confirmation. Transient refresh
+failures retry automatically with a visible error. The CRM and public invoice
+refresh when their tab regains focus, show **Paid** after verification and remove
+the payment button. Payment never becomes Paid merely because checkout was opened
+or the customer returned from checkout.
+IBMP and DMHCA use one standard invoice layout, with their respective logo and
+brand colors, across creation preview, saved CRM preview, public invoice, email,
+paid email and PDF. Payment updates the existing invoice number, not a new invoice.
+The header uses a prominent bold company name beside the logo and only the
+**INVOICE** title on the right; the invoice number remains in Invoice Details.
+Bill To and Invoice Details use clearly spaced bordered panels, prominent customer
+and invoice identifiers, and a text-labelled payment-status badge.
+The saved invoice preview contains only the standard document, without delivery
+messages, a duplicate installment summary or approval history beneath it. Delivery
+status remains in the register; installment balances and approval events remain
+in the CRM schedule and timeline. Review warnings and external verification
+evidence appear separately from the invoice document.
+Paid copies show the verified payment date and amount paid instead of a payment
+deadline or Pay Now button. Previously downloaded PDFs and sent emails are static;
+the public invoice, CRM, new PDF downloads and paid email reflect the updated state.
+CRM PDF buttons fetch the authenticated invoice endpoint, check the PDF content
+type and file signature, and download the file without leaving the workspace.
+Failed downloads show an error rather than opening or saving a JSON/HTML response.
+`INVOICE_PUBLIC_URL` must serve the current CRM build and invoice-status routes;
+host reachability alone does not prove that those routes have been deployed.
+Invoice/receipt email
 acceptance is recorded; SMTP acceptance is not a guarantee of inbox delivery.
 Configure the finance sender to be authorized for both company identities.
 Company choice changes branding, not merchant accounts or settlement currency;
@@ -785,10 +994,10 @@ before accepting live payments.
 
 ### Lead workspace and personal Gmail
 
-The website uses a borderless visual theme: panels, tables, forms and tabs are
-separated by spacing and subtle surface colors rather than decorative outlines.
-Inputs keep a soft fill, selected tabs use a tinted background, and validation
-messages remain visible. Keyboard-only focus indicators are retained for
+The shared workspace uses a compact Zoho-style sidebar, blue primary actions,
+subtle panel and table boundaries, and consistent bordered form controls.
+Selected tabs use a tinted background and validation messages remain visible.
+Broad border/focus suppression is not applied. Keyboard-only focus indicators are retained for
 accessibility; dropdowns and dialogs retain soft elevation. The email composer
 places sender, recipient and Gmail connection controls together without nested
 framed cards. These presentation changes do not alter permissions or delivery.

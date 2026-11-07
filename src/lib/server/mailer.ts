@@ -1,7 +1,10 @@
 import { getIntegrationConfig, requireIntegrationValue } from "@/lib/server/integration-settings";
 import { smtpTransport } from "@/lib/server/smtp-transport";
+import { escapeHtml } from "@/lib/html";
 
-export type MailAttachment = { filename: string; content: Buffer | Uint8Array; contentType?: string };
+export { escapeHtml } from "@/lib/html";
+
+export type MailAttachment = { filename: string; content: Buffer | Uint8Array; contentType?: string; cid?: string };
 
 export async function sendMail(options: {
   to: string;
@@ -25,7 +28,7 @@ export async function sendMail(options: {
     subject: options.subject,
     html: options.html,
     text: options.text ?? htmlToText(options.html),
-    attachments: options.attachments?.map(({ filename, content, contentType }) => ({ filename, content: Buffer.from(content), contentType })),
+    attachments: options.attachments?.map(({ filename, content, contentType, cid }) => ({ filename, content: Buffer.from(content), contentType, cid })),
   });
   if (Array.isArray(info.rejected) && info.rejected.length) throw new Error("SMTP server rejected the recipient.");
   return info.messageId as string;
@@ -35,10 +38,6 @@ export async function sendMail(options: {
 function extractAddress(from: string) {
   const match = /<([^>]+)>/.exec(from);
   return match ? match[1] : from;
-}
-
-export function escapeHtml(value: string) {
-  return value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!);
 }
 
 function htmlToText(html: string) {

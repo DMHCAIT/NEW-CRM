@@ -9,11 +9,12 @@ import {
   Search,
   X,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useTransition, type MouseEvent } from "react";
 import { navigationItems } from "@/lib/navigation";
 import { RolePreviewContext } from "@/components/role-preview-context";
 import type { CurrentUser } from "@/lib/types";
-import { apiRequest, clearApiReadCache, errorMessage } from "@/lib/crm-data";
+import { apiRequest, clearApiReadCache, errorMessage, prefetchApiRead } from "@/lib/crm-data";
+import { SectionLoading } from "@/components/section-loading";
 
 export function AppShell({ children, user }: { children: React.ReactNode; user: CurrentUser | null }) {
   const pathname = usePathname();
@@ -21,17 +22,42 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
   const [mobileOpen, setMobileOpen] = useState(false);
   const [accountError, setAccountError] = useState("");
   const [signingOut, setSigningOut] = useState(false);
-  function prefetchSection(href: string) {
-    router.prefetch(href);
+  const [destination, setDestination] = useState("");
+  const [navigating, startNavigation] = useTransition();
+  const [intentHref, setIntentHref] = useState("");
+  function prefetchSection(href: string, prepareRoute = true) {
+    if (prepareRoute) setIntentHref(href);
     const params = new URLSearchParams({ timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
     if (href === "/pipeline") params.set("view", "pipeline");
     const leadSection = href === "/leads" || href === "/pipeline";
-    const dataPath = leadSection ? `/api/leads?${params}` : href === "/meetings" || href === "/invoices" ? `/api${href}` : null;
-    if (dataPath) {
-      void apiRequest(dataPath, { maxAgeMs: leadSection ? 30000 : 0 }).catch((error) => {
+    const operationalPaths: Record<string, string[]> = {
+      "/meetings": ["/api/meetings"], "/invoices": ["/api/invoices"],
+      "/courses": ["/api/courses"], "/automations": ["/api/automations"],
+      "/reports": ["/api/reports"], "/users": ["/api/users"], "/settings": ["/api/settings"],
+      "/integrations": ["/api/integrations", "/api/integrations/sources", "/api/integrations/gmail"],
+    };
+    const dataPaths = leadSection ? [`/api/leads?${params}`] : operationalPaths[href] ?? [];
+    for (const dataPath of dataPaths) {
+      const read = leadSection ? apiRequest(dataPath, { maxAgeMs: 30000 }) : prefetchApiRead(dataPath);
+      void read.catch((error) => {
         setAccountError(errorMessage(error, "Could not prepare section data. Open the section to retry."));
       });
     }
+  }
+  function navigate(event: MouseEvent<HTMLDivElement>) {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const link = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>("a[href]") : null;
+    if (!link || link.hasAttribute("download") || (link.target && link.target !== "_self")) return;
+    const url = new URL(link.href, window.location.href);
+    if (url.origin !== window.location.origin || url.pathname.startsWith("/api/")) return;
+    if (url.pathname === window.location.pathname && url.search === window.location.search) return;
+    event.preventDefault();
+    setMobileOpen(false);
+    setAccountError("");
+    setDestination(url.pathname);
+    // Start data and routing together, including clicks without hover or focus.
+    if (!url.search) prefetchSection(url.pathname, false);
+    startNavigation(() => router.push(`${url.pathname}${url.search}${url.hash}`));
   }
   useEffect(() => { clearApiReadCache(); }, [user?.id]);
   useEffect(() => {
@@ -67,7 +93,8 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
 
   return (
     <RolePreviewContext.Provider value={previewRole}>
-    <div className="app-layout">
+    <div className="app-layout" onClickCapture={navigate}>
+      <a className="skip-navigation" href="#workspace-content">Skip to content</a>
       {mobileOpen && (
         <button
           className="mobile-scrim"
@@ -99,12 +126,12 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
           {workspaceItems.length > 0 && <div className="nav-label">WORKSPACE</div>}
           {workspaceItems.map((item) => {
             const Icon = item.icon;
-            const active = isActiveRoute(item.href, pathname);
+            const active = isActiveRoute(item.href, navigating ? destination : pathname);
             return (
               <Link
                 className={`nav-link ${active ? "nav-link-active" : ""}`}
                 href={item.href}
-                prefetch={true}
+                prefetch={intentHref === item.href && item.href !== "/"}
                 onMouseEnter={() => prefetchSection(item.href)}
                 onFocus={() => prefetchSection(item.href)}
                 onTouchStart={() => prefetchSection(item.href)}
@@ -121,12 +148,12 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
           {manageItems.length > 0 && <div className="nav-label nav-label-spaced">MANAGE</div>}
           {manageItems.map((item) => {
             const Icon = item.icon;
-            const active = isActiveRoute(item.href, pathname);
+            const active = isActiveRoute(item.href, navigating ? destination : pathname);
             return (
               <Link
                 className={`nav-link ${active ? "nav-link-active" : ""}`}
                 href={item.href}
-                prefetch={true}
+                prefetch={intentHref === item.href && item.href !== "/admin/login-activity"}
                 onMouseEnter={() => prefetchSection(item.href)}
                 onFocus={() => prefetchSection(item.href)}
                 onTouchStart={() => prefetchSection(item.href)}
@@ -157,7 +184,7 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
           <button className="icon-button mobile-menu" onClick={() => setMobileOpen(true)} aria-label="Open menu" aria-expanded={mobileOpen} aria-controls="workspace-navigation">
             <Menu size={20} />
           </button>
-          <div className="breadcrumb"><span>Workspace</span><span className="breadcrumb-slash">/</span><strong>{pageName(pathname)}</strong></div>
+          <div className="breadcrumb"><span>Workspace</span><span className="breadcrumb-slash">/</span><strong>{pageName(navigating ? destination : pathname)}</strong></div>
           <div className="topbar-actions">
             <Link className="search-trigger" href="/leads" aria-label="Search leads">
               <Search size={16} />
@@ -177,7 +204,11 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
             </button>
           </div>
         </header>
-        <main className="page-content">{accountError && <p className="form-error" role="alert">{accountError}</p>}{children}</main>
+        <main id="workspace-content" className="page-content" tabIndex={-1} aria-busy={navigating}>
+          {accountError && <p className="form-error" role="alert">{accountError}</p>}
+          {navigating && <SectionLoading title={pageName(destination)} />}
+          <div className="section-content" hidden={navigating} inert={navigating}>{children}</div>
+        </main>
       </div>
     </div>
     </RolePreviewContext.Provider>

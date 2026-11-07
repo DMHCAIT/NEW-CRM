@@ -1,41 +1,18 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { PDFDocument, PDFString, StandardFonts, rgb } from "pdf-lib";
-import { legacyCompany, type BillingCompany } from "@/lib/billing";
+import { legacyCompany } from "@/lib/billing";
 import { invoiceWindowExpired } from "@/lib/invoice-policy";
 import { invoiceBranding } from "@/lib/invoice-branding";
+import type { InvoiceDocumentRecord } from "@/lib/invoice-document";
 
-export type InvoicePdfRecord = {
-  invoice_no: string;
-  status: string;
-  lead_id: string;
-  created_at: string;
-  due_date: string | null;
-  invoice_items?: { description: string; quantity: number | string; unit_price: number | string; amount: number | string }[];
-  subtotal: number | string;
-  currency: string;
-  discount_amount: number | string;
-  discount_reason: string | null;
-  tax_amount: number | string;
-  total: number | string;
-  notes: string | null;
-  payment_type?: string;
-  course_total?: number | string | null;
-  installment_number?: number | null;
-  payment_expires_at?: string | null;
-  tax_review_required?: boolean;
-  company_snapshot?: BillingCompany | null;
-  company_code?: string | null;
-  billing_name?: string | null;
-  billing_email?: string | null;
-  billing_address?: string | null;
-};
+export type InvoicePdfRecord = InvoiceDocumentRecord;
 
 export async function buildInvoicePdf(invoice: InvoicePdfRecord, lead: { name?: string | null; email?: string | null } | null, paymentUrl?: string | null) {
   const pdf = await PDFDocument.create();
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
-  const company = invoiceBranding(invoice.company_snapshot ?? { ...legacyCompany, code: invoice.company_code === "IBMP" ? "IBMP" : "DMHCA" });
+  const company = invoiceBranding(invoice.company_snapshot ?? { ...legacyCompany, code: invoice.company_code === "IBMP" ? "IBMP" : "DMHCA", legal_name: invoice.company_code ?? legacyCompany.legal_name });
   const logo = await pdf.embedPng(await readFile(join(process.cwd(), "public", company.code === "IBMP" ? "IBMP-logo.png" : "DMHCA-invoice-logo.png")));
   pdf.setTitle(`Invoice ${invoice.invoice_no}`);
   pdf.setAuthor(company.legal_name);
@@ -69,16 +46,18 @@ export async function buildInvoicePdf(invoice: InvoicePdfRecord, lead: { name?: 
   const date = (value: string | null) => value ? new Date(value).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "UTC" }) : "-";
   let page = pdf.addPage([width, height]), y = 0;
   const decorate = () => {
-    page.drawRectangle({ x: 0, y: 0, width, height, color: color("#f8fafc") });
+    page.drawRectangle({ x: 0, y: 0, width, height, color: white });
     page.drawRectangle({ x: 0, y: height - 108, width, height: 108, color: primary });
     page.drawSvgPath(`M 0 0 L 235 0 L 170 108 L 0 108 Z`, { x: width - 235, y: height, color: accent });
     page.drawRectangle({ x: margin, y: height - 93, width: 76, height: 78, color: white });
     const scaled = logo.scale(Math.min(66 / logo.width, 68 / logo.height));
     page.drawImage(logo, { x: margin + (76 - scaled.width) / 2, y: height - 93 + (78 - scaled.height) / 2, ...scaled });
-    wrap(company.legal_name, 228, 13, true).slice(0, 4).forEach((line, i) => text(line, 121, height - 45 - i * 16, 13, true, white));
+    const nameSize = wrap(company.legal_name, 228, 22, true).length > 3 ? 13 : 22;
+    const nameLines = wrap(company.legal_name, 228, nameSize, true).slice(0, 4);
+    const nameTop = height - 61 + (nameLines.length - 1) * nameSize * 0.6;
+    nameLines.forEach((line, i) => text(line, 121, nameTop - i * nameSize * 1.2, nameSize, true, white));
     text("INVOICE", width - 148, height - 65, 24, true, white);
     page.drawRectangle({ x: 0, y: 0, width, height: 78, color: accent });
-    page.drawSvgPath("M 0 0 L 66 64 L 0 64 Z", { x: width - 66, y: 78, color: primary });
     text(company.legal_name, margin, 56, Math.min(11, (bodyWidth - 60) / bold.widthOfTextAtSize(company.legal_name, 1)), true, white);
     wrap([company.address, company.tax_id ? `Tax ID: ${company.tax_id}` : ""].filter(Boolean).join(" | "), bodyWidth - 60, 8)
       .slice(0, 3).forEach((line, i) => text(line, margin, 40 - i * 11, 8, false, white));
@@ -98,10 +77,14 @@ export async function buildInvoicePdf(invoice: InvoicePdfRecord, lead: { name?: 
   decorate();
   const billTo = [invoice.billing_name || lead?.name || invoice.lead_id, invoice.billing_address || "", invoice.billing_email || lead?.email || ""]
     .filter(Boolean).flatMap(value => wrap(value, 248));
-  const status = ["sent", "pending_approval"].includes(invoice.status) && invoiceWindowExpired(invoice) ? "Expired" : invoice.status === "sent" ? "Awaiting payment" : invoice.status;
+  const status = invoice.tax_review_required && invoice.status !== "paid" ? "Pending finance review"
+    : ["sent", "pending_approval"].includes(invoice.status) && invoiceWindowExpired(invoice) ? "Expired"
+    : ({ sent: "Awaiting payment", paid: "Paid", scheduled: "Scheduled", pending_approval: "Pending approval",
+      cancelled: "Cancelled", rejected: "Rejected", expired: "Expired" } as Record<string, string>)[invoice.status] ?? invoice.status;
   const details = [
-    `Invoice No: ${invoice.invoice_no}`, `Invoice Date: ${date(invoice.created_at)}`,
+    `Invoice No: ${invoice.invoice_no}`, `Invoice Date: ${date(invoice.invoice_date ?? invoice.created_at)}`,
     `Due Date: ${date(invoice.due_date)}`, `Status: ${status.replaceAll("_", " ")}`,
+    ...(invoice.status === "paid" && invoice.paid_at ? [`Paid on: ${date(invoice.paid_at)}`] : []),
     ...(company.tax_id ? [`Tax ID: ${company.tax_id}`] : []),
   ].flatMap(value => wrap(value, 248));
   text("BILL TO", margin, y, 9, true, primary);
@@ -139,13 +122,20 @@ export async function buildInvoicePdf(invoice: InvoicePdfRecord, lead: { name?: 
     }
   }
   y -= 20;
-  ensure(154);
+  ensure(205);
   const blockTop = y;
   text("PAYMENT SCHEDULE", margin, y, 9, true, primary);
   y -= 25;
-  text(invoice.payment_type === "installments" ? `Installment ${invoice.installment_number ?? 1}` : "Full payment", margin, y, 10, true);
-  y -= 19; text(`Due ${date(invoice.due_date)}`, margin, y);
-  y -= 19; text(money(invoice.total), margin, y, 12, true);
+  text(invoice.payment_type === "installments" ? `Installment ${invoice.installment_number ?? 1}`
+    : ["loan", "emi"].includes(invoice.payment_type ?? "") ? `${invoice.payment_type?.toUpperCase()} financing` : "Full payment", margin, y, 10, true);
+  y -= 24;
+  page.drawRectangle({ x: margin, y: y - 6, width: 267, height: 22, color: primary });
+  text("Due date", margin + 8, y + 2, 8, true, white);
+  text("Amount", margin + 206, y + 2, 8, true, white);
+  y -= 24;
+  text(date(invoice.due_date), margin + 8, y);
+  const scheduledAmount = money(invoice.total);
+  text(scheduledAmount, margin + 259 - font.widthOfTextAtSize(scheduledAmount, 9), y);
   if (invoice.payment_type === "installments" && invoice.course_total != null) {
     y -= 19; text(`Full course value: ${money(invoice.course_total)}`, margin, y, 8);
   }
@@ -162,25 +152,29 @@ export async function buildInvoicePdf(invoice: InvoicePdfRecord, lead: { name?: 
     });
     page.node.addAnnot(pdf.context.register(link));
   }
-  const totals = [["Subtotal", invoice.subtotal], ["Discount", invoice.discount_amount], ["Tax", invoice.tax_amount], ["Total due", invoice.total]] as const;
+  const totals = [["Subtotal", invoice.subtotal], ["Discount", -Number(invoice.discount_amount)],
+    ["Taxable value", Number(invoice.subtotal) - Number(invoice.discount_amount)],
+    [invoice.currency === "INR" ? "GST" : "Tax", invoice.tax_amount],
+    [invoice.status === "paid" ? "Amount paid" : "Current payment due", invoice.total]] as const;
   totals.forEach(([label, amount], index) => {
     const rowY = blockTop - index * 27;
-    page.drawRectangle({ x: 332, y: rowY - 9, width: width - margin - 332, height: 26, color: index === 3 ? accent : pale });
-    text(label, 340, rowY, 9, true, index === 3 ? white : ink);
+    const last = index === totals.length - 1;
+    page.drawRectangle({ x: 332, y: rowY - 9, width: width - margin - 332, height: 26, color: last ? accent : white });
+    text(label, 340, rowY, 8, last, last ? white : ink);
     const formatted = money(amount);
-    text(formatted, width - margin - 8 - font.widthOfTextAtSize(formatted, 9), rowY, 9, false, index === 3 ? white : ink);
+    text(formatted, width - margin - 8 - font.widthOfTextAtSize(formatted, 9), rowY, 9, false, last ? white : ink);
   });
-  y = Math.min(y - 30, blockTop - 135);
+  y = Math.min(y - 30, blockTop - 162);
   section("PAYMENT DETAILS");
-  if (invoice.tax_review_required) paragraph("Tax review required. Payment is unavailable until finance review and approval.");
-  else if (invoice.status === "paid") paragraph("PAID - Payment has been verified. No further payment is required for this invoice.");
+  if (invoice.status === "paid") paragraph("Payment has been verified. No further payment is required for this invoice.");
+  else if (invoice.tax_review_required) paragraph("Finance review is required before payment is available.");
   else if (["loan", "emi"].includes(invoice.payment_type ?? "")) paragraph("Financing is handled by the company finance team. Contact your lead owner for confirmation.");
   else if (canPay && paymentUrl) paragraph(`Pay securely with ${invoice.currency === "USD" ? "Stripe" : "Razorpay"} using the Pay Now button above.`);
   else paragraph(status === "Expired" || invoice.status === "expired" ? "Payment window expired. Contact your lead owner for a new invoice." : "Payment is unavailable until approval and a secure payment link have been issued.");
-  if (invoice.payment_expires_at) paragraph(`Payment deadline: ${new Date(invoice.payment_expires_at).toUTCString()}`, 8);
+  if (invoice.payment_expires_at && invoice.status !== "paid") paragraph(`Payment deadline: ${new Date(invoice.payment_expires_at).toUTCString()}`, 8);
   if (invoice.currency === "USD" && canPay) paragraph("A Stripe session opened near the deadline may remain available for up to 30 additional minutes.", 8);
   if (invoice.discount_reason) { y -= 10; paragraph(`Discount reason: ${invoice.discount_reason}`, 8); }
-  if (invoice.notes) { y -= 14; section("NOTES"); paragraph(invoice.notes); }
+  if (invoice.notes) { y -= 14; paragraph(invoice.notes); }
   for (const [index, invoicePage] of pdf.getPages().entries()) {
     invoicePage.drawText(`${index + 1} / ${pdf.getPageCount()}`, { x: width - 55, y: 16, size: 8, font, color: white });
   }

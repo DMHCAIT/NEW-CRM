@@ -14,7 +14,7 @@ function load(path, dependencies = {}) {
     exports, require: (name) => name in dependencies ? dependencies[name] :
       name === "@/lib/server/login" ? { checkOrigin: () => {} } :
       name === "@/lib/server/operational-gmail" ? { currentGmailMailbox: async () => null } : require(name),
-    Date, Set, Response, Buffer, console,
+    Date, Set, URL, Response, Buffer, console,
   });
   return exports;
 }
@@ -491,7 +491,7 @@ test("custom fields accept active configuration and preserve existing inactive v
 
 test("active live lead flows never import demo stores or local storage", () => {
   for (const file of [
-    "src\\app\\leads\\page.tsx", "src\\app\\leads\\[id]\\page.tsx",
+    "src\\app\\leads\\page.tsx", "src\\components\\leads-workspace.tsx", "src\\app\\leads\\[id]\\page.tsx",
     "src\\app\\leads\\import\\page.tsx", "src\\app\\pipeline\\page.tsx",
     "src\\app\\reports\\page.tsx", "src\\components\\reports-data-provider.tsx",
   ]) assert.doesNotMatch(readFileSync(join(__dirname, "..", file), "utf8"), /@\/lib\/demo|localStorage|useRolePreview/);

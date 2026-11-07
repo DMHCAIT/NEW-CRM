@@ -6,6 +6,7 @@ import { IntegrationConnections } from "@/components/integration-connections";
 import { FacebookPageConnections } from "@/components/facebook-page-connections";
 import { SearchableDropdown } from "@/components/searchable-dropdown";
 import { Configuration, OperationFeedback, formValues, operationRequest, useOperationalData } from "./operational-ui";
+import { SectionLoading } from "@/components/section-loading";
 
 type Integration = Configuration & { name: string; detail: string; endpoint?: string; webhook?: Configuration };
 type Source = { id: string; name: string; is_active: boolean; allowed_origins: string[]; intake_source_settings: { channel: string; owner_id: string; stage_id: string | null; facebook_page_id: string | null; facebook_form_id?: string | null } | null };
@@ -46,6 +47,7 @@ export default function IntegrationsPage() {
       window.location.assign(response.url);
     } catch (error) { setLocalError(error instanceof Error ? error.message : "Connection failed."); setBusy(false); }
   }
+  if (state.loading && !state.data) return <SectionLoading title="Integrations" />;
   return <div className="integrations-page">
     <div className="page-heading integration-page-heading"><span className="integration-page-icon"><Link2 size={25} /></span><div><span className="integration-category">SETUP / CONNECTED APPS</span><h1>Integrations</h1><p>Connect your tools. Bring every enquiry, conversation and payment into CRM.</p></div><button className="button button-secondary" onClick={() => { void state.refresh(); void sources.refresh(); void gmail.refresh(); }} disabled={state.loading}><RefreshCw size={14} />Refresh</button></div>
     <nav className="integration-workspace-nav" aria-label="Integration workspace"><a href="#integration-apps">Apps &amp; setup guides</a>{sources.data?.canManage && <a href="#integration-facebook-pages">Facebook Pages</a>}<a href="#integration-sources">Lead source routing</a><a href="#integration-mailbox">My mailbox</a></nav>

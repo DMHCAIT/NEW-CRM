@@ -7,6 +7,7 @@ const nextConfig = (phase: string): NextConfig => ({
   outputFileTracingIncludes: {
     "/api/invoices/**": ["./public/DMHCA-invoice-logo.png", "./public/IBMP-logo.png"],
     "/api/webhooks/**": ["./public/DMHCA-invoice-logo.png", "./public/IBMP-logo.png"],
+    "/api/cron/invoices": ["./public/DMHCA-invoice-logo.png", "./public/IBMP-logo.png"],
   },
   async headers() {
     return [{

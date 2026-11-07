@@ -36,7 +36,7 @@ const report = { id: "report-1", name: "Admissions overview", filter, columns: [
 const session = { session_id: "10000000-0000-4000-8000-000000000099", user_id: id, email: profile.email, signed_in_at: "2026-10-21T09:00:00Z", last_seen_at: "2026-10-21T09:30:00Z", expires_at: "2030-01-01T00:00:00Z", device: "Windows computer" };
 const configured = { configured: true, missing: [], required: ["PROVIDER_CLIENT_ID"] };
 const unconfigured = { configured: false, missing: ["PROVIDER_CLIENT_ID"], required: ["PROVIDER_CLIENT_ID"] };
-const Link = ({ children, ...props }) => React.createElement("a", props, children);
+const Link = ({ children, prefetch, ...props }) => React.createElement("a", props, children);
 let currentPath = "/users";
 
 function load(relative, overrides = {}) {
@@ -47,14 +47,22 @@ function load(relative, overrides = {}) {
   }).outputText;
   new Function("exports", "require", output)(api, (name) => {
     if (name.endsWith(".css")) return {};
-    if (name in overrides) return overrides[name];
+    if (name in overrides) return name === "@/lib/server/auth"
+      ? { ...overrides[name], requirePageUser: overrides[name].requirePageUser ?? overrides[name].requireUser }
+      : overrides[name];
     if (name === "@/lib/server/dashboard-summary") return { fetchDashboardSummary: async () => {
       const source = overrides["@/lib/crm-data"] ?? crm;
       const actor = await (overrides["@/lib/server/auth"] ?? server).requireUser();
       return dashboardSummary(await source.fetchLeads(), actor.user);
     } };
     if (name === "next/link") return { __esModule: true, default: Link };
-    if (name === "next/navigation") return { usePathname: () => currentPath, useParams: () => ({ id: "report-1", mode: "list" }), useRouter: () => ({ push() {}, replace() {}, prefetch() {} }), notFound() { throw new Error("Not found"); } };
+    if (name === "next/dynamic") return { __esModule: true, default: loader => {
+      const source = loader.toString();
+      if (source.includes("@/components/invoice-workspace")) return load("src\\components\\invoice-workspace.tsx", overrides).InvoiceWorkspace;
+      if (source.includes("@/components/course-catalog")) return load("src\\components\\course-catalog.tsx", overrides).CourseCatalog;
+      throw new Error("Unmapped dynamic UI fixture.");
+    } };
+    if (name === "next/navigation") return { usePathname: () => currentPath, useSearchParams: () => new URLSearchParams(), useParams: () => ({ id: "report-1", mode: "list" }), useRouter: () => ({ push() {}, replace() {}, prefetch() {} }), notFound() { throw new Error("Not found"); } };
     if (name.startsWith("@/")) {
       const base = name.replace("@/", "src\\").replaceAll("/", "\\");
       return load(`${base}${existsSync(path.join(root, `${base}.ts`)) ? ".ts" : ".tsx"}`, overrides);
@@ -70,7 +78,7 @@ function load(relative, overrides = {}) {
 
 function hookStates(values) {
   let index = 0;
-  return { ...React, useState: (initial) => [index < values.length ? values[index++] : typeof initial === "function" ? initial() : initial, () => {}], useEffect() {} };
+  return { ...React, useState: (initial) => [index < values.length ? values[index++] : typeof initial === "function" ? initial() : initial, () => {}], useRef: initial => ({ current: initial }), useEffect() {} };
 }
 const crm = {
   formatDateTime: (value) => value ? new Date(value).toLocaleString("en-IN") : "",
@@ -109,7 +117,7 @@ const operations = {
     { code: "IBMP", legal_name: "IBMP", address: "Company billing address", tax_id: "", primary_color: "#0b1e3b", accent_color: "#d7b770" },
   ], canManage: true },
   "/api/meetings": { meetings: [{ id: "meeting-1", title: "Admissions consultation", lead_id: lead.id, host_id: id, join_url: null, start_at: "2026-10-21T09:00:00Z", duration_min: 30, status: "scheduled", zoom_meeting_id: null }], leads: [lead], userId: id, canManage: true, zoom: unconfigured },
-  "/api/invoices": { invoices: [{ id: "invoice-1", invoice_no: "DMHCA-2026-001", lead_id: lead.id, created_by: id, subtotal: 25000, total: 25000, tax_amount: 0, discount_amount: 0, discount_percent: 0, payment_type: "one_shot", course_total: 25000, parent_invoice_id: null, payment_verified_by: null, razorpay_short_url: null, razorpay_payment_link_id: null, email_message_id: null, email_lock_at: null, status: "pending_approval", created_at: "2026-10-21T09:00:00Z", due_date: "2026-11-01", invoice_items: [{ description: "Clinical research admission", quantity: 1, unit_price: 25000, amount: 25000 }], invoice_approvals: [] }], leads: [lead], profiles: [{ id, full_name: profile.fullName }], userId: id, canCreate: true, canApprove: true, razorpay: unconfigured, smtp: configured },
+  "/api/invoices": { invoices: [{ id: "invoice-1", invoice_no: "DMHCA-2026-001", lead_id: lead.id, created_by: id, subtotal: 25000, total: 25000, currency: "INR", tax_amount: 0, discount_amount: 0, discount_percent: 0, payment_type: "one_shot", course_total: 25000, parent_invoice_id: null, payment_verified_by: null, razorpay_short_url: null, razorpay_payment_link_id: null, email_message_id: null, email_lock_at: null, status: "pending_approval", created_at: "2026-10-21T09:00:00Z", due_date: "2026-11-01", invoice_items: [{ description: "Clinical research admission", quantity: 1, unit_price: 25000, amount: 25000 }], invoice_approvals: [] }], leads: [lead], profiles: [{ id, full_name: profile.fullName }], userId: id, canCreate: true, canApprove: true, razorpay: unconfigured, smtp: configured },
   "/api/automations": { automations: [{ id: "rule-1", name: "Follow-up reminder", trigger_config: { type: "manual" }, actions_json: [{ type: "notify_me", days: 1 }], is_active: true }], logs: [], leads: [lead], canManage: true, canEditLeads: true },
   "/api/integrations": { integrations: integrationDefinitions.map(definition => ({ ...configured, id: definition.id, name: definition.name, detail: definition.detail })), unsupported: [], note: "Saved configuration is not proof of a working connection." },
   "/api/integrations/settings": { canManage: true, settings: integrationSettings, appUrl: "https://crm.example" },
@@ -180,7 +188,7 @@ const cases = [
   ["access-users", "src\\components\\access-editor.tsx", { component: "AccessEditor", props: { individual: true }, states: [accessData, "", {}, "", "", false] }],
   ["leads", "src\\app\\leads\\page.tsx", { overrides: { "@/lib/live-leads-client": liveMock } }],
   ["leads-selected", "src\\app\\leads\\page.tsx", { states: [filter, "", [lead.id], false, "", "", "", 0, null, false], overrides: { "@/lib/live-leads-client": liveMock } }],
-  ["leads-transfer", "src\\app\\leads\\page.tsx", { states: [filter, "", [lead.id], false, "", "", "", 0, null, false, "", null, false, "", false, [null], "transfer"], overrides: { "@/lib/live-leads-client": liveMock } }],
+  ["leads-transfer", "src\\app\\leads\\page.tsx", { states: [filter, "", [lead.id], false, "", "", "", 0, null, false, "", null, false, "", [null], "transfer"], overrides: { "@/lib/live-leads-client": liveMock } }],
   ["leads-empty", "src\\app\\leads\\page.tsx", { overrides: { "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({ data: { ...live, leads: [] }, loading: false, error: "", reload() {}, setError() {} }) } } }],
   ["leads-create", "src\\app\\leads\\new\\page.tsx", { overrides: { "@/lib/live-leads-client": liveMock } }],
   ["leads-conditions", "src\\app\\leads\\page.tsx", { states: [{ ...filter, criteria: [{ id: "stage-filter", field: "stage", operator: "in", value: stages[0].name }, { id: "date-filter", field: "createdAt", operator: "between", value: "2026-10-01", secondValue: "2026-10-31" }] }, "", [], false, "", "", "", 0, ["name", "stage"], true], overrides: { "@/lib/live-leads-client": liveMock } }],
@@ -199,13 +207,18 @@ const cases = [
   ["report-list", "src\\app\\reports\\[id]\\[mode]\\page.tsx", { overrides: { "@/components/reports-data-provider": { useReportsData: () => ({ user, leads: [lead], reports: [report] }) } } }],
   ["report-count", "src\\app\\reports\\[id]\\[mode]\\page.tsx", { overrides: { "next/navigation": { useParams: () => ({ id: report.id, mode: "count" }) }, "@/components/reports-data-provider": { useReportsData: () => ({ user, leads: [lead], reports: [report] }) } } }],
   ["meetings", "src\\app\\meetings\\page.tsx", { states: [true, "", null, "", new Date(2026, 9, 1)], overrides: { "../integrations/operational-ui": opMock } }],
-  ["invoices", "src\\app\\invoices\\page.tsx", { states: [true, "", "", "", lead.id, null, "", "", "course-1", "DMHCA", "INR", "one_shot"], overrides: { "@/app/integrations/operational-ui": opMock } }],
+  ["invoices", "src\\app\\invoices\\page.tsx", { states: [true, "", "", "", 0, "", "", "", lead.id, null, "", "", "course-1", "DMHCA", "INR", "one_shot"], overrides: { "@/app/integrations/operational-ui": opMock } }],
   ["courses", "src\\app\\courses\\page.tsx", { overrides: { "@/app/integrations/operational-ui": opMock } }],
   ["invoice-detail", "src\\app\\invoices\\page.tsx", { states: [false, "", "", "invoice-1"], overrides: { "@/app/integrations/operational-ui": opMock } }],
   ["lead-invoices", "src\\app\\leads\\[id]\\page.tsx", { states: [false,false,"","","","",false,false,"","","invoices"], overrides: {
     "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({ data: { ...live, lead, notes: [], activities: [], emails: [] }, loading: false, error: "", reload() {}, setError() {} }) },
     "@/app/integrations/operational-ui": { ...op, useOperationalData: () => operational(operations["/api/invoices"]) },
   } }],
+  ["lead-courses", "src\\app\\leads\\[id]\\page.tsx", { states: [false,false,"","","","",false,false,"","","courses"], overrides: {
+    "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({ data: { ...live, lead, notes: [], activities: [], emails: [] }, loading: false, error: "", reload() {}, setError() {} }) },
+    "@/app/integrations/operational-ui": opMock,
+  } }],
+  ["course-companies", "src\\app\\courses\\page.tsx", { states: [null, "", "active", "companies", 0], overrides: { "@/app/integrations/operational-ui": opMock } }],
   ["automations", "src\\app\\automations\\page.tsx", { states: [true, null], overrides: { "../integrations/operational-ui": opMock } }],
   ["integrations", "src\\app\\integrations\\page.tsx", { states: [true, "website", "", "stage-1", "", "", null, false, "", null, null], overrides: { "./operational-ui": opMock, "@/app/integrations/operational-ui": opMock } }],
   ["integrations-empty", "src\\app\\integrations\\page.tsx", { overrides: { "./operational-ui": emptyIntegrationMock, "@/app/integrations/operational-ui": emptyIntegrationMock } }],
@@ -250,7 +263,7 @@ for (const [name, file, options] of cases) test(`live UI renders ${name} inside 
     assert.match(html, /class="import-dropzone"/);
   }
   if (name === "lead-detail") {
-    assert.match(html, /class="lead-detail-layout lead-refined-workspace"/);
+    assert.match(html, /class="lead-detail-layout lead-refined-workspace lead-crm-workspace"/);
     assert.match(html, /aria-label="Lead sections"/);
     assert.match(html, /role="tablist" aria-label="Overview views"/);
   }
@@ -295,8 +308,7 @@ test("sidebar removes Help and support and keeps scrollable responsive navigatio
   assert.doesNotMatch(html, /Help &amp; support|href="\/help"/);
   for (const label of ["Dashboard", "CRM settings", "Admissions Administrator"]) assert.ok(html.includes(label));
   const css = readFileSync(path.join(root, "src", "app", "globals.css"), "utf8");
-  assert.match(css, /\.side-nav \{[^}]*overflow-y: auto;[^}]*scrollbar-width: none/);
-  assert.match(css, /\.side-nav::-webkit-scrollbar \{ display: none; \}/);
+  assert.match(css, /\.side-nav \{[^}]*overflow-y: auto;[^}]*scrollbar-width: thin/);
   assert.match(css, /height: 100dvh/);
   assert.match(css, /@media \(max-height: 850px\)/);
   assert.match(css, /width: min\(270px, calc\(100vw - 32px\)\)/);
@@ -328,11 +340,11 @@ test("shared sidebar preserves permitted navigation and profile for every role",
   assert.doesNotMatch(html, />MANAGE<|href="\/users"|href="\/settings"/);
 });
 
-test("site actions suppress decorative borders and mouse rings while retaining keyboard focus", () => {
+test("shared CRM actions retain visible borders and keyboard focus", () => {
   const css = readFileSync(path.join(root, "src", "app", "globals.css"), "utf8");
-  assert.match(css, /:is\(button, a, summary, \[role="button"\]\):not\(:focus-visible\) \{ outline: none !important; \}/);
-  assert.match(css, /:is\(button, \.button, summary, \[role="button"\]\) \{ border-color: transparent !important; box-shadow: none !important; \}/);
-  assert.match(css, /:is\(button, a, summary, \[role="button"\]\):focus-visible \{ filter: brightness\(\.85\); \}/);
+  assert.match(css, /:is\(button, a, summary, \[role="button"\]\):focus-visible \{ outline: 2px solid var\(--accent\)/);
+  assert.match(css, /\.button-secondary \{[^}]*border-color: #d6deea/);
+  assert.match(css, /\.button-primary \{ background: var\(--accent\)/);
   assert.match(css, /\.nav-link:focus-visible \{ background: #254974; color: #fff; \}/);
 });
 
@@ -389,6 +401,8 @@ test("invoice form scopes to the lead, previews percentage discounts and submits
     "@/app/integrations/operational-ui":{...opMock,formValues:()=>payload},
   });
   const nodes=elements(InvoiceCreateForm(form.props));
+  assert.ok(!nodes.some(node => node.props?.name === "notes"));
+  assert.ok(!nodes.some(node => node.type === "h3" && node.props.children === "Additional Details"));
   assert.equal(nodes.find(node => node.props?.name === "lead_id").props.value, lead.id);
   assert.ok(nodes.some(node => node.props?.ariaLabel === "Invoice course"));
   assert.ok(!nodes.some(node => node.props?.name === "unit_price"));
@@ -429,7 +443,46 @@ test("invoice details always reflect current record status, provider locks and p
   data.canApprove = false; data.canCreate = false;
   nodes = elements(ui.render());
   assert.ok(!nodes.some(node => node.type === "button" && (JSON.stringify(node.props.children).includes("Email invoice") || JSON.stringify(node.props.children).includes("Verify external payment"))));
-  assert.ok(nodes.some(node => node.type === "a" && node.props.href === "/api/invoices/invoice-1/pdf"));
+  assert.ok(nodes.some(node => node.type === "button" && node.props.children === "PDF"));
+});
+
+test("invoice PDF downloads validate bytes and show failures without navigating away", async t => {
+  const original={fetch:global.fetch,document:global.document,window:global.window,create:URL.createObjectURL,revoke:URL.revokeObjectURL};
+  t.after(()=>{
+    global.fetch=original.fetch;
+    if(original.document===undefined)delete global.document;else global.document=original.document;
+    if(original.window===undefined)delete global.window;else global.window=original.window;
+    URL.createObjectURL=original.create;URL.revokeObjectURL=original.revoke;
+  });
+  let response,clicks=0,downloadName,requested;
+  global.fetch=async url=>{requested=url;return response;};
+  global.document={body:{appendChild(){}},createElement:()=>({set download(value){downloadName=value;},click(){clicks++;},remove(){}})};
+  global.window={setTimeout:callback=>callback()};
+  URL.createObjectURL=blob=>{assert.ok(blob.size>5);return "blob:test-invoice";};
+  URL.revokeObjectURL=value=>assert.equal(value,"blob:test-invoice");
+  const ui=invoiceHarness();
+  const click=async()=>{
+    const button=elements(ui.render()).find(node=>node.type==="button"&&node.props.children==="PDF");
+    button.props.onClick();
+    await new Promise(resolve=>setImmediate(resolve));
+    await new Promise(resolve=>setImmediate(resolve));
+    return elements(ui.render());
+  };
+  response=new Response("%PDF-1.7\ninvoice",{headers:{"Content-Type":"application/pdf"}});
+  await click();
+  assert.equal(requested,"/api/invoices/invoice-1/pdf");
+  assert.equal(clicks,1);
+  assert.equal(downloadName,"DMHCA-2026-001.pdf");
+  for(const [value,message] of [
+    [Response.json({error:"Sign in again to download."},{status:401}),"Sign in again to download."],
+    [new Response("<html>Login</html>",{headers:{"Content-Type":"text/html"}}),"The server did not return an invoice PDF."],
+    [new Response("broken",{headers:{"Content-Type":"application/pdf"}}),"The invoice PDF is incomplete."],
+  ]){
+    response=value;
+    const nodes=await click();
+    assert.ok(nodes.some(node=>node.props?.role==="alert"&&String(node.props.children).includes(message)),message);
+    assert.equal(clicks,1,"failed responses must not download");
+  }
 });
 
 test("admin invoice register provides confirmed approval without opening details", t => {
@@ -489,10 +542,10 @@ test("installment form continues the matching enrollment with its remaining bala
   const nodes=elements(InvoiceCreateForm({leads:[lead],parents:data.installmentParents,busy:false,onSubmit:async()=>true,onClose(){}}));
   assert.ok(nodes.some(node => node.type === "option" && node.props.value === "root-invoice" && /200/.test(JSON.stringify(node.props.children))));
   assert.ok(!nodes.some(node=>node.type==="option"&&node.props.value==="other-company"));
-  assert.equal(nodes.find(node=>node.props?.name==="installment_amount").props.max,200);
+  assert.equal(nodes.find(node=>node.props?.["aria-label"]==="Installment 2 amount").props.max,200);
   assert.equal(nodes.find(node=>node.props?.["aria-label"]==="Price").props.value,"300.00");
   assert.ok(nodes.some(node => node.type === "dt" && node.props.children === "Already paid"));
-  assert.ok(nodes.some(node => node.props?.label==="Installment 2 Amount (including tax)"));
+  assert.ok(nodes.some(node => node.type === "strong" && node.props.children === "2nd installment"));
 });
 
 test("invoice timeline uses only persisted events with actors and never renders billing controls", () => {
@@ -517,15 +570,48 @@ test("first installment previews full catalog pricing separately from the payabl
   const nodes=elements(InvoiceCreateForm({leads:[lead],parents:[],busy:false,onSubmit:async()=>true,onClose(){}}));
   assert.equal(nodes.find(node=>node.props?.["aria-label"]==="Price").props.value,"25000.00");
   assert.equal(nodes.find(node=>node.props?.["aria-label"]==="Total Amount").props.value,"26550.00");
-  assert.equal(nodes.find(node=>node.props?.name==="installment_amount").props.value,"5000");
-  assert.equal(nodes.find(node=>node.props?.name==="installment_amount").props.max,26550);
-  assert.ok(nodes.some(node=>node.props?.label==="Installment 1 Amount (including tax)"));
+  assert.equal(nodes.find(node=>node.props?.["aria-label"]==="Installment 1 amount").props.value,"5000");
+  assert.equal(nodes.find(node=>node.props?.["aria-label"]==="Installment 1 amount").props.max,26550);
+  assert.ok(nodes.some(node=>node.type === "strong" && node.props.children === "1st installment"));
 });
 
-test("matching paid enrollments continue automatically, and pending installments block creation",()=>{
+test("installment editor derives due dates, permits partial schedules and submits a retry-safe plan", async () => {
+  const date = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+  const due = new Date(new Date(`${date}T00:00:00Z`).getTime() + 4 * 86400000).toISOString().slice(0, 10);
+  const payloads = [];
+  function form(secondAmount) {
+    const { InvoiceCreateForm } = load("src\\components\\invoice-create-form.tsx", {
+      react: hookStates([lead.id, { lead: { id: lead.id, email: lead.email } }, "", "Address", "course-1", "DMHCA", "INR",
+        "installments", "", "5000", "0", 0, date, [{ amount: secondAmount, invoice_date: date }]]),
+      "@/app/integrations/operational-ui": { ...opMock, formValues: () => ({ lead_id: lead.id, due_date: due }) },
+    });
+    const tree = InvoiceCreateForm({ leads: [lead], parents: [], busy: false, onSubmit: async values => { payloads.push(values); return false; }, onClose() {} });
+    if (secondAmount === "24500" && process.env.UI_FIXTURE_DIR) {
+      mkdirSync(process.env.UI_FIXTURE_DIR, { recursive: true });
+      writeFileSync(path.join(process.env.UI_FIXTURE_DIR, "installment-plan.html"), `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/styles.css"></head><body><main class="page-content">${renderToStaticMarkup(tree)}</main></body></html>`);
+    }
+    return elements(tree);
+  }
+  const valid = form("24500");
+  assert.equal(valid.find(node => node.props?.["aria-label"] === "Due Date").props.value, due);
+  assert.equal(valid.find(node => node.type === "button" && node.props.type !== "button").props.disabled, false);
+  const submit = valid.find(node => node.type === "form").props.onSubmit;
+  await submit({ preventDefault() {}, currentTarget: {} });
+  await submit({ preventDefault() {}, currentTarget: {} });
+  assert.equal(payloads[0].request_id, payloads[1].request_id);
+  assert.match(payloads[0].request_id, /^[0-9a-f-]{36}$/);
+  assert.deepEqual(payloads[0].installments, [{ amount: 5000, invoice_date: date }, { amount: 24500, invoice_date: date }]);
+  const partial = form("20000");
+  assert.equal(partial.find(node => node.type === "button" && node.props.type !== "button").props.disabled, false);
+  const invalid = form("24501");
+  assert.equal(invalid.find(node => node.type === "button" && node.props.type !== "button").props.disabled, true);
+  assert.ok(invalid.some(node => node.props?.role === "alert"));
+});
+
+test("matching enrollments allow later installments while reserving existing unpaid amounts",()=>{
   const parent={id:"root",invoice_no:"INV-ROOT",lead_id:lead.id,course_id:"course-1",company_code:"DMHCA",currency:"INR",
     course_total:300,balance:200,enrollment_subtotal:300,enrollment_discount:0,enrollment_tax:0,
-    discount_percent:0,tax_percent:0,next_installment:2,pending:true};
+    discount_percent:0,tax_percent:0,next_installment:2,pending:true,available_balance:100};
   const {InvoiceCreateForm}=load("src\\components\\invoice-create-form.tsx",{
     react:hookStates([lead.id,{lead:{id:lead.id,email:lead.email},canSaveAddress:true},"","Address","course-1","DMHCA","INR","installments","","100","99","99"]),
     "@/app/integrations/operational-ui":opMock,
@@ -544,10 +630,248 @@ test("matching paid enrollments continue automatically, and pending installments
   });
   const nodes=elements(InvoiceCreateForm({leads:[lead],parents:[parent],busy:false,onSubmit:async()=>true,onClose(){}}));
   assert.equal(nodes.find(node=>node.props?.name==="parent_invoice_id").props.value,"root");
-  assert.equal(nodes.find(node=>node.props?.name==="installment_amount").props.max,200);
+  assert.equal(nodes.find(node=>node.props?.["aria-label"]==="Installment 2 amount").props.max,100);
   assert.equal(nodes.find(node=>node.props?.["aria-label"]==="Discount %").props.readOnly,true);
   assert.equal(nodes.find(node=>node.props?.["aria-label"]==="Tax %").props.value,0);
-  assert.equal(nodes.find(node=>node.type==="button"&&node.props.type!=="button").props.disabled,true);
+  assert.equal(nodes.find(node=>node.type==="button"&&node.props.type!=="button").props.disabled,false);
+});
+
+test("add-next-installment access reopens the existing course rather than a new agreement", () => {
+  const data = structuredClone(operations["/api/invoices"]);
+  const root = data.invoices[0];
+  Object.assign(root, { status: "sent", payment_type: "installments", course_id: "course-1", discount_percent: 0 });
+  const parent = { id: root.id, lead_id: root.lead_id, course_id: "course-1", course_name: "Clinical research", company_code: "DMHCA",
+    currency: "INR", available_balance: 100, balance: 200, next_installment: 2, enrollment_subtotal: 300, enrollment_tax: 0,
+    tax_percent: 0, discount_percent: 0, installments: [{ id: root.id, number: 1, amount: 100, invoice_no: root.invoice_no, invoice_date: "2026-11-06", due_date: "2026-11-10", status: "sent" }] };
+  data.installmentParents = [parent];
+  const ui = invoiceHarness(data);
+  const add = elements(ui.render()).find(node => node.type === "button" && node.props.children === "Add next installment");
+  assert.ok(add); add.props.onClick();
+  const form = elements(ui.render()).find(node => node.type?.name === "InvoiceCreateForm");
+  assert.equal(form.props.enrollment.id, root.id);
+  const { InvoiceCreateForm } = load("src\\components\\invoice-create-form.tsx", { react: hookStates([]), "@/app/integrations/operational-ui": opMock });
+  const nodes = elements(InvoiceCreateForm(form.props));
+  assert.equal(nodes.find(node => node.props?.name === "course_id").props.value, "course-1");
+  assert.equal(nodes.find(node => node.props?.name === "parent_invoice_id").props.value, root.id);
+  assert.equal(nodes.find(node => node.props?.name === "payment_type").props.value, "installments");
+  assert.ok(nodes.some(node => node.type === "strong" && node.props.children === "1st installment"));
+  assert.ok(nodes.some(node => node.type === "strong" && node.props.children === "2nd installment"));
+  data.canCreate = false;
+  assert.equal(elements(invoiceHarness(data).render()).some(node => node.type === "button" && node.props.children === "Add next installment"), false);
+});
+
+test("remaining course balance deducts created installments before payment without changing outstanding", () => {
+  for (const useServerBalance of [true, false]) {
+    const data = structuredClone(operations["/api/invoices"]);
+    const root = data.invoices[0];
+    Object.assign(root, { payment_type: "installments", status: "scheduled", total: 65000, course_total: 165000, parent_invoice_id: null });
+    data.invoices = [root,
+      { ...root, id: "cancelled", parent_invoice_id: root.id, status: "cancelled", total: 10000 },
+      { ...root, id: "rejected", parent_invoice_id: root.id, status: "rejected", total: 10000 },
+      { ...root, id: "other-course", parent_invoice_id: null, total: 80000 }];
+    data.courseBalances = { [root.id]: 165000 };
+    data.installmentParents = useServerBalance ? [{ id: root.id, available_balance: 100000 }] : [];
+    const ui = invoiceHarness(data, [false, "", "", root.id]);
+    const check = (remaining, paid, outstanding) => {
+      const nodes = elements(ui.render());
+      const preview = nodes.find(node => node.props?.["aria-label"] === "Saved invoice preview");
+      assert.match(renderToStaticMarkup(preview), new RegExp(`Remaining course balance</td><td[^>]*>₹${remaining}\\.00`));
+      const summary = nodes.find(node => node.props?.className === "zf-payment-summary");
+      assert.match(renderToStaticMarkup(summary), new RegExp(`Paid</dt><dd>₹${paid}\\.00`));
+      assert.match(renderToStaticMarkup(summary), new RegExp(`Outstanding</dt><dd>₹${outstanding}\\.00`));
+    };
+    check("1,00,000", "0", "1,65,000");
+    root.status = "paid";
+    data.courseBalances[root.id] = 100000;
+    check("1,00,000", "65,000", "1,00,000");
+    data.invoices.push({ ...root, id: "second", parent_invoice_id: root.id, status: "scheduled", total: 100000 });
+    if (useServerBalance) data.installmentParents[0].available_balance = 0;
+    check("0", "65,000", "1,00,000");
+  }
+});
+
+test("invoice register course balance deducts all valid installments from the course total", () => {
+  const data = structuredClone(operations["/api/invoices"]);
+  const root = data.invoices[0];
+  Object.assign(root, { payment_type: "installments", status: "sent", total: 100, course_total: 300, parent_invoice_id: null });
+  data.invoices = [root,
+    { ...root, id: "second", parent_invoice_id: root.id, status: "scheduled", total: 50 },
+    { ...root, id: "cancelled", parent_invoice_id: root.id, status: "cancelled", total: 100 },
+    { ...root, id: "rejected", parent_invoice_id: root.id, status: "rejected", total: 100 }];
+  data.courseBalances = { [root.id]: 300 };
+  data.installmentParents = [{ id: root.id, available_balance: 125 }];
+  assert.match(renderToStaticMarkup(invoiceHarness(data).render()), /Course balance: ₹125\.00/);
+
+  data.installmentParents = [];
+  assert.match(renderToStaticMarkup(invoiceHarness(data).render()), /Course balance: ₹150\.00/);
+});
+
+test("both brands omit internal delivery, duplicate installment and approval metadata from invoice previews", () => {
+  for (const code of ["DMHCA", "IBMP"]) {
+    const data = structuredClone(operations["/api/invoices"]);
+    const invoice = data.invoices[0];
+    Object.assign(invoice, {
+      company_code: code, payment_type: "installments", installment_number: 1,
+      course_total: 2000, total: 1000, currency: "USD", status: "sent",
+      created_at: new Date().toISOString(), email_message_id: null,
+      invoice_approvals: [{ id: "approval", decision: "approved", requested_by: id,
+        decided_by: id, created_at: new Date().toISOString(), decided_at: new Date().toISOString(), comment: "Internal approval comment" }],
+    });
+    const nodes = elements(invoiceHarness(data, [false, "", "", invoice.id]).render());
+    const paper = nodes.find(node => node.props?.className === "invoice-paper");
+    assert.ok(paper);
+    const html = renderToStaticMarkup(paper);
+    assert.match(html, /INVOICE DETAILS/);
+    assert.doesNotMatch(html, /invoice-record-meta|invoice-delivery-state|invoice-approval-history/);
+    assert.doesNotMatch(html, /Email delivery has not been confirmed|Confirmed course payments|Course fee less all created installments|Approval history|Internal approval comment/);
+    assert.ok(!nodes.some(node => node.props?.className === "invoice-record-meta"), "no empty metadata box");
+    assert.ok(nodes.some(node => node.props?.className === "zf-payment-summary"), "CRM installment summary remains");
+  }
+});
+
+test("CRM Pay Now opens direct checkout for the exact installment or full-payment and disappears on Paid", () => {
+  for (const payment_type of ["one_shot", "installments"]) {
+    const data = structuredClone(operations["/api/invoices"]);
+    const invoice = data.invoices[0];
+    Object.assign(invoice, { payment_type, status: "sent", total: 53100, course_total: 143100,
+      created_at: new Date().toISOString(), payment_url: "https://invoice.example.com/api/invoice-status/opaque/pay" });
+    const ui = invoiceHarness(data, [false, "", "", invoice.id]);
+    const html = renderToStaticMarkup(ui.render());
+    assert.match(html, /href="https:\/\/invoice\.example\.com\/api\/invoice-status\/opaque\/pay"/);
+    assert.match(html, /Pay Now ₹53,100\.00/);
+    assert.match(html, /target="_blank" rel="noopener noreferrer"/);
+    assert.doesNotMatch(html, /Pay Now · View invoice/);
+    invoice.status = "paid"; invoice.paid_at = new Date().toISOString();
+    const paid = renderToStaticMarkup(ui.render());
+    assert.doesNotMatch(paid, /Pay Now/);
+    assert.match(paid, /Amount paid/);
+    assert.match(paid, /No further payment is required/);
+    assert.match(paid, /is-paid/);
+    assert.match(paid, /Paid on:/);
+  }
+});
+
+test("public Pay Now shows the saved amount, not the course fee, and becomes a paid confirmation", () => {
+  const status = { invoiceNo: "INV-EXACT", issueDate: new Date().toISOString(), dueDate: null, billingName: "Customer",
+    items: [], subtotal: 1000, discountAmount: 0, discountReason: null, taxAmount: 0, total: 1000, currency: "USD",
+    status: "sent", courseTotal: 2000, installmentNumber: 1, paymentType: "installments",
+    company: { code: "IBMP", name: "IBMP", address: "", taxId: "" }, primaryColor: "#091b3c", accentColor: "#188574",
+    paymentUrl: `/api/invoice-status/${"a".repeat(43)}/pay`, expiresAt: null };
+  for (const paymentType of ["installments", "one_shot"]) {
+    status.paymentType = paymentType;
+    for (const state of ["sent", "paid"]) {
+      status.status = state;
+      const Page = load("src\\app\\invoice-status\\[token]\\page.tsx", { react: hookStates([status, "", false, ""]) }).default;
+      const html = renderToStaticMarkup(Page());
+      if (state === "sent") {
+        assert.match(html, /Pay Now \$1,000\.00/);
+        assert.match(html, /target="_blank" rel="noopener noreferrer"/);
+        assert.doesNotMatch(html, /Pay Now \$2,000\.00/);
+      } else {
+        assert.doesNotMatch(html, /Pay Now/);
+        assert.match(html, /Amount paid/);
+        assert.match(html, /Payment has been verified/);
+      }
+    }
+  }
+});
+
+test("public return page uses exactly the shared DMHCA and IBMP invoice structure", () => {
+  const { buildInvoiceHtml } = load("src\\lib\\invoice-document.ts");
+  for (const code of ["DMHCA", "IBMP"]) {
+    const issueDate = new Date().toISOString();
+    const status = { invoiceNo: "INV-SAME", issueDate, dueDate: null, billingName: "Customer",
+      billingEmail: "customer@example.com", billingAddress: "Customer address", items: [],
+      subtotal: 100, discountAmount: 0, discountReason: null, taxAmount: 0, total: 100, currency: "INR",
+      status: "paid", courseTotal: null, installmentNumber: null, paymentType: "one_shot", notes: null,
+      company: { code, name: code, address: "Company address", taxId: "" }, paymentUrl: null, expiresAt: null };
+    const Page = load("src\\app\\invoice-status\\[token]\\page.tsx", { react: hookStates([status, ""]) }).default;
+    const html = renderToStaticMarkup(Page());
+    const shared = buildInvoiceHtml({ invoice_no: status.invoiceNo, status: "paid", lead_id: "", created_at: issueDate,
+      invoice_date: issueDate, due_date: null, billing_name: status.billingName, billing_email: status.billingEmail,
+      billing_address: status.billingAddress, invoice_items: [], subtotal: 100, discount_amount: 0, discount_reason: null,
+      tax_amount: 0, total: 100, currency: "INR", notes: null, payment_type: "one_shot",
+      company_snapshot: { code, legal_name: code, address: "Company address", tax_id: "", primary_color: "#000000", accent_color: "#000000" } });
+    assert.ok(html.includes(shared), `${code} must not render a separate public invoice design`);
+  }
+});
+
+test("branded invoice CRM preview and editor show the matching company and delivery recipients", () => {
+  for (const code of ["DMHCA", "IBMP"]) {
+    const data = structuredClone(operations["/api/invoices"]);
+    const invoice = data.invoices[0];
+    const issuer = { ...operations["/api/courses"].companies.find(company => company.code === code), address: "Company billing address" };
+    Object.assign(invoice, { company_snapshot: issuer, billing_name: lead.name, billing_email: lead.email, billing_address: "Customer billing address" });
+    const html = renderToStaticMarkup(invoiceHarness(data, [false, "", "", invoice.id]).render({ leadId: lead.id }));
+    assert.match(html, /Saved invoice preview/);
+    assert.match(html, new RegExp(`${code} logo`));
+    for (const value of ["BILL TO", "INVOICE DETAILS", "PAYMENT SCHEDULE", "PAYMENT DETAILS", "Clinical research admission"]) assert.ok(html.includes(value), value);
+    const billing = { lead: { ...lead, billing_address: "Customer billing address", owner_name: "Current owner", owner_email: "owner@example.com" }, canSaveAddress: true };
+    const { InvoiceCreateForm } = load("src\\components\\invoice-create-form.tsx", {
+      react: hookStates([lead.id, billing, "", billing.lead.billing_address, "course-1", code, "INR", "one_shot", "", "", "10"]),
+      "@/app/integrations/operational-ui": opMock,
+    });
+    const formHtml = renderToStaticMarkup(InvoiceCreateForm({ leadId: lead.id, leads: [lead], parents: [], busy: false, onSubmit: async () => true, onClose() {} }));
+    assert.match(formHtml, /Approval first, email automatically/);
+    assert.match(formHtml, /owner@example.com/);
+    assert.match(formHtml, /Save &amp; request approval/);
+    assert.match(formHtml, /Preview branded invoice/);
+    if (process.env.UI_FIXTURE_DIR) {
+      mkdirSync(process.env.UI_FIXTURE_DIR, { recursive: true });
+      for (const [name, body] of [[`${code}-invoice`, html], [`${code}-editor`, formHtml]]) {
+        writeFileSync(path.join(process.env.UI_FIXTURE_DIR, `${name}.html`), `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/styles.css"></head><body style="background:#f3f6fb;padding:20px"><main style="max-width:1250px;margin:auto">${body}</main></body></html>`);
+      }
+    }
+  }
+});
+
+test("saved invoice email warnings remain alerts after refreshing the CRM record", async () => {
+  const states = [];
+  let index = 0;
+  const module = load("src\\app\\integrations\\operational-ui.tsx", {
+    react: { ...React, useEffect() {}, useCallback: callback => callback, useRef: initial => ({ current: initial }),
+      useState(initial) { const key = index++; states[key] = initial; return [initial, value => { states[key] = value; }]; } },
+    "@/lib/crm-data": { apiRequest: async (_url, options) => options.method === "POST"
+      ? { message: "Invoice saved, but email failed.", warning: "Invoice saved, but email failed." } : operations["/api/invoices"] },
+  });
+  const state = module.useOperationalData("/api/invoices");
+  assert.equal(await state.mutate("/api/invoices", "POST", {}), true, "the saved record must not be recreated");
+  assert.equal(states[1], "Invoice saved, but email failed.");
+  assert.equal(states[4], "", "a delivery failure must not display a green success banner");
+  assert.equal(states[3], false);
+});
+
+test("course details show only that enrollment's installments and visible external payment fields", async () => {
+  const data = structuredClone(operations["/api/invoices"]);
+  const root = data.invoices[0];
+  Object.assign(root, { payment_type: "installments", status: "scheduled", discount_percent: 0, total: 100, course_total: 300,
+    installment_number: 1, invoice_date: "2026-11-06", due_date: "2026-11-10", can_reconcile_payment: true });
+  const child = { ...root, id: "child", parent_invoice_id: root.id, invoice_no: "INV-CHILD", installment_number: 2, total: 50 };
+  const other = { ...root, id: "other", invoice_no: "OTHER-COURSE", parent_invoice_id: null, invoice_items: [{ description: "Different course", quantity: 1, unit_price: 50, amount: 50 }] };
+  data.invoices.push(child, other);
+  data.installmentParents = [{ id: root.id, available_balance: 150, balance: 300, course_total: 300, next_installment: 3 }];
+  const ui = invoiceHarness(data, [false, "", "", child.id], { formValues: () => ({ url: "https://rzp.io/i/verified" }) });
+  let nodes = elements(ui.render());
+  const section = nodes.find(node => node.props?.["aria-label"] === "Course installments");
+  const html = renderToStaticMarkup(section);
+  assert.match(html, /1st installment/); assert.match(html, /2nd installment/);
+  assert.match(html, /150\.00/);
+  assert.doesNotMatch(html, /OTHER-COURSE|Different course/);
+  const form = nodes.find(node => node.type === "form" && elements(node).some(child => child.props?.name === "url"));
+  assert.ok(form, "scheduled installments may already have been paid externally");
+  if (process.env.UI_FIXTURE_DIR) {
+    mkdirSync(process.env.UI_FIXTURE_DIR, { recursive: true });
+    writeFileSync(path.join(process.env.UI_FIXTURE_DIR, "course-payments.html"), `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/styles.css"></head><body><main class="page-content">${renderToStaticMarkup(ui.render())}</main></body></html>`);
+  }
+  await form.props.onSubmit({ preventDefault() {}, currentTarget: {} });
+  assert.deepEqual(ui.requests[0], ["/api/invoices/child", "PATCH", { action: "verify_payment_url", url: "https://rzp.io/i/verified" }]);
+  assert.ok(nodes.some(node => node.props?.name === "reference"));
+  assert.ok(nodes.some(node => node.props?.name === "evidence"));
+  child.status = "paid";
+  nodes = elements(ui.render());
+  assert.equal(nodes.some(node => node.props?.["aria-label"] === "Record external payment"), false);
+  child.status = "scheduled"; root.status = "pending_approval";
+  assert.equal(elements(ui.render()).some(node => node.props?.["aria-label"] === "Record external payment"), false);
 });
 
 test("invoice search and status filters combine, while metrics keep currencies separate", () => {
@@ -587,11 +911,12 @@ test("lead invoice navigation respects permissions and preserves isolated main a
   }
 });
 
-test("compact lead overview uses one uninterrupted field grid without section divisions", async () => {
+test("lead overview groups contact, admissions and additional fields without removing editable information", async () => {
   const html = await renderPage("src\\app\\leads\\[id]\\page.tsx", {
     overrides: { "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({ data: { ...live, lead, notes: [], activities: [], emails: [] }, loading: false, error: "", reload() {}, setError() {} }) } },
   });
-  assert.doesNotMatch(html, /lead-field-group|Contact details|Admission details|Ownership &amp; follow-up|Additional information/);
+  for (const section of ["Contact information", "Admissions &amp; ownership", "Additional information"]) assert.ok(html.includes(section), section);
+  assert.equal((html.match(/class="lead-field-section"/g) ?? []).length, 3);
   for (const name of ["Lead name", "Email", "Phone", "Alternate phone", "Country", "Course", "Qualification", "Category", "Source", "Stage", "Lead owner", "Closure fee", "Next follow-up", "Preferred campus", "Counselor note"])
     assert.ok(html.includes(`aria-label="${name}"`), name);
   assert.doesNotMatch(html, /aria-label="Country code"/);
@@ -602,14 +927,106 @@ test("compact lead overview uses one uninterrupted field grid without section di
   assert.match(html, /Modified by/);
 });
 
-test("global borderless theme preserves focus, field affordances and error states", () => {
+test("invoice pagination bounds rendered rows while filters and totals include later pages", () => {
+  const base = operations["/api/invoices"];
+  const invoices = Array.from({ length: 61 }, (_, index) => ({ ...base.invoices[0], id: `row-${index}`, invoice_no: `INV-${String(index).padStart(3, "0")}`, status: index === 60 ? "paid" : "sent" }));
+  const ui = invoiceHarness({ ...base, invoices });
+  const nodes = () => elements(ui.render());
+  const rows = () => nodes().find(node => node.type === "tbody").props.children;
+  assert.equal(rows().length, 25);
+  nodes().find(node => node.type === "button" && node.props.children === "Next").props.onClick();
+  assert.equal(rows().length, 25);
+  nodes().find(node => node.type === "button" && node.props.children === "Next").props.onClick();
+  assert.equal(rows().length, 11);
+  assert.equal(nodes().find(node => node.type === "button" && node.props.children === "Next").props.disabled, true);
+  nodes().find(node => node.props?.["aria-label"] === "Search invoices").props.onChange({ target: { value: "INV-060" } });
+  assert.equal(rows().length, 1);
+  assert.equal(ui.states[4], 0);
+  nodes().find(node => node.props?.["aria-label"] === "Search invoices").props.onChange({ target: { value: "" } });
+  nodes().find(node => node.props?.ariaLabel === "Invoice status").props.onChange("paid");
+  assert.equal(rows().length, 1);
+  assert.equal(rows()[0].key, "row-60");
+  const allView = nodes().find(node => node.type === "nav" && node.props["aria-label"] === "Invoice register views").props.children[0];
+  assert.equal(allView.props.children[1].props.children, 61);
+});
+
+test("course catalog searches all records, paginates, separates company setup and preserves embedded scope", () => {
+  const data = { ...operations["/api/courses"], courses: Array.from({ length: 61 }, (_, index) => ({ ...operations["/api/courses"].courses[0], id: `course-${index}`, name: `Course ${String(index).padStart(3, "0")}`, is_active: index !== 60 })) };
+  const states = [];
+  let index = 0, invoiceOpens = 0;
+  const { CourseCatalog } = load("src\\components\\course-catalog.tsx", {
+    react: { ...React, useEffect() {}, useState(initial) { const key = index++; if (!(key in states)) states[key] = initial; return [states[key], value => { states[key] = value; }]; } },
+    "@/app/integrations/operational-ui": { ...op, useOperationalData: () => operational(data) },
+  });
+  const nodes = (props = {}) => { index = 0; return elements(CourseCatalog(props)); };
+  assert.equal(nodes().find(node => node.type === "tbody").props.children.length, 25);
+  nodes().find(node => node.type === "button" && node.props.children === "Next").props.onClick();
+  nodes().find(node => node.type === "button" && node.props.children === "Next").props.onClick();
+  assert.equal(nodes().find(node => node.type === "tbody").props.children.length, 10);
+  nodes().find(node => node.type === "select").props.onChange({ target: { value: "" } });
+  nodes().find(node => node.props?.["aria-label"] === "Search courses").props.onChange({ target: { value: "course 060" } });
+  assert.equal(nodes().find(node => node.type === "tbody").props.children.length, 1);
+  assert.equal(states[4], 0);
+  const viewButtons = nodes().find(node => node.type === "nav").props.children;
+  viewButtons[1].props.onClick();
+  assert.equal(nodes().filter(node => node.type === "form").length, 2);
+  assert.ok(!nodes().some(node => node.type === "table"));
+  viewButtons[0].props.onClick();
+  const embedded = nodes({ leadCourse: "Course 060", onOpenInvoices: () => { invoiceOpens++; } });
+  assert.ok(!embedded.some(node => node.type === "nav" || node.type === "form"));
+  assert.ok(!embedded.some(node => node.type === "button" && node.props.children === "Edit"));
+  embedded.find(node => node.type === "button" && node.props.children === "Open lead invoices").props.onClick();
+  assert.equal(invoiceOpens, 1);
+});
+
+test("lead record requests section-specific data and never renders stale section bodies during a switch", async () => {
+  let request;
+  const html = await renderPage("src\\app\\leads\\[id]\\page.tsx", {
+    states: [false,false,"","","","",false,false,"","","email"],
+    overrides: { "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: path => {
+      request = path;
+      return { data: { ...live, lead, notes: [{ id: "old-note", content: "Stale previous section", created_at: lead.createdAt }], activities: [], emails: [] }, loading: true, error: "", reload() {}, setError() {} };
+    } } },
+  });
+  assert.match(request, /\?section=email$/);
+  assert.match(html, /aria-label="Emails loading"/);
+  assert.doesNotMatch(html, /Stale previous section|Compose email|No email history yet/);
+});
+
+test("shared CRM theme preserves field boundaries, focus and error states", () => {
   const css = readFileSync(path.join(root, "src", "app", "globals.css"), "utf8");
-  assert.match(css, /:root body \*[\s\S]*?border-color: transparent !important/);
-  assert.match(css, /:root:root body \*:focus[\s\S]*?outline: none !important/);
-  assert.match(css, /:root:root body \*:focus-visible[\s\S]*?outline: none !important/);
-  assert.match(css, /:focus-visible\)[\s\S]*?background-color: #eaf1fb !important/);
+  assert.doesNotMatch(css, /border-color: transparent !important|outline: none !important/);
+  assert.match(css, /:focus-visible \{ outline: 2px solid var\(--accent\)/);
+  assert.match(css, /\.panel \{ border: 1px solid var\(--border\)/);
   assert.match(css, /\[aria-invalid="true"\][\s\S]*?background-color: #fff1f0/);
   assert.match(css, /aria-selected="true"[\s\S]*?background-color: #edf5ff/);
+});
+
+test("all icon search controls share nonwrapping, shrinkable input geometry and a whole-field focus indicator", () => {
+  const css = readFileSync(path.join(root, "src", "app", "modules.css"), "utf8");
+  const shared = css.slice(css.lastIndexOf("\n.page-content label:is(.toolbar-search"));
+  for (const selector of [".toolbar-search", ".pipeline-search", ".integration-search", ".lead-column-search", ".attendee-search", ".searchable-dropdown-search"]) {
+    assert.ok(css.includes(selector), selector);
+  }
+  const rules = css.slice(css.indexOf("\n.page-content label:is(.toolbar-search"));
+  assert.match(rules, /flex-wrap: nowrap/);
+  assert.match(rules, /> input[\s\S]*?flex: 1 1 0;[\s\S]*?width: 0;/);
+  assert.match(rules, /> svg[\s\S]*?position: static;[\s\S]*?flex: 0 0 16px;/);
+  assert.match(rules, /:focus-within[\s\S]*?box-shadow: 0 0 0 3px/);
+  assert.ok(shared.length > 0);
+});
+
+test("operational sections show a section skeleton instead of default empty records while data loads", async () => {
+  const loading = { data: null, error: "", message: "", loading: true, busy: false, refresh() {}, mutate() {} };
+  for (const [title, file] of [
+    ["Meetings", "src\\app\\meetings\\page.tsx"], ["Invoices", "src\\app\\invoices\\page.tsx"],
+    ["Courses", "src\\app\\courses\\page.tsx"], ["Automations", "src\\app\\automations\\page.tsx"],
+    ["Integrations", "src\\app\\integrations\\page.tsx"],
+  ]) {
+    const html = await renderPage(file, { overrides: { "@/app/integrations/operational-ui": { ...op, useOperationalData: () => loading } } });
+    assert.ok(html.includes(`Opening ${title.toLowerCase()}...`), title);
+    assert.doesNotMatch(html, /class="data-table|class="invoice-metrics|class="calendar-grid|No meetings|No automation rules|No matching invoices/);
+  }
 });
 
 test("email composer combines addresses and connection controls without changing sender gates", async () => {
@@ -858,14 +1275,11 @@ test("dashboard renders course/country analyses and linked metrics for each role
   }
 });
 
-test("opening a dashboard link applies its criteria and personal role scope in Leads", (t) => {
+test("dashboard links apply their filter on the first Leads request without flashing all leads", () => {
   const dashboard = load("src\\lib\\dashboard.ts");
   const href = dashboard.dashboardLink([dashboard.dashboardCriterion("country", "is", "India")], "India leads");
-  const previousWindow = global.window;
-  let onPop;
-  global.window = { location: { search: new URL(href, "http://localhost").search }, addEventListener(_event, handler) { onPop = handler; }, removeEventListener() {} };
-  t.after(() => { if (previousWindow === undefined) delete global.window; else global.window = previousWindow; });
-  const states = [], refs = [], effects = [];
+  let search = new URL(href, "http://localhost").searchParams;
+  const states = [], refs = [], paths = [];
   let index = 0, refIndex = 0, error = "";
   const records = [
     lead,
@@ -873,7 +1287,9 @@ test("opening a dashboard link applies its criteria and personal role scope in L
     { ...lead, id: "other-owner", assigneeId: "other" },
   ];
   const Component = load("src\\app\\leads\\page.tsx", {
+    "next/navigation": { useSearchParams: () => search, useRouter: () => ({ replace() {} }) },
     "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: path => {
+      paths.push(path);
       const params = new URL(path,"http://localhost").searchParams;
       const actor = { ...user, profile: { ...profile, role: "counselor" } };
       const scoped = params.get("dashboard") === "1" ? dashboard.dashboardScope(actor,records,[profile]) : records;
@@ -882,22 +1298,24 @@ test("opening a dashboard link applies its criteria and personal role scope in L
     } },
     react: {
       ...React,
-      useEffect(effect) { effects.push(effect); }, useLayoutEffect() {},
+      useEffect() {}, useLayoutEffect() {},
       useMemo: factory => factory(),
       useRef(initial) { const key = refIndex++; return refs[key] ?? (refs[key] = { current: initial }); },
       useState(initial) { const key = index++; if (!(key in states)) states[key] = typeof initial === "function" ? initial() : initial; return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }]; },
     },
   }).default;
-  const render = () => { index = 0; refIndex = 0; return elements(Component()); };
-  render();
-  for (const effect of effects.splice(0)) effect();
-  const nodes = render();
+  const route = Component();
+  const nodes = elements(route.type(route.props));
   const links = nodes.filter(node => node.props?.className === "lead-cell");
   assert.deepEqual(links.map(node => node.props.href), ["/leads/lead-1"]);
   assert.ok(nodes.some(node => node.type === "h2" && node.props.children === "India leads"));
-  global.window.location.search = "?dashboard=invalid";
-  onPop();
-  assert.ok(error.length > 0);
+  assert.equal(paths.length, 1);
+  assert.equal(new URL(paths[0], "http://localhost").searchParams.get("dashboard"), "1");
+  search = new URLSearchParams("dashboard=invalid");
+  assert.match(renderToStaticMarkup(Component()), /role="alert"/);
+  assert.equal(paths.length, 1, "invalid filters must not request the unfiltered lead list");
+  search = new URLSearchParams();
+  assert.notEqual(Component().key, route.key, "returning to all leads resets the filter workspace");
 });
 
 test("pipeline filters, sorts and moves records with permission and concurrent-save guards", async () => {
@@ -1375,7 +1793,7 @@ test("selected lead actions respect roles even when a counselor has assignment a
 
 test("transfer dialog requires an assignee and defaults to keeping every lead's current stage", async () => {
   const html = await renderPage("src\\app\\leads\\page.tsx", {
-    states: [filter, "", [lead.id], false, "", "", "", 0, null, false, "", null, false, "", false, [null], "transfer"],
+    states: [filter, "", [lead.id], false, "", "", "", 0, null, false, "", null, false, "", [null], "transfer"],
     overrides: { "@/lib/live-leads-client": liveMock },
   });
   assert.match(html, /aria-label="Transfer assignee"/);
@@ -1387,12 +1805,12 @@ test("transfer dialog requires an assignee and defaults to keeping every lead's 
 
 test("bulk transfer sends assignee with an optional stage in one PATCH and retains failed selections", async () => {
   for (const stageId of ["", stages[1].id]) {
-    const states = [filter, "", [lead.id, "lead-2"], false, "", "", "", 0, null, false, "", null, false, "", false, [null], null];
+    const states = [filter, "", [lead.id, "lead-2"], false, "", "", "", 0, null, false, "", null, false, "", [null], null];
     const refs = [];
     let index = 0, refIndex = 0, error = "";
     const requests = [];
     const data = { ...live, leads: [lead, { ...lead, id: "lead-2", stageId: stages[2].id }] };
-    const Component = load("src\\app\\leads\\page.tsx", {
+    const Component = load("src\\components\\leads-workspace.tsx", {
       react: { ...React, useEffect() {}, useLayoutEffect() {},
         useRef(initial) { const key = refIndex++; return refs[key] ?? (refs[key] = { current: initial }); },
         useState(initial) { const key = index++; if (!(key in states)) states[key] = initial; return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }]; },
@@ -1406,7 +1824,7 @@ test("bulk transfer sends assignee with an optional stage in one PATCH and retai
     }).default;
     const render = () => { index = 0; refIndex = 0; return elements(Component()); };
     render().find(node => node.type === "button" && node.props["aria-label"] === "Transfer").props.onClick();
-    assert.equal(states[16], "transfer");
+    assert.equal(states[15], "transfer");
     const selects = render();
     const assignee = selects.find(node => node.props?.ariaLabel === "Transfer assignee");
     const stage = selects.find(node => node.props?.ariaLabel === "Bulk stage");
@@ -1474,7 +1892,7 @@ test("lead columns float without layout shifts and save each checkbox change aut
     if (previousDocument === undefined) delete global.document;
     else global.document = previousDocument;
   });
-  const Component = load("src\\app\\leads\\page.tsx", {
+  const Component = load("src\\components\\leads-workspace.tsx", {
     "@/lib/live-leads-client": liveMock,
     "react-dom": { createPortal: (content) => content },
     "@/lib/crm-data": { ...crm, apiRequest: (...args) => {
@@ -1673,10 +2091,10 @@ test("lead workspace keeps notes separate from overview and email history", asyn
     assert.equal(states[2],"note draft");
     assert.equal(states[3],"email draft");
   });
-  assert.doesNotMatch(html, /Actual saved consultation note/);
+  assert.match(html, /Actual saved consultation note/);
   assert.match(html, /Add a note/);
   assert.match(html, /Add note/);
-  assert.doesNotMatch(html, /Notes timeline/);
+  assert.match(html, /Notes timeline/);
   assert.doesNotMatch(html, /Overview timeline|Email timeline|Edit lead|SMTP account/);
   assert.doesNotMatch(html, /No records yet/);
 });
@@ -2014,14 +2432,14 @@ test("leads table formats timestamp columns as readable dates and times, includi
   }
 });
 
-test("lead email composer displays the connected sender and separate email timeline", async () => {
+test("lead email composer displays the connected sender alongside existing email history", async () => {
   const data = { ...live, user: { ...user, email: "counselor@gmail.com" }, lead, notes: [], activities: [], mailbox: { email: "counselor@gmail.com" }, emails: [{ id: "email-1", subject: "Course details", body: "Your course information", from_email: "counselor@gmail.com", to_email: lead.email, status: "sent", direction: "outbound", created_at: lead.createdAt }] };
   const html = await renderPage("src\\app\\leads\\[id]\\page.tsx", {
     states: [false, false, "", "", "", "", false, [], "", "", "email"],
     overrides: { "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({ data, loading: false, error: "", reload() {}, setError() {} }) } },
   });
   assert.match(html, /counselor@gmail.com/);
-  assert.doesNotMatch(html, /Email timeline|Accepted by provider|Your course information/);
+  for (const label of ["Email timeline", "Accepted by provider", "Your course information"]) assert.ok(html.includes(label), label);
   assert.match(html, /Your Google Workspace mailbox is connected/);
   assert.doesNotMatch(html, /Overview timeline|Notes timeline|Sent through your configured SMTP/);
 });

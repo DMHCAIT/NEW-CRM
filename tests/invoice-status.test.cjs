@@ -6,17 +6,120 @@ const vm = require("node:vm");
 const ts = require("typescript");
 const { createHash } = require("node:crypto");
 
+function statusPageFixture() {
+  let effect, cleanup, requests = 0, nextResponse = { status: "expired" };
+  const states = [], errors = [], timers = new Map(), windowEvents = new Map(), documentEvents = new Map();
+  const document = {
+    visibilityState: "visible",
+    addEventListener: (name, handler) => documentEvents.set(name, handler),
+    removeEventListener: name => documentEvents.delete(name),
+  };
+  const source = readFileSync(join(__dirname, "..", "src", "app", "invoice-status", "[token]", "page.tsx"), "utf8");
+  const policy = {};
+  new Function("exports", ts.transpileModule(readFileSync(join(__dirname, "..", "src", "lib", "invoice-policy.ts"), "utf8"), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021 },
+  }).outputText)(policy);
+  const exports = {};
+  let stateIndex = 0;
+  const mocks = {
+    react: {
+      useEffect: callback => { effect = callback; },
+      useState: initial => [initial, stateIndex++ === 0 ? value => states.push(value) : value => errors.push(value)],
+    },
+    "react/jsx-runtime": { jsx: () => null, jsxs: () => null },
+    "next/navigation": { useParams: () => ({ token: "a".repeat(43) }) },
+    "@/lib/billing": {},
+    "@/lib/invoice-document": { buildInvoiceHtml: () => "" },
+    "@/lib/invoice-policy": policy,
+  };
+  vm.runInNewContext(ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021, jsx: ts.JsxEmit.ReactJSX },
+  }).outputText, {
+    exports, Error, require: name => { assert.ok(name in mocks, name); return mocks[name]; },
+    document, window: {
+      addEventListener: (name, handler) => windowEvents.set(name, handler),
+      removeEventListener: name => windowEvents.delete(name),
+    },
+    fetch: async () => {
+      requests++;
+      if (nextResponse instanceof Error) throw nextResponse;
+      return { ok: true, json: async () => nextResponse };
+    },
+    setTimeout: (callback, delay) => { assert.equal(delay, 10000); const id = Symbol(); timers.set(id, callback); return id; },
+    clearTimeout: id => timers.delete(id),
+  });
+  exports.default();
+  cleanup = effect();
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  return {
+    states, errors, timers, windowEvents, documentEvents, document, flush,
+    requests: () => requests,
+    respond: value => { nextResponse = value; },
+    tick: async () => { assert.equal(timers.size, 1); const callback = timers.values().next().value; await callback(); await flush(); },
+    cleanup: () => cleanup(),
+  };
+}
+
+test("public invoice refresh survives expiry and transient errors until verified Paid", async () => {
+  const page = statusPageFixture();
+  await page.flush();
+  assert.equal(page.states.at(-1).status, "expired");
+  assert.equal(page.timers.size, 1);
+  page.respond(new Error("Network unavailable"));
+  await page.tick();
+  assert.equal(page.errors.at(-1), "Network unavailable");
+  assert.equal(page.timers.size, 1, "failed refresh must retry");
+  page.respond({ status: "paid", paidAt: "2026-11-07T09:00:00Z", paymentUrl: null });
+  await page.tick();
+  assert.equal(page.states.at(-1).status, "paid");
+  assert.equal(page.errors.at(-1), "");
+  assert.equal(page.timers.size, 0);
+  page.windowEvents.get("focus")();
+  await page.flush();
+  assert.equal(page.requests(), 3, "verified Paid is terminal");
+  page.cleanup();
+  assert.equal(page.windowEvents.size, 0);
+  assert.equal(page.documentEvents.size, 0);
+});
+
+test("returning from checkout refreshes once immediately without overlapping requests", async () => {
+  const page = statusPageFixture();
+  await page.flush();
+  page.respond({ status: "sent" });
+  page.windowEvents.get("focus")();
+  page.documentEvents.get("visibilitychange")();
+  await page.flush();
+  assert.equal(page.requests(), 2);
+  assert.equal(page.timers.size, 1);
+  page.document.visibilityState = "hidden";
+  page.documentEvents.get("visibilitychange")();
+  await page.flush();
+  assert.equal(page.requests(), 2);
+  page.cleanup();
+  assert.equal(page.timers.size, 0);
+});
+
 function loadRoute(mocks) {
   const exports = {};
   const source = readFileSync(join(__dirname, "..", "src", "app", "api", "invoice-status", "[token]", "route.ts"), "utf8");
   const policy={invoiceWindowExpired:invoice=>!!invoice.payment_expires_at&&new Date(invoice.payment_expires_at).getTime()<=Date.now()};
+  new Function("exports", ts.transpileModule(readFileSync(join(__dirname,"..","src","lib","invoice-policy.ts"),"utf8"), {
+    compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2021},
+  }).outputText)(policy);
+  const branding = {}, billing = {};
+  for (const [file, api] of [["invoice-branding", branding], ["billing", billing]]) {
+    const code = readFileSync(join(__dirname, "..", "src", "lib", `${file}.ts`), "utf8");
+    new Function("exports", "require", ts.transpileModule(code, {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021 },
+    }).outputText)(api, require);
+  }
   vm.runInNewContext(ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021 },
-  }).outputText, { exports, require: name => name==="@/lib/invoice-policy"?policy:mocks[name], Buffer });
+  }).outputText, { exports, require: name => name==="@/lib/invoice-policy"?policy:name==="@/lib/invoice-branding"?branding:name==="@/lib/billing"?billing:mocks[name], Buffer });
   return exports;
 }
 
-test("public invoice status uses a random token hash and returns no customer PII", async () => {
+test("public invoice status uses a random token hash and returns the billing snapshot without internal IDs", async () => {
   const token = Buffer.alloc(32, 7).toString("base64url");
   const expectedHash = createHash("sha256").update(token).digest("hex");
   let queriedHash;
@@ -46,7 +149,7 @@ test("public invoice status uses a random token hash and returns no customer PII
   const result = await route.GET(new Request("https://crm.example/api/invoice-status/token"), { params: Promise.resolve({ token }) });
   assert.equal(result.status, 200);
   assert.equal(queriedHash, expectedHash);
-  assert.match(selected, /invoice_no,created_at,due_date,billing_name,billing_email,billing_address/);
+  assert.match(selected, /invoice_no,created_at,invoice_date,due_date,billing_name,billing_email,billing_address/);
   assert.match(selected, /invoice_items\(description,quantity,unit_price,amount\)/);
   assert.deepEqual(JSON.parse(JSON.stringify(result.data)), {
     invoiceNo: "INV-1", issueDate: "2026-10-20T10:00:00Z", dueDate: "2026-10-25",
@@ -56,7 +159,7 @@ test("public invoice status uses a random token hash and returns no customer PII
     total: 125, currency: "INR", status: "paid", paidAt: "2026-10-24T10:00:00Z",
     courseTotal: null, installmentNumber: null, paymentType: "one_shot", notes: "Thank you",
     company: { name: "DMHCA", address: "", taxId: "", code: "DMHCA" },
-    primaryColor: "#800020", accentColor: "#f7cbd7", paymentUrl: null,
+    primaryColor: "#1c1d4e", accentColor: "#a91e2c", paymentUrl: null,
     expiresAt: null,
   });
   assert.equal("leadEmail" in result.data, false);
@@ -88,8 +191,8 @@ test("public payment links select the correct provider and disappear immediately
     "@/lib/supabase/server":{getSupabaseAdminClient:()=>({from:()=>({select:()=>({eq:()=>({maybeSingle:async()=>({data:invoice,error})})})})})},
   });
   const read=()=>route.GET(new Request("https://crm.example/status"),{params:Promise.resolve({token})});
-  assert.equal((await read()).data.paymentUrl,`/api/invoice-status/${token}`);
-  assert.equal((await read()).data.company,"IBMP");
+  assert.equal((await read()).data.paymentUrl,`/api/invoice-status/${token}/pay`);
+  assert.equal((await read()).data.company.name,"IBMP");
   invoice.currency="INR";
   assert.equal((await read()).data.paymentUrl,invoice.razorpay_short_url);
   invoice.payment_expires_at=new Date(Date.now()-1).toISOString();

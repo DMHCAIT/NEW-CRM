@@ -1,10 +1,10 @@
-import { requireUser } from "@/lib/server/auth";
+import { requirePageUser } from "@/lib/server/auth";
 import { formatDateTime } from "@/lib/crm-data";
 
 export const dynamic = "force-dynamic";
 
 export default async function NotificationsPage() {
-  const { supabase } = await requireUser();
+  const { supabase } = await requirePageUser();
   const { data, error } = await supabase.from("notifications").select("id,type,payload,created_at")
     .order("created_at", { ascending: false }).limit(100);
   if (error) throw error;

@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { requireUser } from "@/lib/server/auth";
+import { requirePageUser } from "@/lib/server/auth";
 import { fetchStages } from "@/lib/crm-data";
 import { BarChart3, CalendarClock, CheckCircle2, Users, UserPlus } from "lucide-react";
 import { CONVERSION_STAGES, dashboardCriterion as criterion, dashboardLink } from "@/lib/dashboard";
@@ -21,7 +21,7 @@ const chartColors = {
 };
 
 export default async function DashboardPage() {
-  const { supabase, user } = await requireUser("dashboard.view");
+  const { supabase, user } = await requirePageUser("dashboard.view");
   const [summary, stages] = await Promise.all([
     fetchDashboardSummary(supabase),
     fetchStages(supabase, { includeInactive: true }),

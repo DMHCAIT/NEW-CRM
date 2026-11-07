@@ -4,17 +4,35 @@ import { HttpError, jsonError, readJson, requireUser } from "@/lib/server/auth";
 import { dbError, enforceDuplicatePolicy, fetchLeadConfiguration, parseLead, validateCustomFields, validateNewLeadFields } from "@/lib/live-leads";
 import { checkOrigin } from "@/lib/server/login";
 import { isSavedLeadFilter, renameLegacyUntouchedOperators } from "@/lib/lead-filters";
-import { fetchLeadPage, queryParameters } from "@/lib/server/lead-query";
+import { fetchLeadPage, fetchLeadPages, queryParameters } from "@/lib/server/lead-query";
 
 export async function GET(request: Request) {
+  const started = Date.now();
   try {
     const params = new URL(request.url).searchParams;
     const view = params.get("view");
     const { supabase, user } = await requireUser(view === "pipeline" ? "pipeline.view" : "leads.view");
+    const authenticated = Date.now();
+    const respond = (data: unknown) => NextResponse.json(data, { headers: {
+      "Cache-Control": "private, no-store",
+      "Server-Timing": `auth;dur=${authenticated - started}, data;dur=${Date.now() - authenticated}`,
+    } });
     const query = queryParameters(params);
-    if (params.get("metadata") === "0" || query.countOnly) return NextResponse.json(await fetchLeadPage(supabase, query, view === "pipeline" ? 25 : 50));
+    if (params.get("metadata") === "0" || query.countOnly) return respond(await fetchLeadPage(supabase, query, view === "pipeline" ? 25 : 50));
+    if (view === "pipeline") {
+      const stagesRequest = fetchStages(supabase);
+      const [stages, profiles, stagePages] = await Promise.all([
+        stagesRequest, fetchProfiles(supabase),
+        stagesRequest.then(async stages => {
+          const groups = [...stages.map(stage => stage.id), "__none"].filter(stage => !query.stage || stage === query.stage);
+          const pages = await fetchLeadPages(supabase, groups.map(stage => ({ ...query, stage })), 25);
+          return pages.map((page, index) => ({ stage: groups[index], ...page }));
+        }),
+      ]);
+      return respond({ leads: stagePages.flatMap(group => group.leads), hasMore: false, nextCursor: null, stagePages, stages, profiles, user });
+    }
     const [page, stages, profiles, filters, columns, configuration] = await Promise.all([
-      params.get("metadata") === "only" || view === "pipeline" ? Promise.resolve({ leads: [], hasMore: false, nextCursor: null }) : fetchLeadPage(supabase, query),
+      params.get("metadata") === "only" ? Promise.resolve({ leads: [], hasMore: false, nextCursor: null }) : fetchLeadPage(supabase, query),
       fetchStages(supabase), fetchProfiles(supabase),
       supabase.from("saved_filters").select("id,name,filter_json,pinned_to_dashboard").eq("owner_id", user.id).order("created_at"),
       supabase.from("user_columns").select("columns_json").eq("user_id", user.id).eq("view_name", "leads").maybeSingle(),
@@ -26,12 +44,7 @@ export async function GET(request: Request) {
       if (!isSavedLeadFilter(filter)) throw new HttpError(400, `Saved filter "${row.name}" has invalid configuration.`);
       return { ...row, filter_json: filter };
     });
-    if (view === "pipeline") {
-      const groups = await Promise.all([...stages.map(stage => stage.id), "__none"].filter(stage => !query.stage || stage === query.stage)
-        .map(async stage => ({ stage, ...await fetchLeadPage(supabase, { ...query, stage }, 25) })));
-      return NextResponse.json({ ...page, leads: groups.flatMap(group => group.leads), stagePages: groups, stages, profiles, filters: savedFilters, columns: columns.data?.columns_json ?? null, configuration, user });
-    }
-    return NextResponse.json({ ...page, stages, profiles, filters: savedFilters, columns: columns.data?.columns_json ?? null, configuration, user });
+    return respond({ ...page, stages, profiles, filters: savedFilters, columns: columns.data?.columns_json ?? null, configuration, user });
   } catch (error) { return jsonError(error); }
 }
 
