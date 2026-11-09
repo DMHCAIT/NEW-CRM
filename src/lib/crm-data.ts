@@ -176,13 +176,21 @@ export function errorMessage(error: unknown, fallback: string): string {
 const browserReads = new Map<string, { value: unknown; savedAt: number }>();
 const pendingBrowserReads = new Map<string, Promise<unknown>>();
 const preparedBrowserReads = new Map<string, { promise: Promise<unknown>; expiresAt: number; value?: unknown }>();
+const browserSnapshots = new Map<string, { value: unknown; savedAt: number }>();
 let readGeneration = 0;
+const writeListeners = new Set<() => void>();
+
+export function subscribeApiWrites(listener: () => void) {
+  writeListeners.add(listener);
+  return () => { writeListeners.delete(listener); };
+}
 
 export function clearApiReadCache() {
   readGeneration++;
   browserReads.clear();
   pendingBrowserReads.clear();
   preparedBrowserReads.clear();
+  browserSnapshots.clear();
 }
 
 export function prefetchApiRead(path: string): Promise<unknown> {
@@ -205,6 +213,16 @@ export function getPreparedApiRead<T>(path: string): T | undefined {
   return entry && Date.now() < entry.expiresAt ? entry.value as T | undefined : undefined;
 }
 
+export function getApiReadSnapshot<T>(path: string): T | undefined {
+  if (typeof window === "undefined") return undefined;
+  const saved = browserSnapshots.get(path);
+  return saved && Date.now() - saved.savedAt < 30000 ? saved.value as T : undefined;
+}
+
+export function getPendingApiRead<T>(path: string): Promise<T> | undefined {
+  return pendingBrowserReads.get(path) as Promise<T> | undefined;
+}
+
 export function getCachedApiRead<T>(path: string, maxAgeMs = 30000): T | undefined {
   if (typeof window === "undefined" || !path.startsWith("/api/") || path.startsWith("/api/auth/")) return undefined;
   const saved = browserReads.get(path);
@@ -213,25 +231,32 @@ export function getCachedApiRead<T>(path: string, maxAgeMs = 30000): T | undefin
   return undefined;
 }
 
-export async function apiRequest<T = unknown>(path: string, init: { method?: string; body?: unknown; maxAgeMs?: number; usePrefetched?: boolean } = {}): Promise<T> {
+export async function apiRequest<T = unknown>(path: string, init: { method?: string; body?: unknown; maxAgeMs?: number; usePrefetched?: boolean; forceFresh?: boolean } = {}): Promise<T> {
   const method = (init.method ?? (init.body === undefined ? "GET" : "POST")).toUpperCase();
   const browserRead = typeof window !== "undefined" && method === "GET" && path.startsWith("/api/") && !path.startsWith("/api/auth/");
   const maxAgeMs = Math.min(Math.max(init.maxAgeMs ?? 0, 0), 30000);
   if (browserRead) {
     const prepared = preparedBrowserReads.get(path);
     preparedBrowserReads.delete(path);
-    if (init.usePrefetched && prepared && Date.now() < prepared.expiresAt) return prepared.promise as Promise<T>;
-    const saved = getCachedApiRead<T>(path, maxAgeMs);
+    if (!init.forceFresh && init.usePrefetched && prepared && Date.now() < prepared.expiresAt) return prepared.promise as Promise<T>;
+    const saved = init.forceFresh ? undefined : getCachedApiRead<T>(path, maxAgeMs);
     if (saved !== undefined) return saved;
     browserReads.delete(path);
     const pending = pendingBrowserReads.get(path);
     if (pending) return pending as Promise<T>;
   }
-  if (method !== "GET") clearApiReadCache();
+  if (method !== "GET") {
+    clearApiReadCache();
+    writeListeners.forEach(listener => listener());
+  }
   const generation = readGeneration;
   const request = async (): Promise<T> => {
     try {
       const payload = await fetchApi<T>(path, method, init.body);
+      if (browserRead && generation === readGeneration) {
+        if (browserSnapshots.size >= 50) browserSnapshots.delete(browserSnapshots.keys().next().value!);
+        browserSnapshots.set(path, { value: payload, savedAt: Date.now() });
+      }
       if (browserRead && maxAgeMs > 0 && generation === readGeneration) {
         if (browserReads.size >= 30) browserReads.delete(browserReads.keys().next().value!);
         browserReads.set(path, { value: payload, savedAt: Date.now() });

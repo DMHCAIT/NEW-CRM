@@ -7,15 +7,17 @@ import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, BookOpen, CalendarClock, Clock3, Eye, FileText, GitMerge, Mail, Phone, UserRound, X } from "lucide-react";
 import { LeadInlineField } from "@/components/lead-inline-field";
 import { StageBadge, initials } from "@/components/lead-helpers";
-import { apiRequest, formatDateTime, type StageRow } from "@/lib/crm-data";
+import { apiRequest, formatDateTime, prefetchApiRead, type StageRow } from "@/lib/crm-data";
 import type { CurrentUser, Lead, Profile } from "@/lib/types";
-import { useLiveLeadData, type LeadDraft } from "@/lib/live-leads-client";
+import { getCachedLeadDetail, loadLeadDetailData, useLiveLeadData, type LeadDraft } from "@/lib/live-leads-client";
 import type { LeadConfiguration } from "@/lib/live-leads";
 import { leadCallNumber } from "@/lib/lead-phone";
 import { SectionLoading } from "@/components/section-loading";
 
-const InvoiceWorkspace = dynamic(() => import("@/components/invoice-workspace").then(module => module.InvoiceWorkspace), { loading: () => <SectionLoading title="Invoices" /> });
-const CourseCatalog = dynamic(() => import("@/components/course-catalog").then(module => module.CourseCatalog), { loading: () => <SectionLoading title="Courses" /> });
+const loadInvoiceWorkspace = () => import("@/components/invoice-workspace").then(module => module.InvoiceWorkspace);
+const loadCourseCatalog = () => import("@/components/course-catalog").then(module => module.CourseCatalog);
+const InvoiceWorkspace = dynamic(loadInvoiceWorkspace, { loading: () => <SectionLoading title="Invoices" /> });
+const CourseCatalog = dynamic(loadCourseCatalog, { loading: () => <SectionLoading title="Courses" /> });
 
 type Timeline = { id: string; content?: string; description?: string; type?: string; created_at: string; user_id: string | null; meta?: { actor_name?: string; changes?: Record<string, { before: unknown; after: unknown; before_label?: string; after_label?: string }> } };
 type DuplicateOwner = { assignee: string; merge_target_id: string | null };
@@ -52,10 +54,19 @@ export default function LeadDetailPage() {
   const [callNow, setCallNow] = useState(() => Date.now());
   const [rescheduleId, setRescheduleId] = useState("");
   const [overviewTab, setOverviewTab] = useState<"overview" | "timeline">("overview");
-  const { data, error, loading, reload, setError } = useLiveLeadData<DetailData>(`/api/leads/${id}?section=${tab}${overviewTab === "timeline" && ["overview", "calls"].includes(tab) ? "&history=1" : ""}`);
+  const { data, error, loading, reload: reloadData, setError, acceptData } = useLiveLeadData<DetailData>(`/api/leads/${id}?section=${tab}${overviewTab === "timeline" && ["overview", "calls"].includes(tab) ? "&history=1" : ""}`, loadLeadDetailData, getCachedLeadDetail);
   const scheduleRef = useRef<HTMLDialogElement>(null);
   const schedulingRef = useRef(false);
+  const acceptLatestData = useRef(acceptData);
+  acceptLatestData.current = acceptData;
+  const activeLeadId = useRef(id);
+  activeLeadId.current = id;
   const [historyLimit, setHistoryLimit] = useState(25);
+  const [preparationError, setPreparationError] = useState("");
+  const [preparationAttempt, setPreparationAttempt] = useState(0);
+  const modifiedAt = data?.lead.id === id ? data.lead.modifiedAt : undefined;
+  const userId = data?.user.id;
+  const canViewInvoices = data?.user.permissions.includes("invoices.view") ?? false;
   useEffect(() => {
     const timer = window.setInterval(() => setCallNow(Date.now()), 30000);
     return () => window.clearInterval(timer);
@@ -66,6 +77,30 @@ export default function LeadDetailPage() {
     if (scheduleOpen && !dialog.open) dialog.showModal();
     if (!scheduleOpen && dialog.open) dialog.close();
   }, [scheduleOpen]);
+  useEffect(() => {
+    let active = true;
+    setPreparationError("");
+    const preparations: Promise<unknown>[] = [
+      loadLeadDetailData<DetailData & { sectionErrors?: Record<string, string> }>(`/api/leads/${id}?section=workspace`, { maxAgeMs: 30000, forceFresh: preparationAttempt > 0 }).then(result => {
+        const failures = Object.values(result.sectionErrors ?? {});
+        if (failures.length) throw new Error(failures.join(" "));
+      }),
+    ];
+    if (canViewInvoices) preparations.push(
+      loadInvoiceWorkspace(), loadCourseCatalog(),
+      prefetchApiRead(`/api/invoices?leadId=${encodeURIComponent(id)}`), prefetchApiRead("/api/courses"),
+    );
+    void Promise.allSettled(preparations).then(results => {
+      if (!active) return;
+      const failures = results.flatMap(result => result.status === "rejected" ? [result.reason instanceof Error ? result.reason.message : "A related list could not be prepared."] : []);
+      setPreparationError(failures.join(" "));
+    });
+    return () => { active = false; };
+  }, [id, modifiedAt, userId, canViewInvoices, preparationAttempt]);
+  async function reload() {
+    await reloadData();
+    setPreparationAttempt(value => value + 1);
+  }
   const can = (permission: string) => data?.user.permissions.some((p) => p === permission) ?? false;
   async function act(callback: () => Promise<void>) {
     setBusy(true); setError(""); setNotice("");
@@ -74,8 +109,11 @@ export default function LeadDetailPage() {
   async function save(patch: Partial<LeadDraft>) {
     pendingSaves.current++; setSaving(true);
     const operation = saves.current.then(async () => {
-      await apiRequest(`/api/leads/${id}`, { method: "PATCH", body: patch });
-      await reload();
+      const updated = await apiRequest<{ lead: DetailData["lead"]; scheduleUnlocked: boolean }>(`/api/leads/${id}`, { method: "PATCH", body: patch });
+      if (activeLeadId.current !== id) return;
+      acceptLatestData.current(previous => previous?.lead.id === id ? {
+        ...previous, lead: updated.lead, canScheduleCall: updated.scheduleUnlocked || previous.canScheduleCall,
+      } : previous);
     });
     // A failed field remains visibly unsaved without blocking later field saves.
     saves.current = operation.catch(() => {});
@@ -199,6 +237,7 @@ export default function LeadDetailPage() {
         }}>{busy ? "Merging…" : "Confirm merge"}</button>
       </>}
     </section>}
+    {preparationError && <div className="helper-banner" role="alert">Some related lists could not be prepared: {preparationError} <button type="button" className="text-link" onClick={() => setPreparationAttempt(value => value + 1)}>Retry preparation</button></div>}
     <div className="lead-detail-layout lead-refined-workspace lead-crm-workspace"><nav className="panel detail-sidebar" aria-label="Lead sections"><div className="detail-sidebar-title">RELATED LISTS</div>{tabs.map(item => <button key={item.id} id={`lead-section-${item.id}`} aria-controls={`lead-panel-${item.id}`} className={`detail-nav-item${tab === item.id ? " selected" : ""}`} aria-current={tab === item.id ? "page" : undefined} onClick={() => selectTab(item.id)}><item.icon size={15} />{item.label}{item.count !== null && <span>{item.count}</span>}</button>)}<p className="detail-sidebar-hint">Lead details and history reflect your authorized access.</p></nav>
     <section className="panel detail-content">
     <div id={`lead-panel-${tab}`} role="region" aria-labelledby={`lead-section-${tab}`} className="detail-tab-content">

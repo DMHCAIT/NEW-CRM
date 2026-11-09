@@ -2,19 +2,22 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import { PrefetchKind } from "next/dist/client/components/router-reducer/router-reducer-types";
 import {
   Bell,
   LogOut,
   Menu,
   X,
 } from "lucide-react";
-import { useEffect, useState, useTransition, type MouseEvent } from "react";
+import { useEffect, useRef, useState, useTransition, type MouseEvent, type SyntheticEvent } from "react";
 import { navigationItems } from "@/lib/navigation";
 import { RolePreviewContext } from "@/components/role-preview-context";
 import type { CurrentUser } from "@/lib/types";
-import { apiRequest, clearApiReadCache, errorMessage, prefetchApiRead } from "@/lib/crm-data";
+import { apiRequest, clearApiReadCache, errorMessage, getApiReadSnapshot, getPendingApiRead, prefetchApiRead, subscribeApiWrites } from "@/lib/crm-data";
 import { SectionLoading } from "@/components/section-loading";
 import { GlobalLeadSearch } from "@/components/global-lead-search";
+import { loadLeadDetailData } from "@/lib/live-leads-client";
+import { prepareSidebarSections, sectionReadPaths } from "@/lib/section-preparation";
 
 export function AppShell({ children, user }: { children: React.ReactNode; user: CurrentUser | null }) {
   const pathname = usePathname();
@@ -24,26 +27,43 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
   const [signingOut, setSigningOut] = useState(false);
   const [destination, setDestination] = useState("");
   const [navigating, startNavigation] = useTransition();
-  const [intentHref, setIntentHref] = useState("");
-  function prefetchSection(href: string, prepareRoute = true) {
-    if (prepareRoute) setIntentHref(href);
-    const params = new URLSearchParams({ timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
-    if (href === "/pipeline") params.set("view", "pipeline");
+  const preparedDetails = useRef(new Map<string, number>());
+  const preparedSections = useRef(new Map<string, number>());
+  function prefetchSection(href: string, prepareRoute = true, background = false) {
+    const preparedAt = preparedSections.current.get(href);
+    if (prepareRoute && href !== "/" && href !== "/admin/login-activity"
+      && (preparedAt === undefined || Date.now() - preparedAt >= 25000)) {
+      router.prefetch(href, { kind: PrefetchKind.FULL });
+      preparedSections.current.set(href, Date.now());
+    }
     const leadSection = href === "/leads" || href === "/pipeline";
-    const operationalPaths: Record<string, string[]> = {
-      "/meetings": ["/api/meetings"], "/invoices": ["/api/invoices"],
-      "/courses": ["/api/courses"], "/automations": ["/api/automations"],
-      "/reports": ["/api/reports"], "/users": ["/api/users"], "/settings": ["/api/settings"],
-      "/settings/access": ["/api/access"], "/settings/access/users": ["/api/access"],
-      "/integrations": ["/api/integrations", "/api/integrations/sources", "/api/integrations/gmail", ...(user?.permissions.includes("integrations.manage") ? ["/api/integrations/settings", "/api/integrations/facebook-pages"] : [])],
-    };
-    const dataPaths = leadSection ? [`/api/leads?${params}`] : operationalPaths[href] ?? [];
-    for (const dataPath of dataPaths) {
-      const read = leadSection ? apiRequest(dataPath, { maxAgeMs: 30000 }) : prefetchApiRead(dataPath);
-      void read.catch((error) => {
-        setAccountError(errorMessage(error, "Could not prepare section data. Open the section to retry."));
+    const detail = /^\/leads\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(href);
+    if (detail) {
+      void loadLeadDetailData(`/api${href}?section=overview`, { maxAgeMs: 30000 }).catch(error => {
+        setAccountError(errorMessage(error, "Could not prepare lead details. Open the lead to retry."));
       });
     }
+    const dataPaths = user ? sectionReadPaths(href, user) : [];
+    return Promise.all(dataPaths.map(dataPath => {
+      if (background && getApiReadSnapshot(dataPath) !== undefined) return Promise.resolve();
+      const read = leadSection ? apiRequest(dataPath, { maxAgeMs: 30000 }) : prefetchApiRead(dataPath);
+      return read.catch((error) => {
+        setAccountError(errorMessage(error, "Could not prepare section data. Open the section to retry."));
+      });
+    }));
+  }
+  function prepareDetail(event: SyntheticEvent<HTMLDivElement>) {
+    const link = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>("a[href]") : null;
+    if (!link || link.hasAttribute("download") || (link.target && link.target !== "_self")) return;
+    const url = new URL(link.href, window.location.href);
+    if (url.origin !== window.location.origin || url.search || url.pathname === pathname
+      || !/^\/leads\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(url.pathname)) return;
+    const preparedAt = preparedDetails.current.get(url.pathname);
+    if (preparedAt !== undefined && Date.now() - preparedAt < 5000) return;
+    if (preparedDetails.current.size >= 30) preparedDetails.current.delete(preparedDetails.current.keys().next().value!);
+    preparedDetails.current.set(url.pathname, Date.now());
+    router.prefetch(url.pathname, { kind: PrefetchKind.FULL });
+    prefetchSection(url.pathname, false);
   }
   function navigate(event: MouseEvent<HTMLDivElement>) {
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
@@ -60,7 +80,38 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
     if (!url.search) prefetchSection(url.pathname, false);
     startNavigation(() => router.push(`${url.pathname}${url.search}${url.hash}`));
   }
-  useEffect(() => { clearApiReadCache(); }, [user?.id]);
+  const latestPreparation = useRef({ user, pathname, prepare: prefetchSection, router });
+  latestPreparation.current = { user, pathname, prepare: prefetchSection, router };
+  const permissionKey = user?.permissions.join(",");
+  useEffect(() => {
+    clearApiReadCache(); preparedSections.current.clear(); preparedDetails.current.clear();
+  }, [user?.id, permissionKey]);
+  useEffect(() => subscribeApiWrites(() => {
+    preparedSections.current.clear(); preparedDetails.current.clear();
+    router.refresh();
+  }), [router]);
+  useEffect(() => {
+    let task: ReturnType<typeof prepareSidebarSections> | undefined;
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      const current = latestPreparation.current;
+      const actor = current.user;
+      if (!actor) return;
+      const currentReads = sectionReadPaths(current.pathname, actor).map(path => getPendingApiRead(path));
+      void Promise.allSettled(currentReads).then(() => {
+        if (cancelled || document.visibilityState !== "visible") return;
+        if (sectionReadPaths(current.pathname, actor).length > 0) {
+          current.router.prefetch(current.pathname, { kind: PrefetchKind.FULL });
+          preparedSections.current.set(current.pathname, Date.now());
+        }
+        task = prepareSidebarSections(actor, current.pathname, href => latestPreparation.current.prepare(href, true, true), {
+          isVisible: () => document.visibilityState === "visible",
+          onError: error => setAccountError(errorMessage(error, "Could not prepare section data. Open the section to retry.")),
+        });
+      });
+    }, 1500);
+    return () => { cancelled = true; window.clearTimeout(timer); task?.cancel(); };
+  }, [user?.id, permissionKey]);
   useEffect(() => {
     if (!user) return;
     const record = () => {
@@ -94,7 +145,7 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
 
   return (
     <RolePreviewContext.Provider value={previewRole}>
-    <div className="app-layout" onClickCapture={navigate}>
+    <div className="app-layout" onClickCapture={navigate} onMouseOverCapture={prepareDetail} onFocusCapture={prepareDetail} onTouchStartCapture={prepareDetail}>
       <a className="skip-navigation" href="#workspace-content">Skip to content</a>
       {mobileOpen && (
         <button
@@ -132,7 +183,7 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
               <Link
                 className={`nav-link ${active ? "nav-link-active" : ""}`}
                 href={item.href}
-                prefetch={intentHref === item.href && item.href !== "/"}
+                prefetch={false}
                 onMouseEnter={() => prefetchSection(item.href)}
                 onFocus={() => prefetchSection(item.href)}
                 onTouchStart={() => prefetchSection(item.href)}
@@ -154,7 +205,7 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
               <Link
                 className={`nav-link ${active ? "nav-link-active" : ""}`}
                 href={item.href}
-                prefetch={intentHref === item.href && item.href !== "/admin/login-activity"}
+                prefetch={false}
                 onMouseEnter={() => prefetchSection(item.href)}
                 onFocus={() => prefetchSection(item.href)}
                 onTouchStart={() => prefetchSection(item.href)}

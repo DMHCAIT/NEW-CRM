@@ -56,11 +56,18 @@ does not remove development compilation or database latency.
 
 Lead screens reuse browser-memory responses for up to 30 seconds when revisiting
 a page; valid cached data renders immediately instead of flashing a loading screen.
-Sidebar links prefetch the selected destination on hover, keyboard focus or touch,
-rather than fetching every permitted dynamic page when the sidebar mounts.
+After a 1.5-second startup delay, the sidebar prepares permitted client-rendered
+sections in a bounded queue (at most two sections at a time), overlapping full
+route preparation with their API reads before a click. The current route is also
+prepared for a quick return visit. The queue stops launching work when the tab
+is hidden, the shell unmounts, or identity/permissions change. Dashboard and login
+activity are excluded from this preparation queue.
+Hover, keyboard focus and touch prioritize the selected route immediately.
+Explicit full route preparation is deduplicated for 25 seconds; automatic Link
+viewport prefetch is disabled so it cannot compete with the bounded queue.
 Intended client-rendered sections use Next Link's full prefetch rather than the
 automatic mode that can stop at a dynamic route's loading boundary. Dashboard
-and login activity retain server-rendered freshness instead of full route prefetch.
+and login activity are not fully prefetched in the background.
 Clicking any internal section link immediately updates the navigation and breadcrumb
 and shows a destination-specific skeleton, keeping the previous page hidden and inert
 until the route is ready. Existing route layouts remain mounted during the transition.
@@ -75,16 +82,30 @@ route mounts; a completed preparation expires after five seconds. This bounded,
 20-entry browser-only handoff is not a reusable financial response cache.
 Completed preparations also provide the destination's first render synchronously,
 avoiding another loading flash in operational pages, Users, Reports and Settings.
-Access settings and administrator integration panels participate in intent-based
-preparation; no background sweep of every page or mailbox is started.
+Access settings and administrator integration panels participate in section
+preparation. Only authorized section reads are prepared: no background mailbox
+sync, provider mutations, or preparation of every lead record is started.
+Users and Reports can render a recent display snapshot while their mount read
+checks current records, just like operational sections.
 Later visits, manual refreshes, polling and post-write refreshes read current
 records. Identity changes, authorization failures and writes discard preparations,
 including preparations still in flight.
 Concurrent reads share one request. Manual refresh always requests fresh
 data, and API writes invalidate cached reads before and after the write.
 No response cache is persisted or shared between browsers or server requests.
+Next's browser route cache retains rendered and prefetched pages for at most
+30 seconds, including the first section visited, so returning to that page does
+not repeat the route-authentication round trip. A completed API write (including
+a failed write that may have partially applied) clears data snapshots and refreshes
+the router cache; this refresh does not block the save response. Server-rendered
+summary pages may reuse their recently rendered view within this short window.
 Invoices, payment status and operational screens continue to request fresh data;
 refreshing existing data happens in place rather than blanking the screen.
+Operational screens may show a browser-only display snapshot (at most 30 seconds
+old, bounded to 50 entries) while checking current records in the background,
+with a "Checking latest records..." indicator. Display snapshots never satisfy
+a fresh API read or suppress payment polling. Writes, identity changes and
+authorization failures discard them, including in-flight results.
 Dashboard drill-down filters are read before the Leads workspace mounts, including
 query-only navigation and browser history. The first request uses the selected
 criteria and role scope; an invalid filter shows an error without requesting all leads.
@@ -101,6 +122,38 @@ while its 30-second browser snapshot is valid, requesting only paginated records
 instead of reloading profiles, stages and settings on each query. Refresh and
 mutations bypass/invalidate that snapshot. Search responses remain permission-
 checked on the server; late responses cannot replace a newer query.
+
+Lead-record links prepare the route and overview data on hover, keyboard focus
+or touch, not only after navigation has finished. Full route prefetch is used
+rather than stopping at the dynamic route's loading boundary. Lead links disable
+automatic viewport prefetch to avoid authenticating every visible record route
+in competition with the selected page. A direct click starts the API
+read alongside navigation. Preparations are bounded and deduplicated; they do
+not download every visible record. Detail pages and related tabs reuse fresh
+list metadata (stages, profiles and field settings) while requesting current
+record-specific data and authenticated identity. Completed preparations render
+synchronously. Direct entry and explicit refresh still load complete metadata;
+writes, identity changes and authorization failures invalidate browser snapshots.
+Opening a lead starts one authorized workspace preparation for Notes, Emails
+and both activity timelines without waiting for a related-list click. The first
+overview is not blocked by this work. Successful sections share that bounded
+30-second response; failed sections show an explicit preparation error and retry
+their own endpoint rather than appearing empty. Course and invoice components
+and their APIs are also prepared for users with invoice-view permission.
+Calls, Courses and Invoices reuse the current overview instead of making another
+lead-detail request. Initial detail metadata can also seed subsequent related
+reads when entering a lead directly, without first visiting the lead list.
+Inline field saves return the database's updated record, including trigger
+changes, and update the displayed lead after server confirmation instead of
+waiting for PATCH followed by a full detail GET. Writes still invalidate prepared
+histories; related data is prepared again after edits and action refreshes.
+Lead detail API responses expose `Server-Timing` for authentication, record lookup
+and related reads so deployment/database latency can be diagnosed separately.
+These changes require rebuilding and deploying the updated code to affect the
+live site; pushing source alone does not replace a running production process.
+Prepared views can switch without a network wait. Cold visits, expired snapshots
+and writes still depend on authentication, database and network latency; a
+universal one-second guarantee requires measuring and tuning that deployment.
 
 Protected-page middleware loads verified session, active profile and current
 permissions in parallel after authentication. It passes that result to Server

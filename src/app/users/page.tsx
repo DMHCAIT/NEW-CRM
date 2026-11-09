@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { apiRequest, errorMessage, formatDateTime, getPreparedApiRead } from "@/lib/crm-data";
+import { apiRequest, errorMessage, formatDateTime, getApiReadSnapshot, getPreparedApiRead } from "@/lib/crm-data";
 import type { Profile } from "@/lib/types";
 import { createCredentialPdf, downloadCredentialPdf } from "@/lib/credential-pdf";
 import { KeyRound, Plus, Search, Trash2, Users } from "lucide-react";
@@ -11,7 +11,7 @@ type UserData = { profiles: Profile[]; activity: { user_id: string; signed_in_at
 const blank: Omit<Profile, "id" | "deletedAt"> = { fullName: "", email: "", phone: "", role: "counselor", reportingTo: null, status: "active", ivrExtension: "" };
 
 export default function UsersPage() {
-  const [data, setData] = useState<UserData | null>(() => getPreparedApiRead<UserData>("/api/users") ?? null);
+  const [data, setData] = useState<UserData | null>(() => getPreparedApiRead<UserData>("/api/users") ?? getApiReadSnapshot<UserData>("/api/users") ?? null);
   const [editing, setEditing] = useState<string | null>(null);
   const [form, setForm] = useState(blank);
   const [error, setError] = useState("");

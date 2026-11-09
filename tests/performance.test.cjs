@@ -96,11 +96,12 @@ test("completed preparations render synchronously without becoming a reusable fi
 
 test("operational screens render completed intent data immediately and consume it only once", async () => {
   const saved = { invoices: [{ status: "sent" }] }, updates = [], effects = [];
+  let stateIndex = 0;
   const api = client(async () => ok(saved));
   await api.prefetchApiRead("/api/invoices");
   const { useOperationalData } = loadModule("src\\app\\integrations\\operational-ui.tsx", {
     react: {
-      useState: initial => [typeof initial === "function" ? initial() : initial, value => updates.push(value)],
+      useState: initial => { const key = stateIndex++; return [typeof initial === "function" ? initial() : initial, value => updates.push({ key, value })]; },
       useRef: initial => ({ current: initial }), useCallback: callback => callback,
       useEffect: effect => effects.push(effect),
     },
@@ -111,8 +112,8 @@ test("operational screens render completed intent data immediately and consume i
   assert.equal(result.data.invoices[0].status, "sent");
   effects[0]();
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(updates.includes(null), false);
-  assert.equal(updates.includes(true), false);
+  assert.equal(updates.some(update => update.key === 0 && update.value === null), false);
+  assert.equal(updates.some(update => update.key === 2 && update.value === true), false);
   assert.equal(api.getPreparedApiRead("/api/invoices"), undefined);
 });
 
@@ -168,6 +169,254 @@ test("live searches settle after 120 ms and cancel obsolete typing timers withou
   effects.shift()();
   timers.get(2).callback();
   assert.deepEqual(updates, ["alex"]);
+});
+
+test("lead detail intent and first render reuse shared metadata, refresh never does", async () => {
+  const reads = [], effects = [];
+  let time = 1000;
+  const metadata = { stages: ["New"], profiles: ["Employee"], configuration: { fields: [] }, user: { id: "old-user" } };
+  const detail = { lead: { id: "record" }, user: { id: "current-user" }, counts: { notes: 3 } };
+  const api = client(async path => { reads.push(path); return ok(path.startsWith("/api/leads?") ? metadata : detail); }, { now: () => time });
+  const helpers = loadModule("src\\lib\\live-leads-client.tsx", {
+    react: {
+      useState: initial => [typeof initial === "function" ? initial() : initial, () => {}],
+      useEffect: effect => effects.push(effect), useRef: initial => ({ current: initial }), useCallback: callback => callback,
+    }, "@/lib/crm-data": api, "lucide-react": {},
+    "@/components/searchable-dropdown": {}, "@/lib/lead-filters": {}, "@/lib/lead-picklists": {},
+  }, { window: {}, Intl });
+  const path = "/api/leads/10000000-0000-4000-8000-000000000001?section=overview";
+  await api.apiRequest(helpers.leadQueryPath(helpers.emptyFilter()), { maxAgeMs: 30000 });
+  const prepared = await helpers.loadLeadDetailData(path, { maxAgeMs: 30000 });
+  assert.equal(new URL(reads.at(-1), "http://crm.test").searchParams.get("metadata"), "0");
+  assert.deepEqual(prepared.stages, ["New"]);
+  assert.equal(prepared.user.id, "current-user", "never replace current API identity with list metadata");
+  const screen = helpers.useLiveLeadData(path, helpers.loadLeadDetailData, helpers.getCachedLeadDetail);
+  assert.equal(screen.loading, false);
+  assert.equal(screen.data.lead.id, "record");
+  effects[0]();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reads.length, 2, "hover, click and mount use one detail request");
+  await screen.reload();
+  assert.equal(reads.at(-1), path, "refresh includes metadata");
+  api.clearApiReadCache();
+  assert.equal(helpers.getCachedLeadDetail(path), undefined);
+  await helpers.loadLeadDetailData(path, { maxAgeMs: 30000 });
+  assert.equal(reads.at(-1), path, "a direct entry works without a prior lead-list visit");
+  time += 30000;
+  assert.equal(helpers.getCachedLeadDetail(path), undefined);
+});
+
+test("lead links prepare route and data once on hover/focus/touch and click starts data before routing", async () => {
+  const React = require("react");
+  const routes = [], reads = [], order = [];
+  class Anchor {
+    constructor(href) { this.href = href; this.target = ""; }
+    closest() { return this; }
+    hasAttribute() { return false; }
+  }
+  const { AppShell } = loadModule("src\\components\\app-shell.tsx", {
+    react: { ...React, useEffect() {}, useRef: initial => ({ current: initial }),
+      useState: initial => [initial, () => {}], useTransition: () => [false, callback => callback()] },
+    "next/link": { default: () => null },
+    "next/navigation": { usePathname: () => "/leads", useRouter: () => ({
+      prefetch: (path, options) => { assert.equal(options.kind, "full"); routes.push(path); },
+      push: path => order.push(`route:${path}`),
+    }) },
+    "@/lib/navigation": { navigationItems: [] },
+    "@/components/role-preview-context": { RolePreviewContext: React.createContext(null) },
+    "@/components/section-loading": {}, "@/components/global-lead-search": {},
+    "@/lib/crm-data": { clearApiReadCache() {}, errorMessage: error => error.message },
+    "@/lib/live-leads-client": { loadLeadDetailData: async path => { reads.push(path); order.push(`data:${path}`); } },
+  }, { Element: Anchor, window: { location: new URL("https://crm.test/leads") } });
+  const root = AppShell({ children: null, user: { id: "actor", profile: { role: "counselor", fullName: "Employee" }, permissions: ["leads.view"] } }).props.children;
+  const path = "/leads/10000000-0000-4000-8000-000000000001";
+  const event = { target: new Anchor(`https://crm.test${path}`) };
+  root.props.onMouseOverCapture(event);
+  root.props.onFocusCapture(event);
+  root.props.onTouchStartCapture(event);
+  assert.deepEqual(routes, [path]);
+  assert.deepEqual(reads, [`/api${path}?section=overview`]);
+  for (const href of ["https://crm.test/leads/new", "https://crm.test/leads/import", "https://other.test" + path]) {
+    root.props.onMouseOverCapture({ target: new Anchor(href) });
+  }
+  assert.equal(reads.length, 1, "no speculative reads for non-detail or external links");
+  root.props.onClickCapture({ ...event, button: 0, preventDefault() {} });
+  assert.deepEqual(order.slice(-2), [`data:/api${path}?section=overview`, `route:${path}`]);
+});
+
+test("an open lead prepares one shared workspace for all tabs, but refresh and mutations stay fresh", async () => {
+  const reads = [];
+  const base = "/api/leads/10000000-0000-4000-8000-000000000001";
+  const detail = { lead: { id: "record" }, stages: ["New"], profiles: [], configuration: {}, notes: ["Note"], emails: ["Email"], activities: ["Change"], sectionErrors: {} };
+  const api = client(async path => { reads.push(path); return ok(detail); });
+  const helpers = loadModule("src\\lib\\live-leads-client.tsx", {
+    react: {}, "@/lib/crm-data": api, "lucide-react": {},
+    "@/components/searchable-dropdown": {}, "@/lib/lead-filters": {}, "@/lib/lead-picklists": {},
+  }, { window: {}, Intl });
+  await helpers.loadLeadDetailData(`${base}?section=overview`, { maxAgeMs: 30000 });
+  for (const section of ["courses", "invoices", "calls"]) {
+    await helpers.loadLeadDetailData(`${base}?section=${section}`, { maxAgeMs: 30000 });
+  }
+  assert.equal(reads.length, 1, "record-only tabs already have the overview; no redundant lead request");
+  await helpers.loadLeadDetailData(`${base}?section=workspace`, { maxAgeMs: 30000 });
+  assert.equal(reads.at(-1), `${base}?section=workspace&metadata=0`, "direct entry also reuses overview metadata");
+  for (const section of ["note", "email", "overview&history=1", "calls&history=1", "courses", "invoices"]) {
+    const result = await helpers.loadLeadDetailData(`${base}?section=${section}`, { maxAgeMs: 30000 });
+    assert.equal(result.lead.id, "record");
+  }
+  assert.equal(reads.length, 2, "prepared related lists add no requests on click");
+  await helpers.loadLeadDetailData(`${base}?section=workspace`, { maxAgeMs: 30000, forceFresh: true });
+  assert.equal(reads.length, 3, "retry bypasses completed preparations");
+  await helpers.loadLeadDetailData(`${base}?section=note`, { maxAgeMs: 30000 });
+  assert.equal(reads.length, 3, "a successful retry is available to subsequent tabs");
+  await helpers.loadLeadDetailData(`${base}?section=note`, { maxAgeMs: 0 });
+  assert.equal(reads.length, 4, "manual refresh still contacts the server");
+  await api.apiRequest(base, { method: "PATCH", body: { name: "Changed" } });
+  assert.equal(helpers.getCachedLeadDetail(`${base}?section=email`), undefined);
+});
+
+test("a failed prepared section is retried rather than displayed as an empty successful list", async () => {
+  const reads = [], base = "/api/leads/record";
+  const api = client(async path => {
+    reads.push(path);
+    return ok({ lead: { id: "record" }, stages: [], profiles: [], configuration: {}, sectionErrors: path.includes("workspace") ? { email: "Mailbox failed", history: "Timeline failed" } : {} });
+  });
+  const helpers = loadModule("src\\lib\\live-leads-client.tsx", {
+    react: {}, "@/lib/crm-data": api, "lucide-react": {},
+    "@/components/searchable-dropdown": {}, "@/lib/lead-filters": {}, "@/lib/lead-picklists": {},
+  }, { window: {}, Intl });
+  await helpers.loadLeadDetailData(`${base}?section=workspace`, { maxAgeMs: 30000 });
+  await helpers.loadLeadDetailData(`${base}?section=note`, { maxAgeMs: 30000 });
+  assert.equal(reads.length, 1);
+  await helpers.loadLeadDetailData(`${base}?section=email`, { maxAgeMs: 30000 });
+  assert.equal(reads.length, 2);
+  await helpers.loadLeadDetailData(`${base}?section=calls&history=1`, { maxAgeMs: 30000 });
+  assert.equal(reads.length, 3);
+});
+
+test("clicking a related list during workspace preparation shares the in-flight authorized read", async () => {
+  const reads = [], base = "/api/leads/record";
+  let release;
+  const api = client(async path => {
+    reads.push(path);
+    await new Promise(resolve => { release = resolve; });
+    return ok({ lead: { id: "record" }, stages: [], profiles: [], configuration: {}, notes: ["Prepared"], sectionErrors: {} });
+  });
+  const helpers = loadModule("src\\lib\\live-leads-client.tsx", {
+    react: {}, "@/lib/crm-data": api, "lucide-react": {},
+    "@/components/searchable-dropdown": {}, "@/lib/lead-filters": {}, "@/lib/lead-picklists": {},
+  }, { window: {}, Intl });
+  const preparing = helpers.loadLeadDetailData(`${base}?section=workspace`, { maxAgeMs: 30000 });
+  const clicking = helpers.loadLeadDetailData(`${base}?section=note`, { maxAgeMs: 30000 });
+  assert.equal(reads.length, 1);
+  release();
+  const [workspace, notes] = await Promise.all([preparing, clicking]);
+  assert.deepEqual(notes.notes, workspace.notes);
+  assert.equal(reads.length, 1);
+});
+
+test("a prepared tab is visible on the first render after switching, before effects run", async () => {
+  const api = client(async () => ok({ lead: { id: "record" }, notes: ["Prepared"], sectionErrors: {} }));
+  const states = [], refs = [];
+  let stateIndex = 0, refIndex = 0, reads = 0;
+  const helpers = loadModule("src\\lib\\live-leads-client.tsx", {
+    react: {
+      useEffect() {}, useCallback: callback => callback,
+      useRef(initial) { const key = refIndex++; return refs[key] ?? (refs[key] = { current: initial }); },
+      useState(initial) { const key = stateIndex++; if (!(key in states)) states[key] = typeof initial === "function" ? initial() : initial; return [states[key], value => { states[key] = value; }]; },
+    }, "@/lib/crm-data": api, "lucide-react": {},
+    "@/components/searchable-dropdown": {}, "@/lib/lead-filters": {}, "@/lib/lead-picklists": {},
+  }, { window: {}, Intl });
+  await helpers.loadLeadDetailData("/api/leads/record?section=workspace", { maxAgeMs: 30000 });
+  const render = path => { stateIndex = 0; refIndex = 0; return helpers.useLiveLeadData(path, async () => { reads++; }, helpers.getCachedLeadDetail); };
+  render("/api/leads/record?section=overview");
+  const notes = render("/api/leads/record?section=note");
+  assert.equal(notes.loading, false);
+  assert.deepEqual(notes.data.notes, ["Prepared"]);
+  assert.equal(reads, 0);
+  const other = render("/api/leads/another?section=note");
+  assert.equal(other.loading, true, "never treat another lead's history as prepared");
+});
+
+test("metadata arriving during an initial workspace read does not start a second record-only preparation", async () => {
+  const reads = [], base = "/api/leads/record";
+  let release;
+  const detail = { lead: { id: "record" }, stages: [], profiles: [], configuration: {}, sectionErrors: {} };
+  const api = client(async path => {
+    reads.push(path);
+    if (path.includes("workspace")) await new Promise(resolve => { release = resolve; });
+    return ok(detail);
+  });
+  const helpers = loadModule("src\\lib\\live-leads-client.tsx", {
+    react: {}, "@/lib/crm-data": api, "lucide-react": {},
+    "@/components/searchable-dropdown": {}, "@/lib/lead-filters": {}, "@/lib/lead-picklists": {},
+  }, { window: {}, Intl });
+  const initial = helpers.loadLeadDetailData(`${base}?section=workspace`, { maxAgeMs: 30000 });
+  await api.apiRequest(`${base}?section=overview`, { maxAgeMs: 30000 });
+  const rerender = helpers.loadLeadDetailData(`${base}?section=workspace`, { maxAgeMs: 30000 });
+  assert.equal(reads.filter(path => path.includes("workspace")).length, 1);
+  release();
+  await Promise.all([initial, rerender]);
+});
+
+test("operational snapshots expire, are invalidated, and never replace fresh financial requests", async () => {
+  let time = 1000, version = 0;
+  const api = client(async () => ok({ version: ++version }), { now: () => time });
+  await api.prefetchApiRead("/api/invoices?leadId=first");
+  time += 6000;
+  assert.equal(api.getPreparedApiRead("/api/invoices?leadId=first"), undefined);
+  assert.equal(api.getApiReadSnapshot("/api/invoices?leadId=first").version, 1);
+  assert.equal(api.getApiReadSnapshot("/api/invoices?leadId=second"), undefined);
+  assert.equal(api.getCachedApiRead("/api/invoices?leadId=first"), undefined);
+  await api.apiRequest("/api/invoices?leadId=first", { usePrefetched: true });
+  assert.equal(version, 2, "an older display snapshot never satisfies a financial read");
+  time += 30000;
+  assert.equal(api.getApiReadSnapshot("/api/invoices?leadId=first"), undefined);
+  await api.apiRequest("/api/courses");
+  await api.apiRequest("/api/courses", { method: "POST", body: {} });
+  assert.equal(api.getApiReadSnapshot("/api/courses"), undefined);
+  await api.apiRequest("/api/courses");
+  api.clearApiReadCache();
+  assert.equal(api.getApiReadSnapshot("/api/courses"), undefined);
+});
+
+test("an invoice revisit shows its snapshot immediately while a new payment check is pending", async () => {
+  let requests = 0, release;
+  const api = client(async () => {
+    requests++;
+    if (requests > 1) await new Promise(resolve => { release = resolve; });
+    return ok({ invoice: requests === 1 ? "unpaid" : "paid" });
+  });
+  await api.apiRequest("/api/invoices");
+  const states = [], refs = [], effects = [];
+  let index = 0, refIndex = 0;
+  const { useOperationalData } = loadModule("src\\app\\integrations\\operational-ui.tsx", {
+    react: {
+      useRef(initial) { const key = refIndex++; return refs[key] ?? (refs[key] = { current: initial }); },
+      useCallback: callback => callback, useEffect: effect => effects.push(effect),
+      useState(initial) { const key = index++; if (!(key in states)) states[key] = typeof initial === "function" ? initial() : initial; return [states[key], value => { states[key] = value; }]; },
+    }, "@/lib/crm-data": api,
+  });
+  const render = () => { index = 0; refIndex = 0; return useOperationalData("/api/invoices"); };
+  assert.equal(render().data.invoice, "unpaid");
+  assert.equal(render().loading, false);
+  effects[0]();
+  assert.equal(requests, 2);
+  assert.equal(render().refreshing, true);
+  assert.equal(render().data.invoice, "unpaid");
+  release();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(render().data.invoice, "paid");
+  assert.equal(render().refreshing, false);
+});
+
+test("lead record links do not launch automatic viewport route requests", () => {
+  for (const relative of ["src\\components\\leads-workspace.tsx", "src\\app\\pipeline\\page.tsx", "src\\components\\global-lead-search.tsx", "src\\lib\\live-leads-client.tsx"]) {
+    const source = readFileSync(join(__dirname, "..", relative), "utf8");
+    const links = source.match(/<Link\b[^>]*href=\{`\/leads\/[^>]*>/g) ?? [];
+    assert.ok(links.length, relative);
+    for (const link of links) assert.match(link, /prefetch=\{false\}/, relative);
+  }
 });
 
 test("top-bar search requests results on change without Enter and ignores late responses", async () => {
@@ -506,7 +755,9 @@ function loadModule(relative, dependencies, globals = {}) {
   }).outputText;
   vm.runInNewContext(source, {
     exports, console, URL, URLSearchParams, ...globals,
-    require: name => name in dependencies ? dependencies[name] : require(name),
+    require: name => name in dependencies ? dependencies[name]
+      : name === "@/lib/section-preparation" ? loadModule("src\\lib\\section-preparation.ts", { "@/lib/navigation": dependencies["@/lib/navigation"] ?? { navigationItems: [] } }, globals)
+      : require(name),
   });
   return exports;
 }
@@ -645,7 +896,7 @@ test("a save completed after a section switch refreshes the current section inst
   assert.equal(current.loading, false);
 });
 
-test("sidebar opts into full route prefetch only on intent and prepares one-use operational reads", async () => {
+test("sidebar intent explicitly prepares full routes once and keeps payment reads fresh", async () => {
   const React = require("react");
   const routes = [];
   const requests = [];
@@ -664,7 +915,7 @@ test("sidebar opts into full route prefetch only on intent and prepares one-use 
     const key = stateIndex++;
     if (!(key in states)) states[key] = initial;
     return [states[key], value => { states[key] = value; }];
-  }, useEffect() {}, useTransition: () => [false, callback => callback()] };
+  }, useRef: initial => ({ current: initial }), useEffect() {}, useTransition: () => [false, callback => callback()] };
   const { AppShell } = loadModule("src\\components\\app-shell.tsx", {
     react: hooks, "next/link": { default: () => null },
     "next/navigation": { usePathname: () => "/", useRouter: () => ({ prefetch: href => routes.push(href) }) },
@@ -673,6 +924,7 @@ test("sidebar opts into full route prefetch only on intent and prepares one-use 
     "@/lib/crm-data": api,
     "@/components/section-loading": loadModule("src\\components\\section-loading.tsx", {}),
     "@/components/global-lead-search": { GlobalLeadSearch: () => null },
+    "@/lib/live-leads-client": { loadLeadDetailData: () => assert.fail("No detail intent expected") },
   });
   const props = { children: null, user: {
     id: "actor", profile: { role: "counselor", fullName: "Counselor" },
@@ -710,9 +962,67 @@ test("sidebar opts into full route prefetch only on intent and prepares one-use 
   assert.equal(requests.filter(path => path === "/api/invoices").length, 2, "manual refresh still reads live payment status");
   stateIndex = 0;
   visit(AppShell(props));
-  assert.equal(links.get("/meetings").prefetch, true, "Next Link fully prefetches the intended route, not only its loading boundary");
+  assert.equal(links.get("/meetings").prefetch, false, "explicit full prefetch avoids a duplicate Link request");
   assert.equal(links.get("/invoices").prefetch, false);
-  assert.deepEqual(routes, [], "native Link performs full prefetch without a duplicate automatic router.prefetch");
+  assert.deepEqual(routes, ["/leads", "/pipeline", "/invoices", "/meetings"]);
+});
+
+test("sidebar preparation is permission-bound, limited to two sections, and stops on cleanup or hidden tabs", async () => {
+  const items = [
+    { href: "/", permission: "dashboard.view" }, { href: "/leads", permission: "leads.view" },
+    { href: "/pipeline", permission: "pipeline.view" }, { href: "/invoices", permission: "invoices.view" },
+    { href: "/courses", permission: "invoices.view" }, { href: "/users", permission: "users.view" },
+    { href: "/admin/login-activity", permission: "access.manage" },
+  ];
+  const helpers = loadModule("src\\lib\\section-preparation.ts", { "@/lib/navigation": { navigationItems: items } }, { Intl });
+  const user = { permissions: ["leads.view", "pipeline.view", "invoices.view", "dashboard.view", "access.manage"] };
+  const started = [], pending = new Map(), errors = [];
+  let visible = true;
+  const task = helpers.prepareSidebarSections(user, "/", path => {
+    started.push(path);
+    return new Promise((resolve, reject) => pending.set(path, { resolve, reject }));
+  }, { isVisible: () => visible, onError: error => errors.push(error.message) });
+  assert.deepEqual(started, ["/leads", "/pipeline"]);
+  pending.get("/leads").resolve();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(started, ["/leads", "/pipeline", "/invoices"]);
+  pending.get("/pipeline").reject(new Error("Cannot prepare pipeline"));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(errors, ["Cannot prepare pipeline"]);
+  assert.deepEqual(started, ["/leads", "/pipeline", "/invoices", "/courses"]);
+  task.cancel();
+  pending.get("/invoices").resolve(); pending.get("/courses").resolve();
+  await task.done;
+  assert.equal(started.includes("/users"), false);
+  assert.equal(started.includes("/admin/login-activity"), false, "server-rendered session activity is not cached ahead of time");
+  visible = false;
+  const hidden = helpers.prepareSidebarSections(user, "/", () => assert.fail("hidden tab must not warm requests"), { isVisible: () => visible, onError: () => {} });
+  await hidden.done;
+});
+
+test("short-lived route reuse is paired with router invalidation after successful and failed writes", async () => {
+  const config = readFileSync(join(__dirname, "..", "next.config.ts"), "utf8");
+  assert.match(config, /staleTimes:\s*\{\s*dynamic:\s*30,\s*static:\s*30\s*\}/);
+  let version = 0, fail = false, notifications = 0;
+  const api = client(async () => fail ? Response.json({ error: "Write failed" }, { status: 500 }) : ok({ version: ++version }));
+  await api.apiRequest("/api/leads", { maxAgeMs: 30000 });
+  const unsubscribe = api.subscribeApiWrites(() => {
+    notifications++;
+    assert.equal(api.getCachedApiRead("/api/leads"), undefined);
+    assert.equal(api.getApiReadSnapshot("/api/leads"), undefined);
+  });
+  await api.apiRequest("/api/leads/record", { method: "PATCH", body: { name: "Saved" } });
+  assert.equal(notifications, 1);
+  fail = true;
+  await assert.rejects(api.apiRequest("/api/leads/record", { method: "PATCH", body: { name: "Failed" } }), /Write failed/);
+  assert.equal(notifications, 2, "failed writes may have partially applied; do not retain server-rendered summaries");
+  unsubscribe();
+  fail = false;
+  await api.apiRequest("/api/leads/record", { method: "PATCH", body: { name: "Saved" } });
+  assert.equal(notifications, 2, "unmounted shells no longer receive notifications");
+  const source = readFileSync(join(__dirname, "..", "src", "components", "app-shell.tsx"), "utf8");
+  assert.match(source, /useEffect\(\(\) => subscribeApiWrites\(/);
+  assert.match(source, /router\.refresh\(\)/);
 });
 
 test("middleware replaces forged page identities and only forwards them as request headers", async () => {
@@ -738,7 +1048,7 @@ test("a section click immediately replaces the old page with its destination, wh
     hasAttribute(name) { return name === "download" && this.download; }
   }
   const { AppShell } = loadModule("src\\components\\app-shell.tsx", {
-    react: { ...React, useEffect() {}, useState(initial) {
+    react: { ...React, useEffect() {}, useRef: initial => ({ current: initial }), useState(initial) {
       const key = index++;
       if (!(key in states)) states[key] = initial;
       return [states[key], value => { states[key] = value; }];
@@ -749,6 +1059,7 @@ test("a section click immediately replaces the old page with its destination, wh
     "@/components/role-preview-context": { RolePreviewContext: React.createContext(null) },
     "@/components/section-loading": loadModule("src\\components\\section-loading.tsx", {}),
     "@/components/global-lead-search": { GlobalLeadSearch: () => null },
+    "@/lib/live-leads-client": { loadLeadDetailData: async path => { requests.push(path); } },
     "@/lib/crm-data": { apiRequest: async path => { requests.push(path); }, prefetchApiRead: async path => { requests.push(path); }, clearApiReadCache() {}, errorMessage: error => error.message },
   }, { Element: Anchor, window: { location: new URL("http://localhost/") } });
   const user = { id: "actor", profile: { role: "admin", fullName: "CRM Admin" }, permissions: ["dashboard.view", "invoices.view"] };
@@ -794,7 +1105,7 @@ test("operational screens ignore old responses after a section or lead changes a
         if (!(key in states)) states[key] = typeof initial === "function" ? initial() : initial;
         return [states[key], value => { states[key] = value; }];
       } },
-    "@/lib/crm-data": { getPreparedApiRead: () => undefined, apiRequest: (url, options) => {
+    "@/lib/crm-data": { getPreparedApiRead: () => undefined, getApiReadSnapshot: () => undefined, apiRequest: (url, options) => {
       reads.push({ url, options });
       return new Promise(resolve => pending.set(url, resolve));
     } },

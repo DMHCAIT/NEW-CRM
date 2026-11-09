@@ -85,6 +85,7 @@ const crm = {
   apiRequest: async () => ({}), errorMessage: (error) => error.message,
   getCachedApiRead: () => undefined,
   getPreparedApiRead: () => undefined,
+  getApiReadSnapshot: () => undefined,
   fetchLeads: async () => [lead], fetchStages: async () => stages,
   fetchProfiles: async () => [profile],
 };
@@ -2098,6 +2099,78 @@ test("lead workspace keeps notes separate from overview and email history", asyn
   assert.match(html, /Notes timeline/);
   assert.doesNotMatch(html, /Overview timeline|Email timeline|Edit lead|SMTP account/);
   assert.doesNotMatch(html, /No records yet/);
+});
+
+test("opening a lead prepares related data and chunks without waiting for a tab click", async () => {
+  for (const ready of [false, true]) {
+    const effects = [], reads = [], chunks = [];
+    const data = ready ? { ...live, lead, notes: [], activities: [], emails: [] } : null;
+    const Component = load("src\\app\\leads\\[id]\\page.tsx", {
+      react: { ...hookStates([]), useEffect: effect => effects.push(effect) },
+      "next/dynamic": { __esModule: true, default: () => () => null },
+      "next/navigation": { useParams: () => ({ id: lead.id }), useRouter: () => ({}) },
+      "@/components/invoice-workspace": { get InvoiceWorkspace() { chunks.push("invoices"); return () => null; } },
+      "@/components/course-catalog": { get CourseCatalog() { chunks.push("courses"); return () => null; } },
+      "@/lib/crm-data": { ...crm, prefetchApiRead: async path => { reads.push(path); } },
+      "@/lib/live-leads-client": {
+        ...liveMock,
+        loadLeadDetailData: async path => { reads.push(path); return { sectionErrors: {} }; },
+        useLiveLeadData: () => ({ data, loading: !ready, error: "", reload() {}, setError() {}, acceptData() {} }),
+      },
+    }).default;
+    Component();
+    const cleanup = effects[2]();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.ok(reads.includes(`/api/leads/${lead.id}?section=workspace`), "preparation starts even while initial data is pending");
+    assert.deepEqual(reads.filter(path => path.includes("invoices") || path.includes("courses")).sort(), ready ? [`/api/invoices?leadId=${lead.id}`, "/api/courses"].sort() : []);
+    assert.deepEqual(chunks.sort(), ready ? ["courses", "invoices"] : [], "invoice permission gates financial data and chunks");
+    cleanup();
+  }
+});
+
+test("inline lead saves accept the server record without a second full detail request and preserve failed edits", async () => {
+  const states = [], refs = [], writes = [];
+  let stateIndex = 0, refIndex = 0, reloads = 0, resolveSave, rejectSave;
+  let data = { ...live, lead, notes: [], activities: [], emails: [], canScheduleCall: false };
+  const Component = load("src\\app\\leads\\[id]\\page.tsx", {
+    "next/navigation": { useParams: () => ({ id: lead.id }), useRouter: () => ({}) },
+    react: {
+      ...React, useEffect() {},
+      useRef(initial) { const key = refIndex++; return refs[key] ?? (refs[key] = { current: initial }); },
+      useState(initial) { const key = stateIndex++; if (!(key in states)) states[key] = typeof initial === "function" ? initial() : initial; return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }]; },
+    },
+    "@/lib/crm-data": { ...crm, apiRequest: (url, options) => {
+      writes.push({ url, options });
+      return new Promise((resolve, reject) => { resolveSave = resolve; rejectSave = reject; });
+    } },
+    "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({
+      data, error: "", loading: false, reload: async () => { reloads++; }, setError() {},
+      acceptData: update => { data = update(data); },
+    }) },
+  }).default;
+  const render = () => { stateIndex = 0; refIndex = 0; return elements(Component()); };
+  const save = render().find(node => node.props.label === "Lead name").props.onSave("  Changed  ");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(writes.length, 1);
+  assert.equal(data.lead.name, lead.name, "do not claim a save before server confirmation");
+  resolveSave({ lead: { ...lead, name: "Changed", modifiedAt: "2099-01-01T00:00:00Z" }, scheduleUnlocked: true });
+  await save;
+  assert.equal(data.lead.name, "Changed", "use server-normalized values, not the submitted patch");
+  assert.equal(data.canScheduleCall, true);
+  assert.equal(reloads, 0);
+  const failed = render().find(node => node.props.label === "Email").props.onSave("new@example.test");
+  await new Promise(resolve => setImmediate(resolve));
+  rejectSave(new Error("Database unavailable"));
+  await assert.rejects(failed, /Database unavailable/);
+  assert.equal(data.lead.email, lead.email);
+  assert.equal(states[0], false);
+  const retry = render().find(node => node.props.label === "Email").props.onSave("new@example.test");
+  await new Promise(resolve => setImmediate(resolve));
+  resolveSave({ lead: { ...data.lead, email: "new@example.test" }, scheduleUnlocked: false });
+  await retry;
+  assert.equal(data.lead.email, "new@example.test");
+  assert.equal(data.canScheduleCall, true);
+  assert.equal(reloads, 0);
 });
 
 test("lead overview exposes inline fields with no separate edit or save button", async () => {

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { apiRequest, getPreparedApiRead } from "@/lib/crm-data";
+import { apiRequest, getApiReadSnapshot, getPreparedApiRead } from "@/lib/crm-data";
 
 export type LeadOption = { id: string; name: string };
 export type Configuration = { configured: boolean; missing: string[]; required: string[] };
@@ -11,16 +11,18 @@ export async function operationRequest<T>(url: string, method = "GET", body?: un
 }
 
 export function useOperationalData<T>(url: string) {
-  const [data, setData] = useState<T | null>(() => getPreparedApiRead<T>(url) ?? null);
+  const [data, setData] = useState<T | null>(() => getPreparedApiRead<T>(url) ?? getApiReadSnapshot<T>(url) ?? null);
   const [error, setError] = useState("");
-  const [loading, setLoading] = useState(() => getPreparedApiRead<T>(url) === undefined);
+  const [loading, setLoading] = useState(() => getPreparedApiRead<T>(url) === undefined && getApiReadSnapshot<T>(url) === undefined);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [loadedUrl, setLoadedUrl] = useState(url);
+  const [refreshing, setRefreshing] = useState(false);
   const requestId = useRef(0);
   const refresh = useCallback(async (usePrefetched = false) => {
     const current = ++requestId.current;
     setError("");
+    setRefreshing(true);
     try {
       const next = await operationRequest<T>(url, "GET", undefined, usePrefetched);
       if (current === requestId.current) setData(next);
@@ -29,12 +31,12 @@ export function useOperationalData<T>(url: string) {
       if (current === requestId.current) setError(failure instanceof Error ? failure.message : "Unable to load data.");
     }
     finally {
-      if (current === requestId.current) { setLoadedUrl(url); setLoading(false); }
+      if (current === requestId.current) { setLoadedUrl(url); setLoading(false); setRefreshing(false); }
     }
   }, [url]);
   useEffect(() => {
     const sequence = requestId;
-    const prepared = getPreparedApiRead<T>(url);
+    const prepared = getPreparedApiRead<T>(url) ?? getApiReadSnapshot<T>(url);
     setData(prepared ?? null); setLoading(prepared === undefined); void refresh(true);
     return () => { sequence.current++; };
   }, [refresh, url]);
@@ -49,11 +51,12 @@ export function useOperationalData<T>(url: string) {
     } catch (failure) { setError(failure instanceof Error ? failure.message : "Request failed."); return false; }
     finally { setBusy(false); }
   }
-  return { data: loadedUrl === url ? data : null, error, loading: loading || loadedUrl !== url, busy, message, refresh, mutate };
+  const prepared = loadedUrl !== url ? getPreparedApiRead<T>(url) ?? getApiReadSnapshot<T>(url) : undefined;
+  return { data: prepared ?? (loadedUrl === url ? data : null), error: loadedUrl === url ? error : "", loading: prepared === undefined && (loading || loadedUrl !== url), refreshing: refreshing || loadedUrl !== url, busy, message, refresh, mutate };
 }
 
-export function OperationFeedback({ error, message, loading }: { error: string; message: string; loading: boolean }) {
-  return <>{loading && <p className="loading-state" role="status">Loading live records…</p>}{error && <div className="helper-banner" role="alert">{error}</div>}{message && <div className="helper-banner form-success" role="status">{message}</div>}</>;
+export function OperationFeedback({ error, message, loading, refreshing = false }: { error: string; message: string; loading: boolean; refreshing?: boolean }) {
+  return <>{(loading || refreshing) && <p className="loading-state" role="status">{loading ? "Loading live records…" : "Checking latest records..."}</p>}{error && <div className="helper-banner" role="alert">{error}</div>}{message && <div className="helper-banner form-success" role="status">{message}</div>}</>;
 }
 
 export function LeadSelect({ leads, required = false, name = "lead_id" }: { leads: LeadOption[]; required?: boolean; name?: string }) {

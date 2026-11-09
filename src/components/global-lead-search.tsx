@@ -51,7 +51,7 @@ export function GlobalLeadSearch() {
     </label>
     {open && query.trim() && <section id={resultsId} className="global-search-results" aria-label="Lead search results" aria-busy={pending}>
       {pending ? <p role="status">Searching leads...</p> : error ? <p role="alert">{error}</p> : <>
-        <ul>{current?.leads.slice(0, 6).map(lead => <li key={lead.id}><Link href={`/leads/${lead.id}`} onClick={() => setOpen(false)}>
+        <ul>{current?.leads.slice(0, 6).map(lead => <li key={lead.id}><Link href={`/leads/${lead.id}`} prefetch={false} onClick={() => setOpen(false)}>
           <strong>{lead.name}</strong><small>{lead.email || lead.phone}{lead.stage ? ` - ${lead.stage}` : ""}</small>
         </Link></li>)}</ul>
         {!current?.leads.length && <p role="status">No matching leads.</p>}

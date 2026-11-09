@@ -4,6 +4,9 @@ import { PHASE_DEVELOPMENT_SERVER } from "next/constants";
 const nextConfig = (phase: string): NextConfig => ({
   reactStrictMode: true,
   distDir: process.env.NEXT_DIST_DIR || (phase === PHASE_DEVELOPMENT_SERVER ? ".next-dev" : ".next"),
+  experimental: {
+    staleTimes: { dynamic: 30, static: 30 },
+  },
   outputFileTracingIncludes: {
     "/api/invoices/**": ["./public/DMHCA-invoice-logo.png", "./public/IBMP-logo.png"],
     "/api/webhooks/**": ["./public/DMHCA-invoice-logo.png", "./public/IBMP-logo.png"],

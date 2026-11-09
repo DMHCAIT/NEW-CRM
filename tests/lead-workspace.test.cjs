@@ -10,6 +10,7 @@ class HttpError extends Error {
 }
 function fixture({ missingLead = false, denied = false, errorTable, mailboxError = false } = {}) {
   const reads = [];
+  const metadataReads = [];
   let mailboxReads = 0;
   const rows = {
     notes: [{ id: "note", content: "Private note" }],
@@ -43,7 +44,8 @@ function fixture({ missingLead = false, denied = false, errorTable, mailboxError
     "next/server": { NextResponse: { json: (body, options) => Response.json(body, options) } },
     "@/lib/crm-data": {
       fetchLead: async () => missingLead ? null : { id, isArchived: false },
-      fetchProfiles: async () => [], fetchStages: async () => [],
+      fetchProfiles: async () => { metadataReads.push("profiles"); return []; },
+      fetchStages: async () => { metadataReads.push("stages"); return []; },
     },
     "@/lib/server/auth": {
       HttpError,
@@ -56,7 +58,7 @@ function fixture({ missingLead = false, denied = false, errorTable, mailboxError
     },
     "@/lib/live-leads": {
       uuid: value => value,
-      fetchLeadConfiguration: async () => ({ fields: [] }),
+      fetchLeadConfiguration: async () => { metadataReads.push("configuration"); return { fields: [] }; },
       dbError: error => { if (error) throw error; },
     },
     "@/lib/server/login": {},
@@ -73,7 +75,7 @@ function fixture({ missingLead = false, denied = false, errorTable, mailboxError
   const api = {};
   new Function("exports", "require", source)(api, name => mocks[name] ?? require(name));
   return {
-    reads, mailboxReads: () => mailboxReads,
+    reads, metadataReads, mailboxReads: () => mailboxReads,
     get: suffix => api.GET(new Request(`https://crm.example/api/leads/${id}${suffix}`), { params: Promise.resolve({ id }) }),
   };
 }
@@ -97,6 +99,25 @@ test("initial overview omits note/email bodies, activity and mailbox work while 
   }
 });
 
+test("record-only details skip all shared metadata reads but preserve scope and current identity", async () => {
+  const f = fixture();
+  const response = await f.get("?section=overview&metadata=0");
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("server-timing"), /auth;dur=\d+, lead;dur=\d+, related;dur=\d+/);
+  const data = await response.json();
+  assert.deepEqual(f.metadataReads, []);
+  for (const key of ["stages", "profiles", "configuration"]) assert.equal(key in data, false);
+  assert.equal(data.lead.id, id);
+  assert.equal(data.user.id, "actor");
+  assert.equal(data.canScheduleCall, true);
+  assert.deepEqual(data.counts, { notes: 7, emails: 7 });
+  const full = fixture();
+  await full.get("?section=overview");
+  assert.deepEqual(full.metadataReads.sort(), ["configuration", "profiles", "stages"]);
+  const denied = fixture({ denied: true });
+  assert.equal((await denied.get("?section=overview&metadata=0")).status, 403);
+  assert.deepEqual(denied.reads, []);
+});
 test("related sections fetch only the requested history and resolve Gmail only for Emails", async () => {
   for (const section of ["note", "email", "calls", "invoices", "courses"]) {
     const f = fixture();
@@ -129,11 +150,39 @@ test("legacy detail requests preserve all histories and mailbox information", as
   assert.equal(f.mailboxReads(), 1);
 });
 
+test("one authorized workspace preparation loads every related history with only one mailbox read", async () => {
+  const f = fixture();
+  const response = await f.get("?section=workspace&metadata=0");
+  assert.equal(response.status, 200);
+  const data = await response.json();
+  for (const key of ["notes", "activities", "emails"]) assert.equal(data[key].length, 1);
+  assert.deepEqual(data.sectionErrors, {});
+  assert.deepEqual(f.metadataReads, []);
+  assert.equal(f.mailboxReads(), 1);
+  for (const read of f.reads.filter(read => ["notes", "emails", "activities", "scheduled_calls"].includes(read.table))) {
+    assert.ok(read.filters.some(([key, value]) => key === "lead_id" && value === id));
+  }
+});
+
+test("preparation reports failed sections without preventing other related lists from loading", async () => {
+  const f = fixture({ errorTable: "notes", mailboxError: true });
+  const response = await f.get("?section=workspace");
+  assert.equal(response.status, 200);
+  const data = await response.json();
+  assert.match(data.sectionErrors.note, /could not be loaded/);
+  assert.match(data.sectionErrors.email, /Mailbox/);
+  assert.equal(data.activities.length, 1);
+  assert.equal(data.emails.length, 1);
+  assert.equal(data.mailbox, null);
+});
+
 test("invalid sections, inaccessible leads and denied permissions do not run related queries", async () => {
   for (const [options, suffix, status] of [
     [{}, "?section=invalid", 400],
     [{ missingLead: true }, "?section=overview", 404],
     [{ denied: true }, "?section=email", 403],
+    [{ denied: true }, "?section=workspace", 403],
+    [{ missingLead: true }, "?section=workspace", 404],
   ]) {
     const f = fixture(options);
     assert.equal((await f.get(suffix)).status, status);

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Plus, RotateCcw, SlidersHorizontal, X } from "lucide-react";
 import { SearchableDropdown } from "@/components/searchable-dropdown";
-import { apiRequest, getCachedApiRead, type StageRow } from "@/lib/crm-data";
+import { apiRequest, getCachedApiRead, getPendingApiRead, type StageRow } from "@/lib/crm-data";
 import type { CurrentUser, Lead, Profile } from "@/lib/types";
 import { FILTER_FIELDS, criterionError, defaultOperator, operatorNeedsValue, operatorsForField, type FilterField, type SavedLeadFilter } from "@/lib/lead-filters";
 import type { LeadConfiguration } from "@/lib/live-leads";
@@ -31,10 +31,71 @@ export async function loadLeadListData(path: string, options: { maxAgeMs: number
   return { ...metadata, ...page };
 }
 
-export function useLiveLeadData<T = LiveLeadData>(path = "/api/leads", request: (path: string, options: { maxAgeMs: number }) => Promise<T> = apiRequest) {
-  const [data, setData] = useState<T | null>(() => getCachedApiRead<T>(path) ?? null);
+function leadDetailRecordsPath(path: string) {
+  const url = new URL(path, "http://crm.local");
+  url.searchParams.set("metadata", "0");
+  return `${url.pathname}${url.search}`;
+}
+
+function getLeadDetailMetadata(path: string, maxAgeMs: number) {
+  const overviewPath = `${path.split("?")[0]}?section=overview`;
+  return getCachedApiRead<Pick<LiveLeadData, "stages" | "profiles" | "configuration">>(leadQueryPath(emptyFilter()), maxAgeMs)
+    ?? getCachedApiRead<Pick<LiveLeadData, "stages" | "profiles" | "configuration">>(overviewPath, maxAgeMs);
+}
+
+export function getCachedLeadDetail<T>(path: string, maxAgeMs = 30000): T | undefined {
+  const cached = getCachedApiRead<T>(path, maxAgeMs);
+  if (cached !== undefined) return cached;
+  const url = new URL(path, "http://crm.local");
+  if (url.searchParams.get("section") !== "workspace") {
+    const workspacePath = `${url.pathname}?section=workspace`;
+    const workspace = getCachedLeadDetail<T & { sectionErrors?: Record<string, string> }>(workspacePath, maxAgeMs);
+    const section = url.searchParams.get("section") ?? "overview";
+    const errorKey = url.searchParams.get("history") === "1" ? "history" : section;
+    if (workspace && !workspace.sectionErrors?.[errorKey]) return workspace;
+    if (["invoices", "courses", "calls"].includes(section) && url.searchParams.get("history") !== "1") {
+      const overview = getCachedLeadDetail<T>(`${url.pathname}?section=overview`, maxAgeMs);
+      if (overview !== undefined) return overview;
+    }
+  }
+  const metadata = getLeadDetailMetadata(path, maxAgeMs);
+  const detail = metadata ? getCachedApiRead<T>(leadDetailRecordsPath(path), maxAgeMs) : undefined;
+  return metadata && detail !== undefined
+    ? { stages: metadata.stages, profiles: metadata.profiles, configuration: metadata.configuration, ...detail }
+    : undefined;
+}
+
+export async function loadLeadDetailData<T>(path: string, options: { maxAgeMs: number; forceFresh?: boolean }): Promise<T> {
+  const cached = options.forceFresh ? undefined : getCachedLeadDetail<T>(path, options.maxAgeMs);
+  if (cached !== undefined) return cached;
+  const pendingFull = options.maxAgeMs > 0 && !options.forceFresh ? getPendingApiRead<T>(path) : undefined;
+  if (pendingFull) return pendingFull;
+  const metadata = options.maxAgeMs > 0 && !options.forceFresh ? getLeadDetailMetadata(path, options.maxAgeMs) : undefined;
+  const url = new URL(path, "http://crm.local");
+  const section = url.searchParams.get("section");
+  if (options.maxAgeMs > 0 && !options.forceFresh && section && !["overview", "workspace"].includes(section)) {
+    const workspacePath = `${url.pathname}?section=workspace`;
+    const full = getPendingApiRead<T & { sectionErrors?: Record<string, string> }>(workspacePath);
+    const pending = full ?? (metadata ? getPendingApiRead<T & { sectionErrors?: Record<string, string> }>(leadDetailRecordsPath(workspacePath)) : undefined);
+    if (pending) {
+      const workspace = await pending;
+      const errorKey = url.searchParams.get("history") === "1" ? "history" : section;
+      if (!workspace.sectionErrors?.[errorKey]) return {
+        ...(metadata ? { stages: metadata.stages, profiles: metadata.profiles, configuration: metadata.configuration } : {}),
+        ...workspace,
+      };
+    }
+  }
+  if (!metadata) return apiRequest<T>(path, options);
+  const detail = await apiRequest<T>(leadDetailRecordsPath(path), options);
+  return { stages: metadata.stages, profiles: metadata.profiles, configuration: metadata.configuration, ...detail };
+}
+
+export function useLiveLeadData<T = LiveLeadData>(path = "/api/leads", request: (path: string, options: { maxAgeMs: number }) => Promise<T> = apiRequest,
+  snapshot: (path: string) => T | undefined = getCachedApiRead) {
+  const [data, setData] = useState<T | null>(() => snapshot(path) ?? null);
   const [error, setError] = useState("");
-  const [loading, setLoading] = useState(() => getCachedApiRead<T>(path) === undefined);
+  const [loading, setLoading] = useState(() => snapshot(path) === undefined);
   const [loadedPath, setLoadedPath] = useState(path);
   const requestId = useRef(0);
   const load = useCallback(async (maxAgeMs: number) => {
@@ -54,13 +115,20 @@ export function useLiveLeadData<T = LiveLeadData>(path = "/api/leads", request: 
   const reload = useCallback(() => latestLoad.current(0), []);
   useEffect(() => {
     const sequence = requestId;
-    const saved = getCachedApiRead<T>(path);
+    const saved = snapshot(path);
     if (saved !== undefined) { setData(saved); setLoadedPath(path); }
     setLoading(saved === undefined);
     void load(30000).catch(() => {});
     return () => { sequence.current++; };
-  }, [load, path]);
-  return { data, error, loading: loading || loadedPath !== path, reload, setError };
+  }, [load, path, snapshot]);
+  const prepared = loadedPath !== path ? snapshot(path) : undefined;
+  const acceptData = useCallback((update: (previous: T | null) => T | null) => {
+    requestId.current++;
+    setData(update); setError("");
+    if (loadedPath === path) setLoading(false);
+    else void latestLoad.current(0).catch(() => {});
+  }, [path, loadedPath]);
+  return { data: prepared ?? data, error: prepared === undefined ? error : "", loading: prepared !== undefined ? false : loading || loadedPath !== path, reload, setError, acceptData };
 }
 
 export function useDebouncedValue<T>(value: T, delay = 120, enabled = true) {
@@ -201,7 +269,7 @@ export function LeadForm({ initial, stages, profiles, canAssign, onSave, busy, s
     const matches = duplicates.filter((match) => match.match_field === field);
     if (!matches.length) return null;
     return <div className="helper-banner lead-duplicate-hint" role="alert">{matches.map((match, index) => match.in_bucket && match.lead_id
-      ? <p key={index}>Duplicate: this {field} already exists in your bucket{match.lead_name ? ` (${match.lead_name})` : ""}. <Link href={`/leads/${match.lead_id}`} className="text-link">View lead</Link></p>
+      ? <p key={index}>Duplicate: this {field} already exists in your bucket{match.lead_name ? ` (${match.lead_name})` : ""}. <Link href={`/leads/${match.lead_id}`} prefetch={false} className="text-link">View lead</Link></p>
       : <p key={index}>Duplicate: this {field} already exists and is assigned to <strong>{match.assignee}</strong>.</p>)}</div>;
   };
   const createRequired = ["name", "email", "countryCode", "phone", "country", "qualification", "category", "course", "source", "stage"] as const;

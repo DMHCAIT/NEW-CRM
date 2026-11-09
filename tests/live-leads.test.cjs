@@ -223,24 +223,38 @@ test("email log failure after provider acceptance warns against duplicate sends"
 });
 
 test("single-field lead PATCH preserves unrelated columns and merges custom fields", async () => {
-  let updated;
+  let updated, leadReads = 0;
+  const crmData = load("src\\lib\\crm-data.ts", { "@/lib/permissions": { isCrmRole: () => true } });
+  const returnedRow = { id: "lead", name: "Server normalized", modified_at: "2099-01-01T10:00:00Z", closure_fee: "1250", custom_fields: { Existing: "kept" }, call_schedule_revision: 4, modifier: { full_name: "Server editor" } };
+  const selects = [];
   const route = load("src\\app\\api\\leads\\[id]\\route.ts", {
     "@/lib/server/auth": { ...auth, requireUser: async () => ({
       user: { id: "editor", permissions: ["leads.edit"] },
       supabase: { from() {
-        const chain = { select: () => chain, eq: () => chain, single: async () => ({ data: { custom_fields: { Existing: "kept" } }, error: null }),
-          update: row => { updated = row; return chain; }, maybeSingle: async () => ({ data: { id: "lead" }, error: null }) };
+        const chain = { select: columns => { selects.push(columns); return chain; }, eq: () => chain, single: async () => ({ data: { custom_fields: { Existing: "kept" }, call_schedule_revision: 3 }, error: null }),
+          update: row => { updated = row; return chain; }, maybeSingle: async () => ({ data: returnedRow, error: null }) };
         return chain;
       } },
     }) },
-    "@/lib/crm-data": { fetchLead: async () => ({ ...validLead, country: "", course: "", qualification: "", source: "Website", closureFee: 0 }) },
+    "@/lib/crm-data": { ...crmData, fetchLead: async () => { leadReads++; return { ...validLead, country: "", course: "", qualification: "", source: "Website", closureFee: 0 }; } },
     "@/lib/live-leads": { ...validation, uuid: value => value, fetchLeadConfiguration: async () => ({ fields: [{ name: "New field", active: true, type: "text" }] }) },
     "@/lib/supabase/server": {},
   });
   async function patch(body) {
     return route.PATCH(new Request("https://crm.example/api/leads/id", { method: "PATCH", body: JSON.stringify(body) }), { params: Promise.resolve({ id: "lead" }) });
   }
-  assert.equal((await patch({ name: "Changed" })).status, 200);
+  const response = await patch({ name: "Changed" });
+  assert.equal(response.status, 200);
+  const saved = await response.json();
+  assert.equal(saved.id, "lead");
+  assert.equal(saved.lead.name, "Server normalized");
+  assert.equal(saved.lead.modifiedAt, returnedRow.modified_at);
+  assert.equal(saved.lead.modifiedBy, "Server editor");
+  assert.equal(saved.lead.closureFee, 1250);
+  assert.deepEqual(saved.lead.customFields, { Existing: "kept" });
+  assert.equal(saved.scheduleUnlocked, true);
+  assert.equal(leadReads, 1, "the update returns its own selected row without a second detail lookup");
+  assert.match(selects.at(-1), /custom_fields,call_schedule_revision/);
   assert.deepEqual(Object.keys(updated).sort(), ["modified_by", "name"]);
   assert.equal((await patch({ email: "new@example.com" })).status, 200);
   assert.deepEqual(Object.keys(updated).sort(), ["email", "modified_by", "normalized_email"]);
@@ -300,7 +314,7 @@ test("lead transfers allow team leads and managers, preserve stage by omission a
           return chain;
         } },
       }) },
-      "@/lib/crm-data": { fetchLead: async () => ({ ...validLead, country: "", course: "", qualification: "", source: "Website", closureFee: 0 }), fetchStages: async () => [{ id: stageId }] },
+      "@/lib/crm-data": { mapLead: row => row, LEAD_SELECT: "id,name", fetchLead: async () => ({ ...validLead, country: "", course: "", qualification: "", source: "Website", closureFee: 0 }), fetchStages: async () => [{ id: stageId }] },
       "@/lib/live-leads": { ...validation, uuid: value => value, fetchLeadConfiguration: async () => ({ fields: [] }) },
       "@/lib/supabase/server": {},
     });
