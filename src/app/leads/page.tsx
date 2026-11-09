@@ -6,6 +6,7 @@ import { useEffect } from "react";
 import LeadsWorkspace from "@/components/leads-workspace";
 import { SectionLoading } from "@/components/section-loading";
 import { readDashboardFilter } from "@/lib/dashboard";
+import { emptyFilter } from "@/lib/live-leads-client";
 
 export default function LeadsPage() {
   const search = useSearchParams();
@@ -21,5 +22,6 @@ export default function LeadsPage() {
       return <section className="panel live-panel"><h1>Leads</h1><p className="form-error" role="alert">{error instanceof Error ? error.message : "Could not load the dashboard filter."}</p><Link className="button button-secondary" href="/">Return to Dashboard</Link></section>;
     }
   }
-  return <LeadsWorkspace key="all-leads" />;
+  const query = search.get("q") ?? "";
+  return <LeadsWorkspace key={`all-leads:${query}`} initialFilter={{ ...emptyFilter(), query }} />;
 }

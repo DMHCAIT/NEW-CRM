@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { apiRequest } from "@/lib/crm-data";
+import { apiRequest, getPreparedApiRead } from "@/lib/crm-data";
 
 export type LeadOption = { id: string; name: string };
 export type Configuration = { configured: boolean; missing: string[]; required: string[] };
@@ -11,9 +11,9 @@ export async function operationRequest<T>(url: string, method = "GET", body?: un
 }
 
 export function useOperationalData<T>(url: string) {
-  const [data, setData] = useState<T | null>(null);
+  const [data, setData] = useState<T | null>(() => getPreparedApiRead<T>(url) ?? null);
   const [error, setError] = useState("");
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => getPreparedApiRead<T>(url) === undefined);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [loadedUrl, setLoadedUrl] = useState(url);
@@ -34,9 +34,10 @@ export function useOperationalData<T>(url: string) {
   }, [url]);
   useEffect(() => {
     const sequence = requestId;
-    setData(null); setLoading(true); void refresh(true);
+    const prepared = getPreparedApiRead<T>(url);
+    setData(prepared ?? null); setLoading(prepared === undefined); void refresh(true);
     return () => { sequence.current++; };
-  }, [refresh]);
+  }, [refresh, url]);
   async function mutate(endpoint: string, method: string, body?: unknown) {
     setBusy(true); setError(""); setMessage("");
     try {

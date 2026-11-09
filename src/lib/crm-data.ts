@@ -175,7 +175,7 @@ export function errorMessage(error: unknown, fallback: string): string {
 /** Calls a CRM API route and throws with the server's error message on failure. */
 const browserReads = new Map<string, { value: unknown; savedAt: number }>();
 const pendingBrowserReads = new Map<string, Promise<unknown>>();
-const preparedBrowserReads = new Map<string, { promise: Promise<unknown>; expiresAt: number }>();
+const preparedBrowserReads = new Map<string, { promise: Promise<unknown>; expiresAt: number; value?: unknown }>();
 let readGeneration = 0;
 
 export function clearApiReadCache() {
@@ -190,13 +190,19 @@ export function prefetchApiRead(path: string): Promise<unknown> {
   const saved = preparedBrowserReads.get(path);
   if (saved && Date.now() < saved.expiresAt) return saved.promise;
   const promise = apiRequest(path);
-  const entry = { promise, expiresAt: Infinity };
+  const entry: { promise: Promise<unknown>; expiresAt: number; value?: unknown } = { promise, expiresAt: Infinity };
   if (preparedBrowserReads.size >= 20) preparedBrowserReads.delete(preparedBrowserReads.keys().next().value!);
   preparedBrowserReads.set(path, entry);
-  void promise.then(() => { entry.expiresAt = Date.now() + 5000; }, () => {
+  void promise.then(value => { entry.value = value; entry.expiresAt = Date.now() + 5000; }, () => {
     if (preparedBrowserReads.get(path) === entry) preparedBrowserReads.delete(path);
   });
   return promise;
+}
+
+export function getPreparedApiRead<T>(path: string): T | undefined {
+  if (typeof window === "undefined") return undefined;
+  const entry = preparedBrowserReads.get(path);
+  return entry && Date.now() < entry.expiresAt ? entry.value as T | undefined : undefined;
 }
 
 export function getCachedApiRead<T>(path: string, maxAgeMs = 30000): T | undefined {

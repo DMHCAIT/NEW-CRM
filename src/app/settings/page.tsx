@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { apiRequest, errorMessage } from "@/lib/crm-data";
+import { apiRequest, errorMessage, getPreparedApiRead } from "@/lib/crm-data";
 import { SettingsNav } from "@/components/settings-nav";
 import { LEAD_PICKLIST_KEYS, type LeadPicklistKey } from "@/lib/lead-picklists";
 import { STANDARD_LEAD_FIELDS } from "@/lib/lead-fields";
@@ -26,7 +26,7 @@ const PICKLIST_LABELS: Record<LeadPicklistKey, string> = {
 };
 
 export default function SettingsPage() {
-  const [config, setConfig] = useState<Configuration | null>(null);
+  const [config, setConfig] = useState<Configuration | null>(() => getPreparedApiRead<Configuration>("/api/settings") ?? null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);

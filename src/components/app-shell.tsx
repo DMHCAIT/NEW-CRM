@@ -6,7 +6,6 @@ import {
   Bell,
   LogOut,
   Menu,
-  Search,
   X,
 } from "lucide-react";
 import { useEffect, useState, useTransition, type MouseEvent } from "react";
@@ -15,6 +14,7 @@ import { RolePreviewContext } from "@/components/role-preview-context";
 import type { CurrentUser } from "@/lib/types";
 import { apiRequest, clearApiReadCache, errorMessage, prefetchApiRead } from "@/lib/crm-data";
 import { SectionLoading } from "@/components/section-loading";
+import { GlobalLeadSearch } from "@/components/global-lead-search";
 
 export function AppShell({ children, user }: { children: React.ReactNode; user: CurrentUser | null }) {
   const pathname = usePathname();
@@ -34,7 +34,8 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
       "/meetings": ["/api/meetings"], "/invoices": ["/api/invoices"],
       "/courses": ["/api/courses"], "/automations": ["/api/automations"],
       "/reports": ["/api/reports"], "/users": ["/api/users"], "/settings": ["/api/settings"],
-      "/integrations": ["/api/integrations", "/api/integrations/sources", "/api/integrations/gmail"],
+      "/settings/access": ["/api/access"], "/settings/access/users": ["/api/access"],
+      "/integrations": ["/api/integrations", "/api/integrations/sources", "/api/integrations/gmail", ...(user?.permissions.includes("integrations.manage") ? ["/api/integrations/settings", "/api/integrations/facebook-pages"] : [])],
     };
     const dataPaths = leadSection ? [`/api/leads?${params}`] : operationalPaths[href] ?? [];
     for (const dataPath of dataPaths) {
@@ -186,10 +187,7 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
           </button>
           <div className="breadcrumb"><span>Workspace</span><span className="breadcrumb-slash">/</span><strong>{pageName(navigating ? destination : pathname)}</strong></div>
           <div className="topbar-actions">
-            <Link className="search-trigger" href="/leads" aria-label="Search leads">
-              <Search size={16} />
-              <span>Search leads</span>
-            </Link>
+            {user.permissions.includes("leads.view") && <GlobalLeadSearch />}
             <Link className="icon-button topbar-icon" href="/notifications" aria-label="Notifications">
               <Bell size={19} />
             </Link>

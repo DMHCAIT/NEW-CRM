@@ -5,10 +5,10 @@ import { requireEnv } from "@/lib/server/env";
 import { encryptSession } from "@/lib/server/login-crypto";
 import { getSupabaseAdminClient } from "@/lib/supabase/server";
 import { databaseError } from "@/lib/server/operational";
-import { canConnectMailbox, crmSessionId, gmailCallback, gmailCookie, gmailCryptoKey, gmailScopes, oauthParameters, oauthStateHash } from "@/lib/server/operational-gmail";
+import { canConnectMailbox, crmSessionId, gmailCallback, gmailCookie, gmailCryptoKey, gmailScopes, oauthParameters, oauthStateHash, requireOAuthMailbox } from "@/lib/server/operational-gmail";
 import { checkOrigin } from "@/lib/server/login";
 import { getIntegrationConfig, requireIntegrationValue } from "@/lib/server/integration-settings";
-import { workspaceManaged } from "@/lib/server/gmail-delegation";
+import { oauthMailboxDomain, workspaceManaged } from "@/lib/server/gmail-delegation";
 
 export async function POST(request: Request) {
   try {
@@ -17,6 +17,7 @@ export async function POST(request: Request) {
     canConnectMailbox(user.permissions);
     const config = await getIntegrationConfig("gmail");
     if (workspaceManaged(config)) throw new HttpError(409, "Your Workspace mailbox is managed by your administrator. Individual Google consent is not needed.");
+    requireOAuthMailbox(user.email, user.email);
     const clientId = requireIntegrationValue(config, "GOOGLE_CLIENT_ID");
     requireIntegrationValue(config, "GOOGLE_CLIENT_SECRET"); requireEnv("NEXT_PUBLIC_APP_URL");
     const redirectUri = gmailCallback(config);
@@ -31,7 +32,7 @@ export async function POST(request: Request) {
     store.set(gmailCookie, state, { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", path: "/api/auth/gmail", maxAge: 600 });
     const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
     url.search = new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, response_type: "code",
-      scope: gmailScopes.join(" "), access_type: "offline", prompt: "consent", login_hint: user.email,
+      scope: gmailScopes.join(" "), access_type: "offline", prompt: "consent", login_hint: user.email, hd: oauthMailboxDomain,
       state, code_challenge: challenge, code_challenge_method: "S256" }).toString();
     return NextResponse.json({ url: url.toString() });
   } catch (error) { return jsonError(error); }

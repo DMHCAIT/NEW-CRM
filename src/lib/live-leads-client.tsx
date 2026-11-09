@@ -9,7 +9,7 @@ import type { CurrentUser, Lead, Profile } from "@/lib/types";
 import { FILTER_FIELDS, criterionError, defaultOperator, operatorNeedsValue, operatorsForField, type FilterField, type SavedLeadFilter } from "@/lib/lead-filters";
 import type { LeadConfiguration } from "@/lib/live-leads";
 import { DEFAULT_LEAD_PICKLISTS, type LeadPicklistKey } from "@/lib/lead-picklists";
-import type { LeadCursor } from "@/lib/server/lead-query";
+import type { LeadCursor, LeadPage } from "@/lib/server/lead-query";
 
 export type LiveLeadData = {
   leads: Lead[]; stages: StageRow[]; profiles: Profile[]; user: CurrentUser;
@@ -21,7 +21,17 @@ export type LiveLeadData = {
   total?: number;
 };
 
-export function useLiveLeadData<T = LiveLeadData>(path = "/api/leads") {
+export async function loadLeadListData(path: string, options: { maxAgeMs: number }): Promise<LiveLeadData> {
+  const basePath = leadQueryPath(emptyFilter());
+  const metadata = options.maxAgeMs > 0 ? getCachedApiRead<LiveLeadData>(basePath) : undefined;
+  if (!metadata || path === basePath) return apiRequest<LiveLeadData>(path, options);
+  const params = new URLSearchParams(path.split("?")[1]);
+  params.set("metadata", "0");
+  const page = await apiRequest<LeadPage>(`/api/leads?${params}`, options);
+  return { ...metadata, ...page };
+}
+
+export function useLiveLeadData<T = LiveLeadData>(path = "/api/leads", request: (path: string, options: { maxAgeMs: number }) => Promise<T> = apiRequest) {
   const [data, setData] = useState<T | null>(() => getCachedApiRead<T>(path) ?? null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(() => getCachedApiRead<T>(path) === undefined);
@@ -30,7 +40,7 @@ export function useLiveLeadData<T = LiveLeadData>(path = "/api/leads") {
   const load = useCallback(async (maxAgeMs: number) => {
     const current = ++requestId.current;
     try {
-      const next = await apiRequest<T>(path, { maxAgeMs });
+      const next = await request(path, { maxAgeMs });
       if (current === requestId.current) { setData(next); setLoadedPath(path); setError(""); }
     }
     catch (e) {
@@ -38,7 +48,7 @@ export function useLiveLeadData<T = LiveLeadData>(path = "/api/leads") {
       throw e;
     }
     finally { if (current === requestId.current) setLoading(false); }
-  }, [path]);
+  }, [path, request]);
   const latestLoad = useRef(load);
   latestLoad.current = load;
   const reload = useCallback(() => latestLoad.current(0), []);
@@ -53,7 +63,7 @@ export function useLiveLeadData<T = LiveLeadData>(path = "/api/leads") {
   return { data, error, loading: loading || loadedPath !== path, reload, setError };
 }
 
-export function useDebouncedValue<T>(value: T, delay = 250, enabled = true) {
+export function useDebouncedValue<T>(value: T, delay = 120, enabled = true) {
   const [settled, setSettled] = useState(value);
   useEffect(() => {
     if (!enabled) return;

@@ -7,7 +7,7 @@ import { getIntegrationConfig } from "@/lib/server/integration-settings";
 import { getSupabaseAdminClient } from "@/lib/supabase/server";
 import { databaseError } from "@/lib/server/operational";
 import { secureEqual } from "@/lib/server/operational-intake";
-import { canConnectMailbox, crmSessionId, gmailCallback, gmailCookie, gmailCryptoKey, gmailRequest, gmailScopes, googleTokenRequest, oauthStateHash, requireLoginMailbox } from "@/lib/server/operational-gmail";
+import { canConnectMailbox, crmSessionId, gmailCallback, gmailCookie, gmailCryptoKey, gmailRequest, gmailScopes, googleTokenRequest, oauthStateHash, requireOAuthMailbox } from "@/lib/server/operational-gmail";
 import { workspaceManaged } from "@/lib/server/gmail-delegation";
 
 export async function GET(request: Request) {
@@ -37,7 +37,7 @@ export async function GET(request: Request) {
     if (!gmailScopes.every(scope => grantedScopes.includes(scope))) throw new HttpError(403, "Gmail read and send consent are both required.");
     const profile = await gmailRequest<{ emailAddress: string; historyId: string }>(tokens.access_token, "profile");
     if (!profile.emailAddress || !profile.historyId) throw new HttpError(502, "Google returned an invalid mailbox profile.");
-    requireLoginMailbox(profile.emailAddress, user.email);
+    requireOAuthMailbox(profile.emailAddress, user.email);
     const { error: saveError } = await admin.rpc("integration_set_gmail", {
       p_user_id: user.id, p_action: "connect", p_email: profile.emailAddress,
       p_encrypted_tokens: encryptSession(JSON.stringify({ access_token: tokens.access_token, refresh_token: tokens.refresh_token, expires_at: Date.now() + tokens.expires_in * 1000, scope: tokens.scope }), key),

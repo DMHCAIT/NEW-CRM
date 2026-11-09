@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
-import { apiRequest } from "@/lib/crm-data";
+import { apiRequest, getPreparedApiRead } from "@/lib/crm-data";
 import type { CurrentUser } from "@/lib/types";
 import type { SavedLeadFilter } from "@/lib/lead-filters";
 import type { SavedReport } from "@/lib/reports";
@@ -15,7 +15,7 @@ type ReportsData = Data & { saveReport: (report: SavedReport) => Promise<void>; 
 const Context = createContext<ReportsData | null>(null);
 
 export function ReportsDataProvider({ children }: { children: React.ReactNode }) {
-  const [data, setData] = useState<Data | null>(null);
+  const [data, setData] = useState<Data | null>(() => getPreparedApiRead<Data>("/api/reports") ?? null);
   const [error, setError] = useState("");
   const reload = useCallback(async (usePrefetched = false) => { setData(await apiRequest<Data>("/api/reports", { usePrefetched })); }, []);
   useEffect(() => { void reload(true).catch((e: Error) => setError(e.message)); }, [reload]);

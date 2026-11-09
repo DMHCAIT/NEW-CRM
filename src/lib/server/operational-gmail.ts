@@ -6,7 +6,7 @@ import { appUrl, requireEnv } from "@/lib/server/env";
 import { decryptSession, encryptSession, encryptionKey } from "@/lib/server/login-crypto";
 import { databaseError, parseInput } from "@/lib/server/operational";
 import { getIntegrationConfig, requireIntegrationValue } from "@/lib/server/integration-settings";
-import { delegatedGmailScopes, delegatedGmailToken, workspaceMailbox, workspaceMailboxEligible, workspaceManaged } from "@/lib/server/gmail-delegation";
+import { delegatedGmailScopes, delegatedGmailToken, oauthMailboxDomain, oauthMailboxEligible, workspaceMailbox, workspaceMailboxEligible, workspaceManaged } from "@/lib/server/gmail-delegation";
 
 export const gmailRequirements = ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI", "AUTH_ENCRYPTION_KEY", "NEXT_PUBLIC_APP_URL", "SUPABASE_SERVICE_ROLE_KEY"];
 export function gmailCallback(config?: Record<string, string>) {
@@ -45,6 +45,11 @@ export function requireLoginMailbox(mailboxEmail: string, loginEmail: string) {
   if (!loginEmail || email.toLowerCase() !== loginEmail.toLowerCase()) throw new HttpError(409, `Connect the Google Workspace mailbox for your CRM login (${loginEmail}). A different email account cannot send as you.`);
   return email;
 }
+export function requireOAuthMailbox(mailboxEmail: string, loginEmail: string) {
+  const email = requireLoginMailbox(mailboxEmail, loginEmail);
+  if (!oauthMailboxEligible(email)) throw new HttpError(403, `Connect your own @${oauthMailboxDomain} Google Workspace mailbox using the same address as your CRM login.`);
+  return email;
+}
 export async function prepareGmailSend(admin: SupabaseClient, userId: string, loginEmail: string) {
   const config = await getIntegrationConfig("gmail");
   if (workspaceManaged(config)) return {
@@ -53,20 +58,21 @@ export async function prepareGmailSend(admin: SupabaseClient, userId: string, lo
   const { data: connection, error } = await admin.from("gmail_connections").select("user_id,email,encrypted_tokens").eq("user_id", userId).maybeSingle();
   databaseError(error);
   if (!connection) throw new HttpError(409, "Connect your Gmail mailbox in Integrations before sending email. Shared SMTP is not used for lead email.");
-  const email = requireLoginMailbox(connection.email, loginEmail);
+  const email = requireOAuthMailbox(connection.email, loginEmail);
   if (!connection.encrypted_tokens) throw new HttpError(409, "Workspace-managed access is disabled. Reconnect Gmail using your CRM login email.");
   const stored = z.object({ scope: z.string() }).safeParse(JSON.parse(decryptSession(connection.encrypted_tokens, gmailCryptoKey())));
   if (!stored.success || !stored.data.scope.split(" ").includes(gmailScopes[1])) throw new HttpError(409, "Reconnect Gmail and grant email sending permission.");
-  return { email, accessToken: await validGmailToken(admin, connection) };
+  return { email, accessToken: await validGmailToken(admin, connection, loginEmail) };
 }
 export async function currentGmailMailbox(admin: SupabaseClient, userId: string, loginEmail: string) {
   const config = await getIntegrationConfig("gmail");
   if (workspaceManaged(config)) return workspaceMailboxEligible(config, loginEmail)
     ? { email: workspaceMailbox(config, loginEmail), managed: true }
     : { email: "", managed: true, reason: "Managed Gmail is restricted to CRM login mailboxes in the configured Workspace domain." };
+  if (!oauthMailboxEligible(loginEmail)) return { email: "", managed: false, reason: `Gmail is available only for CRM login mailboxes under @${oauthMailboxDomain}.` };
   const { data, error } = await admin.from("gmail_connections").select("email,auth_mode").eq("user_id", userId).maybeSingle();
   databaseError(error);
-  return data && data.auth_mode !== "workspace" ? { email: data.email, managed: false } : null;
+  return data && data.auth_mode !== "workspace" && data.email.toLowerCase() === loginEmail.toLowerCase() ? { email: data.email, managed: false } : null;
 }
 
 export async function ensureWorkspaceSync(admin: SupabaseClient, userId: string, loginEmail: string) {
@@ -115,7 +121,7 @@ export async function gmailRequest<T>(accessToken: string, path: string): Promis
     headers: { Authorization: `Bearer ${accessToken}` }, cache: "no-store", signal: AbortSignal.timeout(20000),
   });
   if (response.status === 404) throw new HttpError(404, "Gmail history or message no longer exists.");
-  if (!response.ok) throw new HttpError(response.status === 429 ? 429 : 502, "Gmail request failed. Check mailbox consent, API access and Google quota.");
+  if (!response.ok) throw new HttpError(response.status === 429 ? 429 : 502, `Gmail request failed (Google HTTP ${response.status}). Check mailbox consent, API access and Google quota.`);
   return await response.json() as T;
 }
 export async function validGmailToken(admin: SupabaseClient, connection: { user_id: string; encrypted_tokens: string | null }, loginEmail?: string) {
@@ -125,6 +131,8 @@ export async function validGmailToken(admin: SupabaseClient, connection: { user_
     return delegatedGmailToken(config, loginEmail);
   }
   if (!connection.encrypted_tokens) throw new HttpError(409, "Workspace-managed access is disabled. Connect Gmail using your CRM login email.");
+  if (!loginEmail) throw new HttpError(403, "An authenticated CRM login mailbox is required.");
+  requireOAuthMailbox(loginEmail, loginEmail);
   const key = gmailCryptoKey();
   const tokens = parseInput(z.object({ access_token: z.string(), refresh_token: z.string(), expires_at: z.number(), scope: z.string().optional() }), JSON.parse(decryptSession(connection.encrypted_tokens, key)));
   if (tokens.expires_at > Date.now() + 60000) return tokens.access_token;

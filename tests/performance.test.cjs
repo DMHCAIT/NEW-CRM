@@ -74,6 +74,167 @@ test("prepared navigation reads expire after five seconds and manual refresh byp
   assert.equal((await api.apiRequest("/api/invoices", { usePrefetched: true })).version, 5);
 });
 
+test("completed preparations render synchronously without becoming a reusable financial cache", async () => {
+  let time = 1000, requests = 0;
+  const api = client(async () => ok({ version: ++requests }), { now: () => time });
+  assert.equal(api.getPreparedApiRead("/api/invoices"), undefined);
+  await api.prefetchApiRead("/api/invoices");
+  assert.equal(api.getPreparedApiRead("/api/invoices").version, 1);
+  assert.equal(api.getCachedApiRead("/api/invoices"), undefined);
+  await api.apiRequest("/api/invoices", { usePrefetched: true });
+  assert.equal(api.getPreparedApiRead("/api/invoices"), undefined);
+  await api.prefetchApiRead("/api/invoices");
+  time += 5000;
+  assert.equal(api.getPreparedApiRead("/api/invoices"), undefined);
+  await api.prefetchApiRead("/api/courses");
+  await api.apiRequest("/api/courses", { method: "POST", body: {} });
+  assert.equal(api.getPreparedApiRead("/api/courses"), undefined);
+  await api.prefetchApiRead("/api/users");
+  api.clearApiReadCache();
+  assert.equal(api.getPreparedApiRead("/api/users"), undefined);
+});
+
+test("operational screens render completed intent data immediately and consume it only once", async () => {
+  const saved = { invoices: [{ status: "sent" }] }, updates = [], effects = [];
+  const api = client(async () => ok(saved));
+  await api.prefetchApiRead("/api/invoices");
+  const { useOperationalData } = loadModule("src\\app\\integrations\\operational-ui.tsx", {
+    react: {
+      useState: initial => [typeof initial === "function" ? initial() : initial, value => updates.push(value)],
+      useRef: initial => ({ current: initial }), useCallback: callback => callback,
+      useEffect: effect => effects.push(effect),
+    },
+    "@/lib/crm-data": api,
+  });
+  const result = useOperationalData("/api/invoices");
+  assert.equal(result.loading, false);
+  assert.equal(result.data.invoices[0].status, "sent");
+  effects[0]();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(updates.includes(null), false);
+  assert.equal(updates.includes(true), false);
+  assert.equal(api.getPreparedApiRead("/api/invoices"), undefined);
+});
+
+test("lead typing and pagination request records only while metadata is fresh; refresh reloads metadata", async () => {
+  let time = 1000;
+  const reads = [];
+  const metadata = { leads: [{ id: "initial" }], stages: ["stage"], profiles: ["owner"], configuration: {}, user: { id: "owner" } };
+  const page = { leads: [{ id: "match" }], hasMore: false, nextCursor: null };
+  const api = client(async path => {
+    reads.push(path);
+    return ok(path.includes("metadata=0") ? page : metadata);
+  }, { now: () => time });
+  const { loadLeadListData, leadQueryPath, emptyFilter } = loadModule("src\\lib\\live-leads-client.tsx", {
+    react: {}, "@/lib/crm-data": api, "lucide-react": {},
+    "@/components/searchable-dropdown": {}, "@/lib/lead-filters": {}, "@/lib/lead-picklists": {},
+  }, { window: {}, Intl });
+  const base = leadQueryPath(emptyFilter());
+  await api.apiRequest(base, { maxAgeMs: 30000 });
+  const path = leadQueryPath({ ...emptyFilter(), query: "new employee" });
+  const result = await loadLeadListData(path, { maxAgeMs: 30000 });
+  assert.equal(result.leads[0].id, "match");
+  assert.deepEqual(result.profiles, metadata.profiles);
+  assert.equal(new URL(reads.at(-1), "http://crm.test").searchParams.get("metadata"), "0");
+  await loadLeadListData(path, { maxAgeMs: 30000 });
+  assert.equal(reads.length, 2, "repeat searches reuse their paginated response");
+  await loadLeadListData(path, { maxAgeMs: 0 });
+  assert.equal(reads.at(-1), path, "manual refresh must fetch current profiles, permissions and settings");
+  time += 30000;
+  await loadLeadListData(path, { maxAgeMs: 30000 });
+  assert.equal(reads.at(-1), path, "expired metadata must not be reused");
+  api.clearApiReadCache();
+  await loadLeadListData(path, { maxAgeMs: 30000 });
+  assert.equal(reads.at(-1), path);
+});
+
+test("live searches settle after 120 ms and cancel obsolete typing timers without Enter", () => {
+  const updates = [], effects = [], timers = new Map(), cleared = [];
+  let id = 0;
+  const { useDebouncedValue } = loadModule("src\\lib\\live-leads-client.tsx", {
+    react: { useState: initial => [initial, value => updates.push(value)], useEffect: effect => effects.push(effect) },
+    "@/lib/crm-data": {}, "lucide-react": {}, "@/components/searchable-dropdown": {},
+    "@/lib/lead-filters": {}, "@/lib/lead-picklists": {},
+  }, {
+    setTimeout: (callback, delay) => { timers.set(++id, { callback, delay }); return id; },
+    clearTimeout: timer => { timers.delete(timer); cleared.push(timer); },
+  });
+  useDebouncedValue("a");
+  const cleanup = effects.shift()();
+  assert.equal(timers.get(1).delay, 120);
+  cleanup();
+  assert.deepEqual(cleared, [1]);
+  useDebouncedValue("alex");
+  effects.shift()();
+  timers.get(2).callback();
+  assert.deepEqual(updates, ["alex"]);
+});
+
+test("top-bar search requests results on change without Enter and ignores late responses", async () => {
+  const React = require("react");
+  const states = [], refs = [], effects = [], requests = [], pending = new Map();
+  let stateIndex = 0, refIndex = 0;
+  const { GlobalLeadSearch } = loadModule("src\\components\\global-lead-search.tsx", {
+    react: {
+      ...React, useId: () => "search-results",
+      useState(initial) {
+        const key = stateIndex++;
+        if (!(key in states)) states[key] = typeof initial === "function" ? initial() : initial;
+        return [states[key], value => { states[key] = value; }];
+      },
+      useRef(initial) { const key = refIndex++; return refs[key] ?? (refs[key] = { current: initial }); },
+      useEffect: effect => effects.push(effect),
+    },
+    "next/link": { default: () => null }, "next/navigation": { usePathname: () => "/" },
+    "@/lib/crm-data": {
+      errorMessage: error => error.message,
+      apiRequest: path => {
+        const params = new URLSearchParams(path.split("?")[1]);
+        const query = JSON.parse(params.get("filter")).query;
+        assert.equal(params.get("metadata"), "0");
+        requests.push(query);
+        return new Promise((resolve, reject) => pending.set(query, { resolve, reject }));
+      },
+    },
+    "@/lib/live-leads-client": {
+      useDebouncedValue: value => value,
+      emptyFilter: () => ({ criteria: [], query: "" }),
+      leadQueryPath: filter => `/api/leads?${new URLSearchParams({ filter: JSON.stringify(filter) })}`,
+    },
+  });
+  const nodes = [];
+  function collect(node) {
+    if (Array.isArray(node)) { node.forEach(collect); return; }
+    if (!node?.props) return;
+    nodes.push(node); collect(node.props.children);
+  }
+  const render = () => {
+    stateIndex = refIndex = 0; effects.length = nodes.length = 0;
+    collect(GlobalLeadSearch());
+    return nodes.find(node => node.type === "input");
+  };
+  render().props.onChange({ target: { value: "old" } });
+  render();
+  const cleanup = effects[1]();
+  assert.deepEqual(requests, ["old"]);
+  render().props.onChange({ target: { value: "new employee" } });
+  render(); cleanup(); effects[1]();
+  pending.get("new employee").resolve({ leads: [{ id: "new", name: "New employee", email: "new@example.com" }], hasMore: false });
+  await new Promise(resolve => setImmediate(resolve));
+  pending.get("old").resolve({ leads: [{ id: "old", name: "Old response" }], hasMore: false });
+  await new Promise(resolve => setImmediate(resolve));
+  render();
+  assert.ok(nodes.some(node => node.props.href === "/leads/new"));
+  assert.ok(!nodes.some(node => node.props.href === "/leads/old"));
+  assert.ok(nodes.some(node => node.props.href === "/leads?q=new%20employee"));
+  nodes.find(node => node.props.onKeyDown).props.onKeyDown({ key: "Escape" });
+  render();
+  assert.ok(!nodes.some(node => node.props.id === "search-results"));
+  render().props.onChange({ target: { value: "" } });
+  render(); effects[1]();
+  assert.equal(requests.length, 2, "clearing search must not fetch the entire lead list");
+});
+
 test("an in-flight navigation read is consumed without launching another request", async () => {
   let release, requests = 0;
   const api = client(async () => {
@@ -511,6 +672,7 @@ test("sidebar opts into full route prefetch only on intent and prepares one-use 
     "@/components/role-preview-context": { RolePreviewContext: React.createContext(null) },
     "@/lib/crm-data": api,
     "@/components/section-loading": loadModule("src\\components\\section-loading.tsx", {}),
+    "@/components/global-lead-search": { GlobalLeadSearch: () => null },
   });
   const props = { children: null, user: {
     id: "actor", profile: { role: "counselor", fullName: "Counselor" },
@@ -586,6 +748,7 @@ test("a section click immediately replaces the old page with its destination, wh
     "@/lib/navigation": loadModule("src\\lib\\navigation.ts", {}),
     "@/components/role-preview-context": { RolePreviewContext: React.createContext(null) },
     "@/components/section-loading": loadModule("src\\components\\section-loading.tsx", {}),
+    "@/components/global-lead-search": { GlobalLeadSearch: () => null },
     "@/lib/crm-data": { apiRequest: async path => { requests.push(path); }, prefetchApiRead: async path => { requests.push(path); }, clearApiReadCache() {}, errorMessage: error => error.message },
   }, { Element: Anchor, window: { location: new URL("http://localhost/") } });
   const user = { id: "actor", profile: { role: "admin", fullName: "CRM Admin" }, permissions: ["dashboard.view", "invoices.view"] };
@@ -628,10 +791,10 @@ test("operational screens ignore old responses after a section or lead changes a
     react: { useRef: () => ref, useCallback: callback => callback, useEffect: effect => effects.push(effect),
       useState(initial) {
         const key = index++;
-        if (!(key in states)) states[key] = initial;
+        if (!(key in states)) states[key] = typeof initial === "function" ? initial() : initial;
         return [states[key], value => { states[key] = value; }];
       } },
-    "@/lib/crm-data": { apiRequest: (url, options) => {
+    "@/lib/crm-data": { getPreparedApiRead: () => undefined, apiRequest: (url, options) => {
       reads.push({ url, options });
       return new Promise(resolve => pending.set(url, resolve));
     } },

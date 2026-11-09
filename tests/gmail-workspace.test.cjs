@@ -225,6 +225,82 @@ test("managed mode refuses new OAuth connections and pending callbacks before cr
   assert.equal((await callback.GET(new Request("https://crm.example"))).status, 409);
 });
 
+test("OAuth connect accepts new domain users, supplies Google domain hint and requires credentials", async () => {
+  const oauthConfig = {
+    GOOGLE_MAILBOX_MODE: "oauth", GOOGLE_CLIENT_ID: "test-client", GOOGLE_CLIENT_SECRET: "test-secret",
+    GOOGLE_REDIRECT_URI: "https://crm.example/api/auth/gmail/callback",
+  };
+  let email = "new.employee@dmhca.in", writes = 0;
+  const query = { delete: () => query, lt: async () => ({ error: null }),
+    insert: async row => { writes++; assert.equal(row.user_id, user.id); return { error: null }; } };
+  const mocks = {
+    "@/lib/server/auth": { ...auth, requireUser: async () => ({ user: { ...user, email }, supabase: {} }) },
+    "@/lib/server/integration-settings": {
+      getIntegrationConfig: async () => oauthConfig,
+      requireIntegrationValue: (values, name) => {
+        if (!values[name]) throw new HttpError(503, `${name} is not configured`);
+        return values[name];
+      },
+    },
+    "@/lib/server/operational-gmail": {
+      ...load("src\\lib\\server\\operational-gmail.ts"),
+      crmSessionId: async () => "verified-session",
+    },
+    "@/lib/server/login": { checkOrigin: () => {} },
+    "@/lib/supabase/server": { getSupabaseAdminClient: () => ({ from: () => query }) },
+    "next/headers": { cookies: async () => ({ set: () => {} }) },
+  };
+  const route = load("src\\app\\api\\integrations\\gmail\\connect\\route.ts", mocks);
+  const request = () => new Request("https://crm.example", { method: "POST" });
+  const url = new URL((await route.POST(request())).data.url);
+  assert.equal(url.searchParams.get("hd"), "dmhca.in");
+  assert.equal(url.searchParams.get("login_hint"), email);
+  assert.equal(url.searchParams.get("client_id"), "test-client");
+  assert.equal(url.searchParams.get("code_challenge_method"), "S256");
+  assert.equal(url.searchParams.get("access_type"), "offline");
+  assert.equal(url.searchParams.has("client_secret"), false);
+  assert.equal(writes, 1);
+  email = "outsider@gmail.com";
+  assert.equal((await route.POST(request())).status, 403);
+  email = "another.new.employee@dmhca.in";
+  oauthConfig.GOOGLE_CLIENT_ID = "";
+  assert.equal((await route.POST(request())).status, 503);
+  oauthConfig.GOOGLE_CLIENT_ID = "test-client";
+  oauthConfig.GOOGLE_CLIENT_SECRET = "";
+  assert.equal((await route.POST(request())).status, 503);
+  assert.equal(writes, 1, "Rejected accounts and missing setup must not create OAuth state");
+});
+
+test("OAuth status hides old outside-domain mailboxes and disables connect and sync", async () => {
+  let email = "outside@gmail.com";
+  const query = { select: () => query, eq: () => query, order: () => query,
+    limit: async () => ({ data: [{ subject: "old mail" }], error: null }),
+    maybeSingle: async () => ({ data: { email, auth_mode: "oauth" }, error: null }) };
+  const mocks = {
+    "@/lib/server/auth": { ...auth, requireUser: async () => ({ user: { ...user, email }, supabase: { from: () => query } }) },
+    "@/lib/server/integration-settings": { getIntegrationConfig: async () => ({ GOOGLE_MAILBOX_MODE: "oauth" }) },
+    "@/lib/server/login": { checkOrigin: () => {} },
+    "@/lib/supabase/server": { getSupabaseAdminClient: () => ({ from: () => query }) },
+  };
+  const route = load("src\\app\\api\\integrations\\gmail\\route.ts", mocks);
+  const outside = (await route.GET()).data;
+  assert.equal(outside.canConnect, false);
+  assert.equal(outside.canSync, false);
+  assert.equal(outside.connection, null);
+  assert.deepEqual(outside.messages, []);
+  assert.match(outside.unavailableReason, /@dmhca.in/);
+  const api = load("src\\lib\\server\\operational-gmail.ts", mocks);
+  const mailbox = await api.currentGmailMailbox({}, user.id, email);
+  assert.equal(mailbox.email, "");
+  assert.match(mailbox.reason, /@dmhca.in/);
+  await assert.rejects(api.validGmailToken({}, { user_id: user.id, encrypted_tokens: "must-not-decrypt" }, email), error => error.status === 403);
+  email = "new.employee@dmhca.in";
+  const inside = (await route.GET()).data;
+  assert.equal(inside.canConnect, true);
+  assert.equal(inside.canSync, true);
+  assert.equal(inside.connection.email, email);
+});
+
 test("sync automatically initializes only the authenticated mailbox and commits under its lease", async () => {
   const writes = [], commits = [];
   let connectionEmail = user.email, cleaned = 0, tokenRequests = 0;

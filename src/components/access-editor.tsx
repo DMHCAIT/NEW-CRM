@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { apiRequest, errorMessage } from "@/lib/crm-data";
+import { apiRequest, errorMessage, getPreparedApiRead } from "@/lib/crm-data";
 import type { Profile } from "@/lib/types";
 import { SettingsNav } from "@/components/settings-nav";
 import { SearchableDropdown } from "@/components/searchable-dropdown";
@@ -15,13 +15,13 @@ type AccessData = {
 const roles = ["counselor", "team_lead", "manager", "admin"];
 
 export function AccessEditor({ individual = false }: { individual?: boolean }) {
-  const [data, setData] = useState<AccessData | null>(null);
+  const [data, setData] = useState<AccessData | null>(() => getPreparedApiRead<AccessData>("/api/access") ?? null);
   const [selected, setSelected] = useState(individual ? "" : "counselor");
   const [grants, setGrants] = useState<Record<string, boolean>>({});
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
-  useEffect(() => { apiRequest<AccessData>("/api/access").then(setData).catch((error) => setError(errorMessage(error, "Could not load access settings."))); }, []);
+  useEffect(() => { apiRequest<AccessData>("/api/access", { usePrefetched: true }).then(setData).catch((error) => setError(errorMessage(error, "Could not load access settings."))); }, []);
   function choose(value: string) {
     setSelected(value); setMessage("");
     const rows = individual ? data?.overrides.filter((row) => row.user_id === value) : data?.roles.filter((row) => row.role === value);

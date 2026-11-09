@@ -217,7 +217,7 @@ test("Gmail history follows page tokens, records deletes and advances only at fi
 
 test("Gmail errors do not manufacture message data or advance the history cursor", async () => {
   const api = gmail(async () => new Response("", { status: 503 }));
-  await assert.rejects(api.gmailSyncPage("token", { mode: "history" }, "100"), /Gmail request failed/);
+  await assert.rejects(api.gmailSyncPage("token", { mode: "history" }, "100"), /Gmail request failed \(Google HTTP 503\)/);
 });
 
 test("personal mailbox connection is available to lead editors but not viewers", () => {
@@ -271,17 +271,32 @@ test("personal Gmail sender uses only the current user's connection and rejects 
     const chain = { select: () => chain, eq: (column, value) => { assert.equal(column, "user_id"); assert.equal(value, "signed-in-user"); return chain; }, maybeSingle: async () => ({ data: connection, error: null }) };
     return chain;
   } };
-  await assert.rejects(api.prepareGmailSend(admin, "signed-in-user", "actual-mailbox@gmail.com"), /Connect your Gmail/);
+  await assert.rejects(api.prepareGmailSend(admin, "signed-in-user", "actual-mailbox@dmhca.in"), /Connect your Gmail/);
   const tokens = { access_token: "personal-token", refresh_token: "refresh", expires_at: Date.now() + 3600000, scope: "https://www.googleapis.com/auth/gmail.readonly" };
-  connection = { user_id: "signed-in-user", email: "actual-mailbox@gmail.com", encrypted_tokens: cryptoHelpers.encryptSession(JSON.stringify(tokens), key) };
-  await assert.rejects(api.prepareGmailSend(admin, "signed-in-user", "actual-mailbox@gmail.com"), /Reconnect Gmail/);
+  connection = { user_id: "signed-in-user", email: "actual-mailbox@dmhca.in", encrypted_tokens: cryptoHelpers.encryptSession(JSON.stringify(tokens), key) };
+  await assert.rejects(api.prepareGmailSend(admin, "signed-in-user", "actual-mailbox@dmhca.in"), /Reconnect Gmail/);
   tokens.scope += " https://www.googleapis.com/auth/gmail.send";
   connection.encrypted_tokens = cryptoHelpers.encryptSession(JSON.stringify(tokens), key);
-  const sender = await api.prepareGmailSend(admin, "signed-in-user", "ACTUAL-MAILBOX@gmail.com");
-  assert.equal(sender.email, "actual-mailbox@gmail.com");
+  const sender = await api.prepareGmailSend(admin, "signed-in-user", "ACTUAL-MAILBOX@DMHCA.IN");
+  assert.equal(sender.email, "actual-mailbox@dmhca.in");
   assert.equal(sender.accessToken, "personal-token");
   connection.encrypted_tokens = "must-not-decrypt-mismatched-mailbox";
   await assert.rejects(api.prepareGmailSend(admin, "signed-in-user", "other-counselor@dmhca.in"), /mailbox for your CRM login/);
+  connection.email = "old-mailbox@gmail.com";
+  await assert.rejects(api.prepareGmailSend(admin, "signed-in-user", connection.email), error => error.status === 403 && /@dmhca.in/.test(error.message));
+  await assert.rejects(api.validGmailToken(admin, connection, connection.email), error => error.status === 403);
+});
+
+test("OAuth accepts any exact-domain mailbox matching the CRM login, not lookalikes or subdomains", () => {
+  const api = gmail(() => assert.fail("No provider call expected"));
+  for (const email of ["new.employee@dmhca.in", "admissions+team@dmhca.in", "FINANCE@DMHCA.IN"]) {
+    assert.equal(api.requireOAuthMailbox(email, email.toLowerCase()), email);
+  }
+  for (const email of ["owner@gmail.com", "owner@otherdmhca.in", "owner@sub.dmhca.in", "owner@dmhca.in.example.com"]) {
+    assert.throws(() => api.requireOAuthMailbox(email, email), error => error.status === 403 && /@dmhca.in/.test(error.message));
+  }
+  assert.throws(() => api.requireOAuthMailbox("other@dmhca.in", "owner@dmhca.in"), error => error.status === 409);
+  assert.throws(() => api.requireOAuthMailbox("owner@dmhca.in\r\n", "owner@dmhca.in"), error => error.status === 400);
 });
 
 test("Google Workspace mailbox must match each counselor's login email", () => {
@@ -310,6 +325,7 @@ test("Gmail OAuth callback rejects wrong-browser state before service access or 
 
 test("Gmail OAuth checks login mailbox before storing tokens and consumes verified-session-bound state once", async () => {
   let consumed = false, exchanges = 0, saved;
+  let loginEmail = "owner@dmhca.in";
   let mailboxEmail = "someone-else@gmail.com";
   const state = "a".repeat(43);
   const cryptoHelpers = load("src/lib/server/login-crypto.ts");
@@ -318,7 +334,7 @@ test("Gmail OAuth checks login mailbox before storing tokens and consumes verifi
     "next/server": { NextResponse: { json: (value) => value, redirect: (url) => ({ redirect: url }) } },
     "next/headers": { cookies: async () => ({ get: () => ({ value: state }), set: () => {} }) },
     "@/lib/server/auth": { ...auth, requireUser: async (permission) => {
-      assert.equal(permission, undefined); return { user: { id: "verified-owner", email: "owner@gmail.com", permissions: ["leads.edit", "integrations.view"] }, supabase: {} };
+      assert.equal(permission, undefined); return { user: { id: "verified-owner", email: loginEmail, permissions: ["leads.edit", "integrations.view"] }, supabase: {} };
     } },
     "@/lib/server/login-crypto": cryptoHelpers,
     "@/lib/server/env": { appUrl: () => "https://crm.example" },
@@ -326,7 +342,7 @@ test("Gmail OAuth checks login mailbox before storing tokens and consumes verifi
     "@/lib/server/operational-gmail": {
       gmailCookie: "crm_gmail_oauth", crmSessionId: async () => "verified-session", oauthStateHash: (value) => "hash-" + value,
       canConnectMailbox() {}, gmailScopes: ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.send"],
-      requireLoginMailbox: gmail(() => assert.fail("No provider call expected")).requireLoginMailbox,
+      requireOAuthMailbox: gmail(() => assert.fail("No provider call expected")).requireOAuthMailbox,
       gmailCryptoKey: () => key, gmailCallback: () => "https://crm.example/api/auth/gmail/callback",
       googleTokenRequest: async (input) => {
         exchanges++; assert.equal(input.code_verifier, "pkce-verifier");
@@ -355,14 +371,17 @@ test("Gmail OAuth checks login mailbox before storing tokens and consumes verifi
   assert.equal(mismatch.status, 409);
   assert.equal(saved, undefined);
   assert.equal(consumed, true);
-  consumed = false; mailboxEmail = "owner@gmail.com";
+  consumed = false; mailboxEmail = loginEmail = "outside@gmail.com";
+  assert.equal((await route.GET(request())).status, 403);
+  assert.equal(saved, undefined, "A matching outside-domain profile must not save tokens even if Google ignores hd");
+  consumed = false; mailboxEmail = loginEmail = "owner@dmhca.in";
   assert.equal((await route.GET(request())).redirect, "https://crm.example/integrations?gmail=connected");
-  assert.equal(exchanges, 2);
+  assert.equal(exchanges, 3);
   assert.equal(saved.p_user_id, "verified-owner");
   assert.equal(saved.p_encrypted_tokens.includes("private-access-token"), false);
   const tokens = JSON.parse(cryptoHelpers.decryptSession(saved.p_encrypted_tokens, key));
   assert.equal(tokens.refresh_token, "private-refresh-token");
   assert.ok(tokens.scope.includes("gmail.send"));
   assert.equal((await route.GET(request())).status, 403);
-  assert.equal(exchanges, 2);
+  assert.equal(exchanges, 3);
 });

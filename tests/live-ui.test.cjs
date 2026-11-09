@@ -84,6 +84,7 @@ const crm = {
   formatDateTime: (value) => value ? new Date(value).toLocaleString("en-IN") : "",
   apiRequest: async () => ({}), errorMessage: (error) => error.message,
   getCachedApiRead: () => undefined,
+  getPreparedApiRead: () => undefined,
   fetchLeads: async () => [lead], fetchStages: async () => stages,
   fetchProfiles: async () => [profile],
 };
@@ -1854,7 +1855,7 @@ test("searchable dropdown portals into its dialog and supports filtering, scroll
   let stateIndex = 0, refIndex = 0, target, selected;
   const refs = [{ current: { closest: selector => { assert.equal(selector, "dialog"); return dialog; } } }, { current: { focus() {} } }];
   const { SearchableDropdown } = load("src\\components\\searchable-dropdown.tsx", {
-    react: { ...React, useEffect() {}, useLayoutEffect() {}, useId: () => "test-options",
+    react: { ...React, useEffect() {}, useLayoutEffect() {}, useId: () => "test-options", useMemo: factory => factory(),
       useState(initial) { const key = stateIndex++; if (!(key in states)) states[key] = initial; return [states[key], value => { states[key] = value; }]; },
       useRef(initial) { const key = refIndex++; return refs[key] ?? (refs[key] = { current: initial }); },
     },
@@ -2510,7 +2511,8 @@ test("lead viewers see owner labels, not editable fields or compose actions", as
   });
   assert.match(html, /Read only/);
   assert.match(html, /Admissions Administrator/);
-  assert.doesNotMatch(html, /<input|Autosave enabled|Edit lead|Save lead/);
+  const content = html.slice(html.indexOf('<main id="workspace-content"'));
+  assert.doesNotMatch(content, /<input|Autosave enabled|Edit lead|Save lead/);
 });
 
 test("ordinary admins can view device history but cannot see revocation controls", async () => {

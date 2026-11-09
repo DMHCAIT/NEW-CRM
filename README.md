@@ -73,6 +73,10 @@ Operational sections start fresh data reads on hover, focus, touch or click.
 The destination consumes that preparation once, even if it finishes before the
 route mounts; a completed preparation expires after five seconds. This bounded,
 20-entry browser-only handoff is not a reusable financial response cache.
+Completed preparations also provide the destination's first render synchronously,
+avoiding another loading flash in operational pages, Users, Reports and Settings.
+Access settings and administrator integration panels participate in intent-based
+preparation; no background sweep of every page or mailbox is started.
 Later visits, manual refreshes, polling and post-write refreshes read current
 records. Identity changes, authorization failures and writes discard preparations,
 including preparations still in flight.
@@ -87,6 +91,17 @@ criteria and role scope; an invalid filter shows an error without requesting all
 Operational pages show a section skeleton until their initial response arrives
 instead of rendering empty/default records. Responses from a previous URL cannot
 replace newer operational data.
+
+The top-bar lead search shows up to six matching leads as you type, with a link
+to all matching results. Enter is not required. Lead and Pipeline server searches
+wait 120 ms after typing pauses to avoid a request for every keystroke.
+Local searches (users, courses, invoices, staff and dropdown options) filter
+immediately. Lead searches and pagination reuse the initial list's metadata
+while its 30-second browser snapshot is valid, requesting only paginated records
+instead of reloading profiles, stages and settings on each query. Refresh and
+mutations bypass/invalidate that snapshot. Search responses remain permission-
+checked on the server; late responses cannot replace a newer query.
+
 Protected-page middleware loads verified session, active profile and current
 permissions in parallel after authentication. It passes that result to Server
 Components through a request-only header. Both the root layout and server-page
@@ -1156,6 +1171,20 @@ email history are not automatically deleted by changing the mode.
 See Google's [domain-wide delegation documentation](https://developers.google.com/identity/protocols/oauth2/service-account#delegatingauthority).
 
 #### Per-user Gmail OAuth (default)
+
+All Google-hosted `@dmhca.in` mailboxes are eligible without an individual CRM
+allowlist, including newly created addresses. Each user must sign in to CRM
+with that same address and authorize their own mailbox. Other domains,
+subdomains and mismatched addresses are rejected before OAuth connection,
+token storage, sending or synchronization. Existing out-of-domain OAuth
+connections are not usable. Recipient addresses are not restricted.
+
+The client ID and secret can be supplied later; until configured, Gmail
+connection, sending and synchronization remain unavailable with setup errors.
+This does not provision mailboxes or bypass Google's authorization.
+For organization-only access, configure the Google OAuth audience as Internal
+for the Workspace organization; External apps in Testing still require Google
+test users even though CRM has no individual address allowlist.
 
 Enable Gmail API in Google Cloud, configure the OAuth consent screen and its
 test users or approved production audience, and save `GOOGLE_CLIENT_ID`,

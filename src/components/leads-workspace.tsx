@@ -9,7 +9,7 @@ import { StageBadge } from "@/components/lead-helpers";
 import { apiRequest, formatDateTime } from "@/lib/crm-data";
 import { criterionError, type SavedLeadFilter } from "@/lib/lead-filters";
 import { REPORT_COLUMNS, type ReportColumn } from "@/lib/reports";
-import { LiveFilterEditor, downloadLiveCsv, emptyFilter, leadQueryPath, useDebouncedValue, useLiveLeadData } from "@/lib/live-leads-client";
+import { LiveFilterEditor, downloadLiveCsv, emptyFilter, leadQueryPath, loadLeadListData, useDebouncedValue, useLiveLeadData } from "@/lib/live-leads-client";
 import type { LeadCursor } from "@/lib/server/lead-query";
 
 export default function LeadsWorkspace({ initialFilter, dashboard = false }: { initialFilter?: SavedLeadFilter; dashboard?: boolean } = {}) {
@@ -30,14 +30,14 @@ export default function LeadsWorkspace({ initialFilter, dashboard = false }: { i
   const dashboardView = dashboard;
   const [cursors, setCursors] = useState<(LeadCursor | null)[]>([null]);
   const validation = filter.criteria.map(criterionError).find(Boolean);
-  const queryFilter = useDebouncedValue(filter, 250, !validation);
+  const queryFilter = useDebouncedValue(filter, 120, !validation);
   const path = leadQueryPath(queryFilter, { cursor: cursors[page], dashboard });
-  const { data, loading, error, reload, setError } = useLiveLeadData(path);
+  const { data, loading, error, reload, setError } = useLiveLeadData(path, loadLeadListData);
   useEffect(() => {
-    if (!data?.nextCursor || !data.hasMore || loading) return;
+    if (!data?.nextCursor || !data.hasMore || loading || queryFilter !== filter) return;
     const nextPath = leadQueryPath(queryFilter, { cursor: data.nextCursor, dashboard });
-    void apiRequest(nextPath, { maxAgeMs: 30000 }).catch((e: unknown) => setError(e instanceof Error ? e.message : "Could not prefetch the next page."));
-  }, [data, loading, queryFilter, dashboard, setError]);
+    void loadLeadListData(nextPath, { maxAgeMs: 30000 }).catch((e: unknown) => setError(e instanceof Error ? e.message : "Could not prefetch the next page."));
+  }, [data, loading, queryFilter, filter, dashboard, setError]);
   const [bulkAction, setBulkAction] = useState<"transfer" | "stage" | "delete" | null>(null);
   const bulkDialogRef = useRef<HTMLDialogElement>(null);
   useEffect(() => {

@@ -1,7 +1,7 @@
 "use client";
 
 import { Check, ChevronDown, Search } from "lucide-react";
-import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 
 type DropdownOption = { value: string; label: string; disabled?: boolean };
@@ -46,9 +46,10 @@ export function SearchableDropdown(props: SingleSelectProps | MultiSelectProps) 
   const triggerLabel = props.multiple
     ? selectedLabels.length ? selectedLabels.join(", ") : props.placeholder
     : selectedLabels[0] ?? props.placeholder;
-  const filteredOptions = [...props.options]
-    .sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" }))
-    .filter((option) => option.label.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()));
+  const sortedOptions = useMemo(() => [...props.options]
+    .sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" })), [props.options]);
+  const normalizedSearch = search.trim().toLocaleLowerCase();
+  const filteredOptions = sortedOptions.filter(option => option.label.toLocaleLowerCase().includes(normalizedSearch));
 
   useLayoutEffect(() => {
     if (!open) return;

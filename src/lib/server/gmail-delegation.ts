@@ -6,6 +6,10 @@ export const delegatedGmailScopes = [
   "https://www.googleapis.com/auth/gmail.readonly",
   "https://www.googleapis.com/auth/gmail.send",
 ];
+export const oauthMailboxDomain = "dmhca.in";
+export function oauthMailboxEligible(loginEmail: string) {
+  return workspaceMailboxEligible({ GOOGLE_WORKSPACE_DOMAIN: oauthMailboxDomain }, loginEmail);
+}
 const tokenEndpoint = "https://oauth2.googleapis.com/token";
 const serviceAccountSchema = z.object({
   type: z.literal("service_account"),
