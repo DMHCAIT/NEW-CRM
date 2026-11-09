@@ -46,7 +46,7 @@ function paymentUrl(value: string) {
 
 export async function verifyInvoicePaymentUrl(invoice: Invoice, value: string): Promise<VerifiedPayment> {
   const url = paymentUrl(value);
-  if (invoice.currency === "INR" && ["rzp.io", "rzp.in", "payments.razorpay.com"].includes(url.hostname)) {
+  if (["INR", "USD"].includes(invoice.currency) && ["rzp.io", "rzp.in", "payments.razorpay.com", "pages.razorpay.com", "razorpay.com"].includes(url.hostname)) {
     let found: z.infer<typeof razorpayLink> | undefined;
     for (let page = 0; page < 10; page++) {
       const result = providerData(z.object({ items: z.array(razorpayLink) }),
@@ -88,7 +88,7 @@ export async function verifyInvoicePaymentUrl(invoice: Invoice, value: string): 
     if (matches.length !== 1) throw new HttpError(409, matches.length ? "Multiple matching payments. Paste the specific Stripe Checkout session URL." : "No matching paid payment exists for this lead, amount and currency.");
     return verifyStripeSession(invoice, matches[0].id, value);
   }
-  throw new HttpError(400, "Use a company Razorpay link for INR or Stripe link for USD. Other payments require admin verification with a reference and evidence.");
+  throw new HttpError(400, "Use a company Razorpay payment link. Historical Stripe payments can be reconciled with their original URL; other payments require admin evidence.");
 }
 
 async function verifyRazorpayLink(invoice: Invoice, id: string, url: string): Promise<VerifiedPayment> {
@@ -120,7 +120,7 @@ export async function verifySavedInvoicePayment(invoice: Invoice & {
   razorpay_payment_link_id?: string | null; razorpay_short_url?: string | null;
   stripe_session_id?: string | null; stripe_checkout_url?: string | null;
 }) {
-  if (invoice.currency === "INR" && invoice.razorpay_payment_link_id)
+  if (["INR", "USD"].includes(invoice.currency) && invoice.razorpay_payment_link_id)
     return verifyRazorpayLink(invoice, invoice.razorpay_payment_link_id, invoice.razorpay_short_url ?? "");
   if (invoice.currency === "USD" && invoice.stripe_session_id)
     return verifyStripeSession(invoice, invoice.stripe_session_id, invoice.stripe_checkout_url ?? "");

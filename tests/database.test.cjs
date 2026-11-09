@@ -75,6 +75,59 @@ before(async () => {
 
 after(async () => { if (db) await db.close(); });
 
+test("company-specific prices are authoritative and missing IBMP fees never fall back to DMHCA", async () => {
+  const course = (await db.query("insert into public.courses(name,price_inr,price_usd) values($1,1000,25) returning id",
+    [`Separate pricing ${randomUUID()}`])).rows[0].id;
+  const input = { ...invoiceDefaults, lead_id: leadId, course_id: course, due_date: "2026-12-31" };
+  const create = async values => (await asUser(counselorId,counselorSession,tx => tx.query(
+    "select public.operational_create_invoice($1::jsonb) as id", [JSON.stringify({ ...input, ...values })]))).rows[0].id;
+  await assert.rejects(create({ company_code: "IBMP", currency: "USD" }), /Set the IBMP USD price/);
+  await assert.rejects(create({ company_code: "IBMP", currency: "INR" }), /IBMP invoices use USD only/);
+  await assert.rejects(savePlan({ ...input, company_code: "IBMP", currency: "INR", payment_type: "installments",
+    request_id: randomUUID(), installments: [{ amount: 10, invoice_date: scheduleToday() }] }), /IBMP invoices use USD only/);
+  await db.query("update public.courses set price_ibmp_usd=40 where id=$1",[course]);
+  const cases = [["DMHCA","INR",1180],["DMHCA","USD",25],["IBMP","USD",40]];
+  for (const [company_code,currency,total] of cases) {
+    const id = await create({ company_code,currency,unit_price:0.01 });
+    const saved = (await db.query("select total,company_code,company_snapshot from public.invoices where id=$1",[id])).rows[0];
+    assert.equal(Number(saved.total),total);
+    assert.equal(saved.company_code,company_code);
+    assert.equal(saved.company_snapshot.code,"DMHCA");
+  }
+  const ids = await savePlan({ ...input, company_code:"IBMP",currency:"USD",payment_type:"installments",request_id:randomUUID(),
+    installments:[{amount:10,invoice_date:scheduleToday()}] });
+  await db.query("update public.courses set price_ibmp_usd=80 where id=$1",[course]);
+  const children = await savePlan({ ...input, company_code:"IBMP",currency:"USD",payment_type:"installments",parent_invoice_id:ids[0],
+    request_id:randomUUID(),installments:[{amount:30,invoice_date:scheduleToday()}] });
+  const child = (await db.query("select course_total,enrollment_subtotal,total,company_code from public.invoices where id=$1",[children[0]])).rows[0];
+  assert.deepEqual(child,{course_total:"40.00",enrollment_subtotal:"40.00",total:"30.00",company_code:"IBMP"});
+  const verified = await db.query("select public.operational_record_verified_url($1,'razorpay','pay_usd_pricing','plink_usd_pricing',3000,'USD','https://rzp.io/i/test','{}') as recorded",[children[0]]);
+  assert.equal(verified.rows[0].recorded,true);
+  assert.equal((await db.query("select status from public.invoices where id=$1",[children[0]])).rows[0].status,"paid");
+});
+
+test("invoice document fields and bank profiles are snapshotted without changing historical installments", async () => {
+  const input = await newPlanFixture();
+  const invoice_profile = { billing_email: "billing@example.com", bank_accounts: [{ account_name: "Test holder", bank_name: "Test Bank", account_number: "FIXTURE-ONLY" }] };
+  await db.query("update public.invoice_companies set invoice_profile=$1 where code='DMHCA'", [JSON.stringify(invoice_profile)]);
+  const document_details = { student_id: "STUDENT-ONLY", place_of_supply: "Example State", course_details: "12 months / online", sac_code: "TEST-SAC" };
+  const ids = await savePlan({ ...input, installments: [input.installments[0]], document_details });
+  const original = (await db.query("select document_details,company_snapshot from public.invoices where id=$1", [ids[0]])).rows[0];
+  assert.equal(original.document_details.billing_phone, "1234567890");
+  assert.equal(original.document_details.student_id, "STUDENT-ONLY");
+  assert.deepEqual(original.company_snapshot.invoice_profile, invoice_profile);
+  await db.exec("update public.invoice_companies set invoice_profile='{}' where code='DMHCA'");
+  await savePlan({ ...input, installments: [input.installments[0]], document_details: { student_id: "CHANGED-RETRY" } });
+  assert.deepEqual((await db.query("select document_details from public.invoices where id=$1", [ids[0]])).rows[0].document_details, original.document_details);
+  const next = await savePlan({ ...input, request_id: randomUUID(), installments: [input.installments[1]], parent_invoice_id: ids[0] });
+  const child = (await db.query("select document_details,company_snapshot from public.invoices where id=$1", [next[0]])).rows[0];
+  assert.deepEqual(child, original);
+  const invalid = await newPlanFixture();
+  await assert.rejects(savePlan({ ...invalid, document_details: { student_id: "x".repeat(101) } }), /Invalid invoice detail/);
+  assert.equal((await db.query("select id from public.invoices where course_id=$1", [invalid.course_id])).rows.length, 0);
+  await assert.rejects(asUser(counselorId, counselorSession, tx => tx.query("select public.operational_create_documentless_installment_plan($1)", [JSON.stringify(input)])), /permission denied/);
+});
+
 test("scheduled plans are atomic, idempotent and preserve exact amounts and India-time deadlines", async () => {
   const input = await newPlanFixture();
   await assert.rejects(savePlan({ ...input, installments: [{ ...input.installments[0], amount: 60 }, input.installments[1]] }), /unallocated course balance/);
@@ -429,7 +482,7 @@ test("installments reserve every unpaid invoice and cannot exceed the original c
   await assert.rejects(create({ ...base, unit_price: 255, parent_invoice_id: firstId }), /unallocated course balance/);
   await db.query("update public.invoices set status='paid',paid_at=now() where id=$1", [firstId]);
   await assert.rejects(create({ ...base, unit_price: 255, parent_invoice_id: firstId }), /unallocated course balance/);
-  await assert.rejects(create({...base,unit_price:50,parent_invoice_id:firstId,company_code:"IBMP"}),/original course, company and currency/);
+  await assert.rejects(create({...base,unit_price:50,parent_invoice_id:firstId,company_code:"IBMP"}),/IBMP invoices use USD only/);
   await assert.rejects(create({...base,unit_price:50,parent_invoice_id:firstId,currency:"USD"}),/original course, company and currency/);
   await db.query("update public.courses set price_inr=50,is_active=false where id=$1",[installmentCourseId]);
   const second = await create({ ...base, unit_price: 150, parent_invoice_id: firstId });
@@ -599,29 +652,32 @@ test("installment provider payments mark only the exact installment Paid and ret
 });
 
 test("catalog prices override forged browser amounts and snapshot billing/company details", async () => {
+  await db.query("update public.courses set price_ibmp_usd=35 where id=$1",[courseId]);
   const result = await asUser(counselorId,counselorSession,tx => tx.query(
     "select public.operational_create_invoice($1::jsonb) as id",
     [JSON.stringify({ ...invoiceDefaults, lead_id: leadId, currency: "USD", company_code: "IBMP", unit_price: 0.01,
       quantity: 9999, description: "Forged description", due_date: "2026-12-31", save_billing_address: true })]));
   const id = result.rows[0].id;
   const invoice = (await db.query("select * from public.invoices where id=$1",[id])).rows[0];
-  assert.equal(invoice.total,"20.00");
+  assert.equal(invoice.total,"35.00");
   assert.equal(invoice.currency,"USD");
   assert.equal(invoice.billing_name,"Live lead");
   assert.equal(invoice.billing_email,"lead@example.com");
   assert.equal(invoice.billing_address,invoiceDefaults.billing_address);
   assert.equal(invoice.owner_email,"counselor@example.com");
   assert.equal(invoice.creator_email,"counselor@example.com");
-  assert.equal(invoice.company_snapshot.primary_color,"#0b1e3b");
-  assert.equal(invoice.company_snapshot.accent_color,"#d7b770");
+  assert.equal(invoice.company_code,"IBMP","pricing company remains separate from document issuer");
+  assert.equal(invoice.company_snapshot.code,"DMHCA");
+  assert.equal(invoice.company_snapshot.primary_color,"#800020");
+  assert.equal(invoice.company_snapshot.accent_color,"#f7cbd7");
   const item = (await db.query("select * from public.invoice_items where invoice_id=$1",[id])).rows[0];
   assert.equal(item.description,"Admission fee");
   assert.equal(Number(item.quantity),1);
   await db.query("update public.invoice_companies set legal_name='Updated IBMP' where code='IBMP'");
   await db.query("update public.courses set price_usd=25 where id=$1",[courseId]);
   const unchanged = (await db.query("select * from public.invoices where id=$1",[id])).rows[0];
-  assert.equal(unchanged.total,"20.00");
-  assert.equal(unchanged.company_snapshot.legal_name,"IBMP");
+  assert.equal(unchanged.total,"35.00");
+  assert.equal(unchanged.company_snapshot.legal_name,"DMHCA");
   assert.equal((await db.query("select billing_address from public.leads where id=$1",[leadId])).rows[0].billing_address,invoiceDefaults.billing_address);
   await db.query("update public.courses set price_usd=20 where id=$1",[courseId]);
   await db.query("update public.invoice_companies set legal_name='IBMP' where code='IBMP'");
@@ -635,7 +691,7 @@ test("historical installments continue at their original fee without fabricated 
   const input={...invoiceDefaults,course_id:undefined,lead_id:leadId,parent_invoice_id:legacyId,payment_type:"installments",installment_amount:200,due_date:"2026-12-31"};
   const create=values=>createInstallment({...input,...values});
   await assert.rejects(create({currency:"USD"}),/original course, company and currency/);
-  await assert.rejects(create({company_code:"IBMP"}),/original course, company and currency/);
+  await assert.rejects(create({company_code:"IBMP"}),/IBMP invoices use USD only/);
   const id=(await create({})).rows[0].id;
   const invoice=(await db.query("select * from public.invoices where id=$1",[id])).rows[0];
   assert.equal(invoice.course_id,null);

@@ -11,8 +11,11 @@ import { SectionLoading } from "@/components/section-loading";
 import { installmentLabel } from "@/lib/invoice-schedule";
 import { buildInvoiceHtml } from "@/lib/invoice-document";
 import { invoiceStatusShouldRefresh } from "@/lib/invoice-policy";
+import type { InvoiceDocumentDetails } from "@/lib/billing";
+import { installmentPaymentSummary } from "@/lib/invoice-payment-summary";
 
 type Invoice = {
+  document_details?: Partial<InvoiceDocumentDetails>;
   id: string; invoice_no: string; lead_id: string; created_by: string; total: number; subtotal: number; tax_amount: number; discount_amount: number; discount_reason: string | null; notes: string | null; currency: string;
   status: string; created_at: string; due_date: string | null; approved_at: string | null; approved_by: string | null; sent_at: string | null; paid_at: string | null;
   payment_type: string; discount_percent: number; course_total: number | null; parent_invoice_id: string | null;
@@ -39,7 +42,6 @@ type Data = {
   canCreate: boolean;
   canApprove: boolean;
   razorpay: Configuration;
-  stripe: Configuration;
   smtp: Configuration;
 };
 const statusLabel = (status: string) => ({ scheduled: "Scheduled", pending_approval: "Pending approval", sent: "Awaiting payment", paid: "Paid", rejected: "Rejected", cancelled: "Cancelled", expired: "Expired" }[status] ?? status.replaceAll("_", " "));
@@ -58,6 +60,7 @@ export function InvoiceWorkspace({ leadId, timelineOnly = false }: { leadId?: st
   const [enrollmentId, setEnrollmentId] = useState("");
   const [downloadError, setDownloadError] = useState("");
   const [downloadingId, setDownloadingId] = useState("");
+  const [paymentStatusError, setPaymentStatusError] = useState("");
   const detailRef = useRef<HTMLElement>(null);
   const { data, busy, refresh } = state;
   async function downloadInvoice(invoice: Invoice) {
@@ -83,17 +86,42 @@ export function InvoiceWorkspace({ leadId, timelineOnly = false }: { leadId?: st
     } finally { setDownloadingId(""); }
   }
   useEffect(() => {
+    setPaymentStatusError("");
     if (busy || showForm || !data?.invoices.some(invoice => invoiceStatusShouldRefresh(invoice.status))) return;
-    const resume = () => { if (document.visibilityState === "visible") void refresh(); };
-    const timer = window.setInterval(resume, 15000);
+    const selected = data.invoices.find(invoice => invoice.id === selectedId);
+    const watchSelected = selected && invoiceStatusShouldRefresh(selected.status);
+    let active = true;
+    let loading = false;
+    let lastRegisterRefresh = Date.now();
+    const resume = async () => {
+      if (!active || document.visibilityState !== "visible" || loading) return;
+      loading = true;
+      try {
+        if (watchSelected) {
+          const response = await fetch(`/api/invoices/${encodeURIComponent(selected.id)}/status`, { cache: "no-store" });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.error ?? "Payment status could not be refreshed.");
+          if (active && (payload.status !== selected.status || payload.paidAt !== selected.paid_at || Date.now() - lastRegisterRefresh >= 15000)) {
+            await refresh();
+            lastRegisterRefresh = Date.now();
+          }
+        } else await refresh();
+        if (active) setPaymentStatusError("");
+      } catch (error) {
+        if (active) setPaymentStatusError(error instanceof Error ? error.message : "Payment status could not be refreshed.");
+      } finally { loading = false; }
+    };
+    const timer = window.setInterval(resume, watchSelected ? 2000 : 15000);
+    if (watchSelected) void resume();
     window.addEventListener("focus", resume);
     document.addEventListener("visibilitychange", resume);
     return () => {
+      active = false;
       window.clearInterval(timer);
       window.removeEventListener("focus", resume);
       document.removeEventListener("visibilitychange", resume);
     };
-  }, [busy, data, refresh, showForm]);
+  }, [busy, data, refresh, showForm, selectedId]);
   useEffect(() => {
     if (selectedId) {
       detailRef.current?.focus({ preventScroll: true });
@@ -149,7 +177,8 @@ export function InvoiceWorkspace({ leadId, timelineOnly = false }: { leadId?: st
   function invoiceActions(invoice: Invoice) {
     const parent = data?.installmentParents?.find(row => row.id === (invoice.parent_invoice_id ?? invoice.id));
     return <div className="invoice-record-actions">
-      {invoice.payment_url && invoice.status === "sent" && enrollmentApproved(invoice) && <a className="button button-primary" href={invoice.payment_url} target="_blank" rel="noreferrer">Pay Now {money(invoice.total, invoice.currency)}</a>}
+      {invoice.status === "paid" && <span role="status" style={{ background: "#167844", color: "#fff", borderRadius: 4, padding: "10px 16px", fontWeight: 700 }}>Paid {money(invoice.total, invoice.currency)}</span>}
+      {invoice.payment_url && invoice.status === "sent" && enrollmentApproved(invoice) && <a className="button button-primary" href={invoice.payment_url} target="_blank" rel="noreferrer">Pay Now</a>}
       <button className="button button-secondary" disabled={Boolean(downloadingId)} onClick={() => void downloadInvoice(invoice)}><Download size={14} />{downloadingId === invoice.id ? "Downloading…" : "Download PDF"}</button>
       {data?.canCreate && parent && Number(parent.available_balance) >= 1 && !parent.tax_review_required && <button className="button button-primary" disabled={state.busy} onClick={() => addInstallments(parent)}><Plus size={14} />Add next installment</button>}
       {invoice.status === "expired" && data?.canApprove && <button className="button button-secondary" disabled={state.busy} onClick={() => {
@@ -186,15 +215,17 @@ export function InvoiceWorkspace({ leadId, timelineOnly = false }: { leadId?: st
   return <div className={`invoice-workspace finance-workspace${leadId ? " invoice-embedded" : ""}`}>
     <header className={leadId ? "invoice-section-heading" : "page-heading invoice-page-heading"}><span className="invoice-heading-icon"><FileText size={23} /></span><div><div className="invoice-eyebrow">{leadId ? "RELATED RECORDS" : "ADMISSIONS FINANCE"}</div><Heading>{leadId ? "Lead invoices" : "Invoices"}</Heading><p>{leadId ? "Billing, approvals and payment records for this lead." : "A clear view of your billing, approvals and collections."}</p></div><div className="heading-actions"><button className="button button-secondary" disabled={state.loading || state.busy} onClick={() => void state.refresh()}><RefreshCw size={14} />Refresh</button>{data?.canCreate && <button className="button button-primary" disabled={state.busy} onClick={() => { setShowForm(!showForm); setSelectedId(""); setEnrollmentId(""); }}><Plus size={15} />{showForm ? "Close form" : "Create invoice"}</button>}</div></header>
     <OperationFeedback {...state} />
+    {paymentStatusError && <div className="helper-banner" role="alert">{paymentStatusError}</div>}
     {downloadError && <div className="helper-banner" role="alert">{downloadError}</div>}
     <nav className="workspace-view-tabs" aria-label="Invoice register views">{[{ value: "", label: "All invoices" }, { value: "pending_approval", label: "Awaiting approval" }, { value: "scheduled", label: "Scheduled" }, { value: "sent", label: "Awaiting payment" }, { value: "paid", label: "Paid" }].map(view => <button key={view.value} aria-current={status === view.value ? "page" : undefined} onClick={() => { setStatus(view.value); setPage(0); }} disabled={state.loading}><span>{view.label}</span><span>{records.filter(record => !view.value || record.status === view.value).length}</span></button>)}</nav>
     {data && <>
       <div className="invoice-metrics">{[{ label: "Awaiting payment", value: sum(["sent"]), icon: Wallet, tone: "blue" }, { label: "Collected", value: sum(["paid"]), icon: CheckCircle2, tone: "green" }, { label: "Pending approval", value: String(records.filter(invoice => invoice.status === "pending_approval").length), icon: CalendarClock, tone: "amber" }].map(metric => <div className={`panel invoice-metric is-${metric.tone}`} key={metric.label}><span><metric.icon size={19} /></span><div><small>{metric.label}</small><strong>{metric.value}</strong></div></div>)}</div>
       <div className="invoice-workflow-note"><ShieldCheck size={17} /><p>Confirm course pricing <ChevronRight size={12} /> Approve enrollment discount once <ChevronRight size={12} /> Schedule invoices &amp; collect payment <span>Fixed tax: INR 18% / USD 0% · Installments: 9:00 AM India time, due 4 days after invoice date · Loan/EMI: admin-verified financing.</span></p></div>
-      {(!data.razorpay.configured || !data.smtp.configured || !data.stripe?.configured) && <details className="invoice-setup"><summary>Some delivery or payment actions need setup</summary><p>{!data.razorpay.configured && `Razorpay Payment Links setup missing: ${data.razorpay.missing.join(", ")}. `}{!data.stripe?.configured && `Stripe USD setup missing: ${data.stripe?.missing.join(", ") ?? "configure Stripe in Integrations"}. `}{!data.smtp.configured && `Transactional email setup missing: ${data.smtp.missing.join(", ")}.`} Invoice and receipt emails use the configured finance SMTP sender.</p></details>}
+      {(!data.razorpay.configured || !data.smtp.configured) && <details className="invoice-setup"><summary>Some delivery or payment actions need setup</summary><p>{!data.razorpay.configured && `Razorpay Payment Links setup missing: ${data.razorpay.missing.join(", ")}. `}{!data.smtp.configured && `Transactional email setup missing: ${data.smtp.missing.join(", ")}.`} Razorpay handles INR and USD; international payments must be enabled for USD. Invoice and receipt emails use the configured finance SMTP sender.</p></details>}
     </>}
     {showForm && data?.canCreate && <InvoiceCreateForm key={enrollmentId} enrollment={data.installmentParents?.find(parent => parent.id === enrollmentId)} leadId={leadId} leads={data.leads} parents={data.installmentParents ?? []} busy={state.busy} onSubmit={values => state.mutate("/api/invoices", "POST", values)} onClose={() => setShowForm(false)} />}
     {selected && <section className="panel invoice-details" ref={detailRef} tabIndex={-1} aria-label={`Invoice ${selected.invoice_no} details`}><div className="panel-heading"><div><h2>Invoice details</h2><p>Live record · {statusLabel(selected.status)}</p></div><button className="button button-secondary" onClick={() => setSelectedId("")}>Close details</button></div>
+      {["sent", "expired"].includes(selected.status) && ["one_shot", "installments"].includes(selected.payment_type) && <p className="zf-policy-note">Online payments are confirmed automatically by Razorpay. This view checks for updates every two seconds; manual verification is only for recovery or external payments.</p>}
       {selected.scheduled_for && <p className="zf-policy-note">Scheduled email: {formatDateTime(selected.scheduled_for)}. Delivery waits for enrollment approval, not earlier installment payments.</p>}
       {selected.parent_invoice_id && selectedRoot?.approved_at && <p className="zf-policy-note">Enrollment approval inherited from {selectedRoot.invoice_no}: {person(selectedRoot.approved_by)} · {formatDateTime(selectedRoot.approved_at)}. No additional discount approval is required.</p>}
       {selected.delivery_error && <p role="alert" className="zf-alert">Delivery needs attention: {selected.delivery_error}</p>}
@@ -207,7 +238,7 @@ export function InvoiceWorkspace({ leadId, timelineOnly = false }: { leadId?: st
       {["sent", "scheduled", "expired"].includes(selected.status) && enrollmentApproved(selected) && (canRecordPayment(selected) || data?.canApprove) && <section className="invoice-external-payment" aria-label="Record external payment">
         <h3>Record external payment</h3><p>Record the full amount of this {selected.payment_type === "installments" ? "installment" : "invoice"} only: <strong>{money(selected.total, selected.currency)}</strong>.</p>
         {canRecordPayment(selected) && ["one_shot", "installments"].includes(selected.payment_type) && <form key={`${selected.id}-link`} className="operational-form" onSubmit={async event => { event.preventDefault(); const values = formValues(event.currentTarget); await state.mutate(`/api/invoices/${selected.id}`, "PATCH", { action: "verify_payment_url", url: values.url }); }}>
-          <label>Payment link<input className="form-input" name="url" type="url" required maxLength={2000} placeholder={selected.currency === "USD" ? "Paste the company Stripe payment URL" : "Paste the company Razorpay payment URL"} /></label>
+          <label>Payment link<input className="form-input" name="url" type="url" required maxLength={2000} placeholder="Paste the company Razorpay payment URL" /></label>
           <button className="button button-primary" disabled={state.busy}>Verify link &amp; mark paid</button>
           <p className="zf-hint">The provider must confirm a captured payment matching the customer, amount and currency. An unpaid, unrelated or already-used payment cannot mark this invoice Paid.</p>
         </form>}
@@ -215,7 +246,9 @@ export function InvoiceWorkspace({ leadId, timelineOnly = false }: { leadId?: st
           <label>Payment reference<input className="form-input" name="reference" required maxLength={200} /></label><label>Receipt link or verification evidence<textarea className="form-input" name="evidence" required maxLength={2000} /></label>
           <button className="button button-primary" disabled={state.busy}>Confirm received &amp; mark paid</button></form></details>}
       </section>}
-      <div className="invoice-paper"><div className="invoice-document-preview" aria-label="Saved invoice preview" dangerouslySetInnerHTML={{ __html: buildInvoiceHtml(selected, {
+      <div className="invoice-paper"><div className="invoice-document-preview" aria-label="Saved invoice preview" dangerouslySetInnerHTML={{ __html: buildInvoiceHtml({ ...selected,
+        payment_summary: selected.payment_type === "installments" && selectedRoot ? installmentPaymentSummary(selectedCourseTotal, selected, selectedInstallments) : undefined,
+      }, {
         leadName: leadNames.get(selected.lead_id),
         paymentUrl: enrollmentApproved(selected) ? selected.payment_url : null,
         remainingBalance: selected.payment_type === "installments" ? selectedUnallocated : undefined,

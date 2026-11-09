@@ -45,7 +45,7 @@ function statusPageFixture() {
       if (nextResponse instanceof Error) throw nextResponse;
       return { ok: true, json: async () => nextResponse };
     },
-    setTimeout: (callback, delay) => { assert.equal(delay, 10000); const id = Symbol(); timers.set(id, callback); return id; },
+    setTimeout: (callback, delay) => { assert.equal(delay, 2000); const id = Symbol(); timers.set(id, callback); return id; },
     clearTimeout: id => timers.delete(id),
   });
   exports.default();
@@ -99,7 +99,31 @@ test("returning from checkout refreshes once immediately without overlapping req
   assert.equal(page.timers.size, 0);
 });
 
+test("hidden public invoices avoid background requests and resume the two-second status check", async () => {
+  const page = statusPageFixture();
+  await page.flush();
+  page.document.visibilityState = "hidden";
+  await page.tick();
+  assert.equal(page.requests(), 1);
+  assert.equal(page.timers.size, 1);
+  page.document.visibilityState = "visible";
+  page.respond({ status: "paid" });
+  page.documentEvents.get("visibilitychange")();
+  await page.flush();
+  assert.equal(page.requests(), 2);
+  assert.equal(page.states.at(-1).status, "paid");
+  assert.equal(page.timers.size, 0);
+  page.cleanup();
+});
+
 function loadRoute(mocks) {
+  const load = file => {
+    const api = {};
+    new Function("exports", "require", ts.transpileModule(readFileSync(join(__dirname, "..", file), "utf8"), {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021 },
+    }).outputText)(api, name => name in mocks ? mocks[name] : name.startsWith("@/") ? load(`${name.replace("@/", "src\\").replaceAll("/", "\\")}.ts`) : require(name));
+    return api;
+  };
   const exports = {};
   const source = readFileSync(join(__dirname, "..", "src", "app", "api", "invoice-status", "[token]", "route.ts"), "utf8");
   const policy={invoiceWindowExpired:invoice=>!!invoice.payment_expires_at&&new Date(invoice.payment_expires_at).getTime()<=Date.now()};
@@ -115,7 +139,7 @@ function loadRoute(mocks) {
   }
   vm.runInNewContext(ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021 },
-  }).outputText, { exports, require: name => name==="@/lib/invoice-policy"?policy:name==="@/lib/invoice-branding"?branding:name==="@/lib/billing"?billing:mocks[name], Buffer });
+  }).outputText, { exports, require: name => name==="@/lib/invoice-policy"?policy:name==="@/lib/invoice-branding"?branding:name==="@/lib/billing"?billing:name in mocks ? mocks[name] : load(`${name.replace("@/", "src\\").replaceAll("/", "\\")}.ts`), Buffer });
   return exports;
 }
 
@@ -153,13 +177,13 @@ test("public invoice status uses a random token hash and returns the billing sna
   assert.match(selected, /invoice_items\(description,quantity,unit_price,amount\)/);
   assert.deepEqual(JSON.parse(JSON.stringify(result.data)), {
     invoiceNo: "INV-1", issueDate: "2026-10-20T10:00:00Z", dueDate: "2026-10-25",
-    billingName: "Customer", billingEmail: "customer@example.com", billingAddress: "Street 1",
+    billingName: "Customer", billingEmail: "customer@example.com", billingAddress: "Street 1", documentDetails: {},
     items: [{ description: "Course enrollment", quantity: 1, unitPrice: 125, amount: 125 }],
     subtotal: 125, discountAmount: 0, discountReason: null, taxAmount: 0,
     total: 125, currency: "INR", status: "paid", paidAt: "2026-10-24T10:00:00Z",
     courseTotal: null, installmentNumber: null, paymentType: "one_shot", notes: "Thank you",
-    company: { name: "DMHCA", address: "", taxId: "", code: "DMHCA" },
-    primaryColor: "#1c1d4e", accentColor: "#a91e2c", paymentUrl: null,
+    company: { name: "NEWDELHI MEDICAL HEALTH CARE PVT. LTD.", address: "", taxId: "", code: "DMHCA" },
+    primaryColor: "#1c1d4e", accentColor: "#c44754", paymentUrl: null,
     expiresAt: null,
   });
   assert.equal("leadEmail" in result.data, false);
@@ -191,8 +215,8 @@ test("public payment links select the correct provider and disappear immediately
     "@/lib/supabase/server":{getSupabaseAdminClient:()=>({from:()=>({select:()=>({eq:()=>({maybeSingle:async()=>({data:invoice,error})})})})})},
   });
   const read=()=>route.GET(new Request("https://crm.example/status"),{params:Promise.resolve({token})});
-  assert.equal((await read()).data.paymentUrl,`/api/invoice-status/${token}/pay`);
-  assert.equal((await read()).data.company.name,"IBMP");
+  assert.equal((await read()).data.paymentUrl,invoice.razorpay_short_url);
+  assert.equal((await read()).data.company.name,"NEWDELHI MEDICAL HEALTH CARE PVT. LTD.");
   invoice.currency="INR";
   assert.equal((await read()).data.paymentUrl,invoice.razorpay_short_url);
   invoice.payment_expires_at=new Date(Date.now()-1).toISOString();
@@ -211,11 +235,54 @@ test("public payment links select the correct provider and disappear immediately
   assert.ok(!JSON.stringify(failed).includes("Private database diagnostic"));
 });
 
-test("public Stripe checkout validates origin and opaque token before provider work",async()=>{
+test("public installment status returns printable details and verified family balances without internal identifiers",async()=>{
+  const token=Buffer.alloc(32,10).toString("base64url");
+  const record={id:"internal-current",parent_invoice_id:"internal-root",invoice_no:"INV-PUBLIC",
+    created_at:new Date().toISOString(),payment_type:"installments",currency:"INR",status:"sent",total:20000,
+    subtotal:20000,discount_amount:0,tax_amount:0,course_total:100000,
+    document_details:{student_id:"STUDENT-TEST",billing_phone:"Test phone",place_of_supply:"Test State",course_details:"Online / 12 months",sac_code:"SAC-TEST"},
+    company_snapshot:{code:"IBMP",legal_name:"IBMP",invoice_profile:{billing_email:"billing@example.com",bank_accounts:[]}}};
+  let familyError=null;
+  const admin={from:()=>{
+    let field;
+    const query={
+      select:()=>query,eq:(key)=>{field=key;return query;},order:()=>query,
+      maybeSingle:async()=>({data:field==="status_token_hash"?record:{course_total:100000},error:null}),
+      or:value=>{assert.equal(value,"id.eq.internal-root,parent_invoice_id.eq.internal-root");return query;},
+      range:async()=>({data:[{id:"internal-root",total:30000,status:"paid",installment_number:1},
+        {...record,installment_number:2}],error:familyError}),
+    };
+    return query;
+  }};
+  const route=loadRoute({
+    "next/server":{NextResponse:{json:(data,options)=>({data,status:options?.status??200})}},
+    "@/lib/server/razorpay":{statusTokenHash:value=>value},
+    "@/lib/supabase/server":{getSupabaseAdminClient:()=>admin},
+    "@/lib/server/operational":{databaseError:error=>{if(error)throw error;}},
+  });
+  const read=()=>route.GET(new Request("https://crm.example/status"),{params:Promise.resolve({token})});
+  const result=await read();
+  assert.equal(result.status,200);
+  assert.equal(result.data.documentDetails.student_id,"STUDENT-TEST");
+  assert.equal(result.data.company.invoiceProfile.billing_email,"billing@example.com");
+  assert.deepEqual([result.data.paymentSummary.paidToDate,result.data.paymentSummary.outstanding,result.data.paymentSummary.balanceAfterPayment],[30000,70000,50000]);
+  assert.ok(!JSON.stringify(result.data).includes("internal-"));
+  record.status="paid";
+  const paid=await read();
+  assert.equal(paid.data.paymentUrl,null);
+  assert.equal(paid.data.paymentSummary.outstanding,50000);
+  assert.equal(paid.data.paymentSummary.balanceAfterPayment,50000);
+  familyError=new Error("Private balance diagnostic");
+  const failed=await read();
+  assert.equal(failed.status,503);
+  assert.ok(!JSON.stringify(failed).includes("Private balance diagnostic"));
+});
+
+test("public Razorpay payment endpoint validates origin and opaque token without creating checkout",async()=>{
   let queries=0,checkout=0,allowOrigin=false;
   class HttpError extends Error{constructor(status,message){super(message);this.status=status;}}
   const token=Buffer.alloc(32,9).toString("base64url");
-  const invoice={id:"invoice",payment_type:"one_shot"};
+  const invoice={id:"invoice",payment_type:"one_shot",currency:"USD",status:"sent",razorpay_short_url:"https://rzp.io/i/test"};
   const route=loadRoute({
     "next/server":{NextResponse:{json:(data,options)=>({data,status:options?.status??200})}},
     "@/lib/server/auth":{HttpError,jsonError:error=>({status:error.status??500,error:error.message})},
@@ -232,7 +299,7 @@ test("public Stripe checkout validates origin and opaque token before provider w
   assert.equal((await post(token)).status,403);assert.equal(queries,0);
   allowOrigin=true;
   assert.equal((await post("invalid")).status,404);assert.equal(queries,0);
-  const result=await post(token);assert.match(result.data.url,/checkout.stripe.com/);assert.equal(checkout,1);
+  const result=await post(token);assert.match(result.data.url,/rzp.io/);assert.equal(checkout,0);
   invoice.payment_type="loan";
-  assert.equal((await post(token)).status,409);assert.equal(checkout,1);
+  assert.equal((await post(token)).status,409);assert.equal(checkout,0);
 });

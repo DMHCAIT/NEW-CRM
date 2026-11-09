@@ -7,8 +7,7 @@ export const invoiceStatusShouldRefresh = (status: string) =>
 export function invoiceProviderUrlValid(value: string, currency: string) {
   try {
     const url = new URL(value);
-    const hosts = currency === "INR" ? ["rzp.io", "rzp.in", "razorpay.com", "pages.razorpay.com", "payments.razorpay.com"]
-      : currency === "USD" ? ["checkout.stripe.com"] : [];
+    const hosts = ["INR", "USD"].includes(currency) ? ["rzp.io", "rzp.in", "razorpay.com", "pages.razorpay.com", "payments.razorpay.com"] : [];
     return url.protocol === "https:" && !url.username && !url.password && !url.port && hosts.includes(url.hostname);
   } catch { return false; }
 }

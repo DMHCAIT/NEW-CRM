@@ -20,13 +20,12 @@ export async function GET(request: Request) {
     const lead = leadId !== null ? await accessibleLead(supabase, parseInput(uuid, leadId)) : null;
     let query = supabase.from("invoices").select("*,invoice_items(*),invoice_approvals(*),lead:leads(assignee_id)");
     if (lead) query = query.eq("lead_id", lead.id);
-    const [{ data, error }, { data: profiles, error: profilesError }, leads, razorpay, smtp, stripe] = await Promise.all([
+    const [{ data, error }, { data: profiles, error: profilesError }, leads, razorpay, smtp] = await Promise.all([
       query.order("created_at", { ascending: false }).order("id").limit(200),
       supabase.from("profiles").select("id,full_name"),
       lead ? Promise.resolve([{ id: lead.id, name: lead.name }]) : leadOptions(supabase),
       integrationStatus("razorpay", integrationRequirements.razorpay),
       integrationStatus("smtp", integrationRequirements.smtp),
-      integrationStatus("stripe", integrationRequirements.stripe),
     ]);
     databaseError(error); databaseError(profilesError);
     const invoiceRows = data ?? [];
@@ -60,6 +59,8 @@ export async function GET(request: Request) {
         if (root && root.status !== "rejected" && !(root.status === "cancelled" && (Number(root.discount_percent) > 0 || root.pricing_review_note) && !root.approved_at)) {
           installmentParents.push({
             id: root.id, invoice_no: root.invoice_no, course_total: total, currency: root.currency,
+            document_details: root.document_details,
+            company_snapshot: root.company_snapshot,
             balance: Math.max(0, Math.round((total - paid + Number.EPSILON) * 100) / 100),
             available_balance: Math.max(0, Math.round((total - reserved + Number.EPSILON) * 100) / 100),
             already_paid: paid,
@@ -92,7 +93,7 @@ export async function GET(request: Request) {
       status: ["sent", "pending_approval"].includes(invoice.status) && invoiceWindowExpired(invoice) ? "expired" : invoice.status,
     })), courseBalances, installmentParents, leads, profiles: profiles ?? [], userId: user.id,
       canCreate: user.permissions.includes("invoices.create"), canApprove: ["admin", "super_admin"].includes(user.profile.role) && user.permissions.includes("invoices.approve"),
-      razorpay, smtp, stripe }, { headers: { "Cache-Control": "private, no-store" } });
+      razorpay, smtp }, { headers: { "Cache-Control": "private, no-store" } });
   } catch (error) { return jsonError(error); }
 }
 

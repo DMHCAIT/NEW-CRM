@@ -114,7 +114,7 @@ async function renderPage(file, { states, overrides = {}, shellUser = user } = {
 }
 
 const operations = {
-  "/api/courses": { courses: [{ id: "course-1", name: "Clinical research", price_inr: 25000, price_usd: 250, is_active: true }], companies: [
+  "/api/courses": { courses: [{ id: "course-1", name: "Clinical research", price_inr: 25000, price_usd: 250, price_ibmp_usd: 400, is_active: true }], companies: [
     { code: "DMHCA", legal_name: "DMHCA", address: "Company billing address", tax_id: "", primary_color: "#800020", accent_color: "#f7cbd7" },
     { code: "IBMP", legal_name: "IBMP", address: "Company billing address", tax_id: "", primary_color: "#0b1e3b", accent_color: "#d7b770" },
   ], canManage: true },
@@ -209,7 +209,7 @@ const cases = [
   ["report-list", "src\\app\\reports\\[id]\\[mode]\\page.tsx", { overrides: { "@/components/reports-data-provider": { useReportsData: () => ({ user, leads: [lead], reports: [report] }) } } }],
   ["report-count", "src\\app\\reports\\[id]\\[mode]\\page.tsx", { overrides: { "next/navigation": { useParams: () => ({ id: report.id, mode: "count" }) }, "@/components/reports-data-provider": { useReportsData: () => ({ user, leads: [lead], reports: [report] }) } } }],
   ["meetings", "src\\app\\meetings\\page.tsx", { states: [true, "", null, "", new Date(2026, 9, 1)], overrides: { "../integrations/operational-ui": opMock } }],
-  ["invoices", "src\\app\\invoices\\page.tsx", { states: [true, "", "", "", 0, "", "", "", lead.id, null, "", "", "course-1", "DMHCA", "INR", "one_shot"], overrides: { "@/app/integrations/operational-ui": opMock } }],
+  ["invoices", "src\\app\\invoices\\page.tsx", { states: [true, "", "", "", 0, "", "", "", "", lead.id, null, "", "", "course-1", "DMHCA", "INR", "one_shot"], overrides: { "@/app/integrations/operational-ui": opMock } }],
   ["courses", "src\\app\\courses\\page.tsx", { overrides: { "@/app/integrations/operational-ui": opMock } }],
   ["invoice-detail", "src\\app\\invoices\\page.tsx", { states: [false, "", "", "invoice-1"], overrides: { "@/app/integrations/operational-ui": opMock } }],
   ["lead-invoices", "src\\app\\leads\\[id]\\page.tsx", { states: [false,false,"","","","",false,false,"","","invoices"], overrides: {
@@ -377,12 +377,12 @@ function elements(node) {
   return [node, ...elements(node.props?.children)];
 }
 
-function invoiceHarness(data = operations["/api/invoices"], initial = [], overrides = {}, stateOverrides = {}) {
+function invoiceHarness(data = operations["/api/invoices"], initial = [], overrides = {}, stateOverrides = {}, effects) {
   const states = [...initial], requests = [], urls = [];
   let index = 0;
   const { InvoiceWorkspace } = load("src\\components\\invoice-workspace.tsx", {
     ...baseline,
-    react: { ...React, useEffect() {}, useRef: () => ({ current: null }), useState(initial) { const key = index++; if (!(key in states)) states[key] = initial; return [states[key], value => { states[key] = value; }]; } },
+    react: { ...React, useEffect(callback) { effects?.push(callback); }, useRef: () => ({ current: null }), useState(initial) { const key = index++; if (!(key in states)) states[key] = initial; return [states[key], value => { states[key] = value; }]; } },
     "@/app/integrations/operational-ui": { ...op, ...overrides, useOperationalData: url => {
       urls.push(url);
       return { ...operational(data), ...stateOverrides, mutate: async (...args) => { requests.push(args); return true; } };
@@ -390,6 +390,85 @@ function invoiceHarness(data = operations["/api/invoices"], initial = [], overri
   });
   return { states, requests, urls, render(props = {}) { index = 0; return InvoiceWorkspace(props); } };
 }
+
+test("open invoice checks lightweight payment status automatically without overlapping or hidden-tab reads", async () => {
+  const previous = { window: global.window, document: global.document, fetch: global.fetch };
+  const data = structuredClone(operations["/api/invoices"]);
+  const invoice = data.invoices[0];
+  invoice.status = "sent"; invoice.paid_at = null;
+  const effects = [], requests = [], listeners = new Map();
+  let tick, refreshes = 0, complete;
+  global.window = {
+    setInterval(callback, delay) { assert.equal(delay, 2000); tick = callback; return 1; },
+    clearInterval(id) { assert.equal(id, 1); },
+    addEventListener(name, callback) { listeners.set(name, callback); },
+    removeEventListener(name) { listeners.delete(name); },
+  };
+  global.document = { visibilityState: "visible", addEventListener() {}, removeEventListener() {} };
+  global.fetch = async (url, options) => {
+    requests.push([url, options]);
+    return new Promise(resolve => { complete = value => resolve({ ok: true, json: async () => value }); });
+  };
+  let cleanup;
+  try {
+    const ui = invoiceHarness(data, [false, "", "", invoice.id], {}, { refresh: async () => { refreshes++; } }, effects);
+    ui.render();
+    cleanup = effects[0]();
+    assert.equal(requests.length, 1, "opening details immediately checks the saved status");
+    await tick();
+    assert.equal(requests.length, 1, "in-flight checks cannot overlap");
+    complete({ status: "sent", paidAt: null });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(refreshes, 0, "unchanged status must not reload the register");
+    global.document.visibilityState = "hidden";
+    await tick();
+    assert.equal(requests.length, 1);
+    global.document.visibilityState = "visible";
+    const pending = tick();
+    complete({ status: "paid", paidAt: "2026-11-09T10:00:00Z" });
+    await pending;
+    assert.equal(refreshes, 1, "a signed provider update refreshes balances and the green Paid view");
+    assert.equal(requests[0][0], `/api/invoices/${invoice.id}/status`);
+    assert.equal(requests[0][1].cache, "no-store");
+    cleanup(); cleanup = null;
+    assert.equal(listeners.size, 0);
+    await tick();
+    assert.equal(requests.length, 2, "closed details must stop checking");
+  } finally {
+    cleanup?.();
+    global.window = previous.window; global.document = previous.document; global.fetch = previous.fetch;
+  }
+});
+
+test("invoice form selects independent company prices, locks IBMP to USD and uses DMHCA branding", () => {
+  const billing = { lead: { id: lead.id, email: lead.email }, canSaveAddress: true };
+  for (const [company,currency,expected] of [["DMHCA","INR","25000.00"],["DMHCA","USD","250.00"],["IBMP","USD","400.00"]]) {
+    const { InvoiceCreateForm } = load("src\\components\\invoice-create-form.tsx", {
+      react:hookStates([lead.id,billing,"","Address","course-1",company,currency,"one_shot","","","0"]),
+      "@/app/integrations/operational-ui":opMock,
+    });
+    const tree = InvoiceCreateForm({leadId:lead.id,leads:[lead],parents:[],busy:false,onSubmit:async()=>true,onClose(){}});
+    const nodes = elements(tree);
+    assert.equal(nodes.find(node=>node.props?.["aria-label"]==="Price").props.value,expected);
+    const currencySelect = nodes.find(node=>node.props?.name==="currency");
+    const options = elements(currencySelect).filter(node=>node.type==="option").map(node=>node.props.value);
+    assert.deepEqual(options,company==="IBMP"?["USD"]:["INR","USD"]);
+    assert.match(renderToStaticMarkup(tree),/DMHCA logo/);
+  }
+});
+
+test("IBMP invoices cannot be saved when their own USD catalog price is missing", () => {
+  const catalog = structuredClone(operations["/api/courses"]);
+  catalog.courses[0].price_ibmp_usd = null;
+  const { InvoiceCreateForm } = load("src\\components\\invoice-create-form.tsx", {
+    react:hookStates([lead.id,{lead:{id:lead.id,email:lead.email}},"","Address","course-1","IBMP","USD","one_shot","","","0"]),
+    "@/app/integrations/operational-ui":{...opMock,useOperationalData:()=>operational(catalog)},
+  });
+  const tree = InvoiceCreateForm({leadId:lead.id,leads:[lead],parents:[],busy:false,onSubmit:async()=>true,onClose(){}});
+  assert.match(renderToStaticMarkup(tree),/Set this course&#x27;s IBMP USD price/);
+  const save = elements(tree).find(node=>node.type==="button" && node.props.className==="button button-primary");
+  assert.equal(save.props.disabled,true);
+});
 
 test("invoice form scopes to the lead, previews percentage discounts and submits the invoice contract", async () => {
   const payload = { lead_id: lead.id, course_id: "course-1", company_code: "DMHCA", currency: "INR", billing_address: "Lead address",
@@ -425,8 +504,26 @@ test("invoice form scopes to the lead, previews percentage discounts and submits
   assert.equal(nodes.find(node => node.props?.name === "tax_amount").props.value, "4410.00");
   assert.equal(field("Approver"), "Admin / Super Admin");
   await nodes.find(node => node.type === "form").props.onSubmit({ preventDefault() {}, currentTarget: {} });
-  assert.deepEqual(ui.requests, [["/api/invoices", "POST", {...payload,parent_invoice_id:"",discount_percent:2,tax_percent:18,save_billing_address:true}]]);
+  assert.deepEqual(ui.requests, [["/api/invoices", "POST", {...payload,parent_invoice_id:"",discount_percent:2,tax_percent:18,save_billing_address:true,
+    document_details: { student_id: "", billing_phone: "", place_of_supply: "", course_details: "", sac_code: "" },
+  }]]);
   assert.equal(ui.states[0], false);
+});
+
+test("hidden optional details are preserved when adding an installment to an existing enrollment", async () => {
+  const details = { student_id: "ST-1", place_of_supply: "Delhi", course_details: "Online", sac_code: "9992" };
+  const parent = { id: "root", lead_id: lead.id, course_id: "course-1", company_code: "DMHCA", currency: "INR",
+    enrollment_subtotal: 300, enrollment_tax: 0, enrollment_discount: 0, discount_percent: 0, tax_percent: 0,
+    balance: 200, next_installment: 2, document_details: details };
+  let submitted;
+  const { InvoiceCreateForm } = load("src\\components\\invoice-create-form.tsx", {
+    react: hookStates([lead.id, { lead: { id: lead.id, email: lead.email } }, "", "Address", "course-1", "DMHCA", "INR", "installments", "root", "100", "0"]),
+    "@/app/integrations/operational-ui": { ...opMock, formValues: () => ({ detail_billing_phone: "12345" }) },
+  });
+  const tree = InvoiceCreateForm({ leads: [lead], parents: [parent], busy: false,
+    onSubmit: async payload => { submitted = payload; return true; }, onClose() {} });
+  await elements(tree).find(node => node.type === "form").props.onSubmit({ preventDefault() {}, currentTarget: {} });
+  assert.deepEqual(submitted.document_details, { ...details, billing_phone: "12345" });
 });
 
 test("invoice details always reflect current record status, provider locks and permissions", () => {
@@ -662,7 +759,7 @@ test("add-next-installment access reopens the existing course rather than a new 
   assert.equal(elements(invoiceHarness(data).render()).some(node => node.type === "button" && node.props.children === "Add next installment"), false);
 });
 
-test("remaining course balance deducts created installments before payment without changing outstanding", () => {
+test("invoice outstanding and projected payment balances remain distinct from unallocated balance", () => {
   for (const useServerBalance of [true, false]) {
     const data = structuredClone(operations["/api/invoices"]);
     const root = data.invoices[0];
@@ -677,7 +774,9 @@ test("remaining course balance deducts created installments before payment witho
     const check = (remaining, paid, outstanding) => {
       const nodes = elements(ui.render());
       const preview = nodes.find(node => node.props?.["aria-label"] === "Saved invoice preview");
-      assert.match(renderToStaticMarkup(preview), new RegExp(`Remaining course balance</td><td[^>]*>₹${remaining}\\.00`));
+      const html = renderToStaticMarkup(preview);
+      assert.match(html, new RegExp(`Balance still unpaid</td><td[^>]*>₹${outstanding}\\.00`));
+      if (root.status !== "paid") assert.match(html, new RegExp(`Balance after this installment is paid</td><td[^>]*>₹${remaining}\\.00`));
       const summary = nodes.find(node => node.props?.className === "zf-payment-summary");
       assert.match(renderToStaticMarkup(summary), new RegExp(`Paid</dt><dd>₹${paid}\\.00`));
       assert.match(renderToStaticMarkup(summary), new RegExp(`Outstanding</dt><dd>₹${outstanding}\\.00`));
@@ -740,7 +839,9 @@ test("CRM Pay Now opens direct checkout for the exact installment or full-paymen
     const ui = invoiceHarness(data, [false, "", "", invoice.id]);
     const html = renderToStaticMarkup(ui.render());
     assert.match(html, /href="https:\/\/invoice\.example\.com\/api\/invoice-status\/opaque\/pay"/);
-    assert.match(html, /Pay Now ₹53,100\.00/);
+    assert.match(html, /class="invoice-pay-button"/);
+    assert.doesNotMatch(html, /Pay Now ₹/);
+    assert.match(html, /₹53,100\.00/);
     assert.match(html, /target="_blank" rel="noopener noreferrer"/);
     assert.doesNotMatch(html, /Pay Now · View invoice/);
     invoice.status = "paid"; invoice.paid_at = new Date().toISOString();
@@ -753,7 +854,7 @@ test("CRM Pay Now opens direct checkout for the exact installment or full-paymen
   }
 });
 
-test("public Pay Now shows the saved amount, not the course fee, and becomes a paid confirmation", () => {
+test("public Pay Now has no amount in its label, preserves totals and becomes a paid confirmation", () => {
   const status = { invoiceNo: "INV-EXACT", issueDate: new Date().toISOString(), dueDate: null, billingName: "Customer",
     items: [], subtotal: 1000, discountAmount: 0, discountReason: null, taxAmount: 0, total: 1000, currency: "USD",
     status: "sent", courseTotal: 2000, installmentNumber: 1, paymentType: "installments",
@@ -766,7 +867,9 @@ test("public Pay Now shows the saved amount, not the course fee, and becomes a p
       const Page = load("src\\app\\invoice-status\\[token]\\page.tsx", { react: hookStates([status, "", false, ""]) }).default;
       const html = renderToStaticMarkup(Page());
       if (state === "sent") {
-        assert.match(html, /Pay Now \$1,000\.00/);
+        assert.match(html, /class="invoice-pay-button"/);
+        assert.doesNotMatch(html, /Pay Now \$/);
+        assert.match(html, /\$1,000\.00/);
         assert.match(html, /target="_blank" rel="noopener noreferrer"/);
         assert.doesNotMatch(html, /Pay Now \$2,000\.00/);
       } else {
@@ -798,7 +901,7 @@ test("public return page uses exactly the shared DMHCA and IBMP invoice structur
   }
 });
 
-test("branded invoice CRM preview and editor show the matching company and delivery recipients", () => {
+test("branded invoice editor omits optional detail fields and delivery panel while retaining approval actions", () => {
   for (const code of ["DMHCA", "IBMP"]) {
     const data = structuredClone(operations["/api/invoices"]);
     const invoice = data.invoices[0];
@@ -806,15 +909,18 @@ test("branded invoice CRM preview and editor show the matching company and deliv
     Object.assign(invoice, { company_snapshot: issuer, billing_name: lead.name, billing_email: lead.email, billing_address: "Customer billing address" });
     const html = renderToStaticMarkup(invoiceHarness(data, [false, "", "", invoice.id]).render({ leadId: lead.id }));
     assert.match(html, /Saved invoice preview/);
-    assert.match(html, new RegExp(`${code} logo`));
+    assert.match(html, /DMHCA logo/);
     for (const value of ["BILL TO", "INVOICE DETAILS", "PAYMENT SCHEDULE", "PAYMENT DETAILS", "Clinical research admission"]) assert.ok(html.includes(value), value);
     const billing = { lead: { ...lead, billing_address: "Customer billing address", owner_name: "Current owner", owner_email: "owner@example.com" }, canSaveAddress: true };
     const { InvoiceCreateForm } = load("src\\components\\invoice-create-form.tsx", {
-      react: hookStates([lead.id, billing, "", billing.lead.billing_address, "course-1", code, "INR", "one_shot", "", "", "10"]),
+      react: hookStates([lead.id, billing, "", billing.lead.billing_address, "course-1", code, code === "IBMP" ? "USD" : "INR", "one_shot", "", "", "10"]),
       "@/app/integrations/operational-ui": opMock,
     });
     const formHtml = renderToStaticMarkup(InvoiceCreateForm({ leadId: lead.id, leads: [lead], parents: [], busy: false, onSubmit: async () => true, onClose() {} }));
-    assert.match(formHtml, /Approval first, email automatically/);
+    assert.doesNotMatch(formHtml, /Approval first, email automatically|Automatic invoice delivery|zf-delivery-card/);
+    for (const key of ["student_id", "place_of_supply", "course_details", "sac_code"]) {
+      assert.doesNotMatch(formHtml, new RegExp(`name="detail_${key}"`));
+    }
     assert.match(formHtml, /owner@example.com/);
     assert.match(formHtml, /Save &amp; request approval/);
     assert.match(formHtml, /Preview branded invoice/);

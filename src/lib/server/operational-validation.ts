@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { invoiceDocumentDetails } from "@/lib/billing";
 
 const twoDecimals = (value: number) => Math.abs(value * 100 - Math.round(value * 100)) < 0.00001;
 const money = z.coerce.number().finite().min(0).max(99999999).refine(twoDecimals, "Use at most two decimal places.");
@@ -12,6 +13,7 @@ export const invoiceInput = z.object({
   company_code: z.enum(["DMHCA", "IBMP"]).optional(),
   currency: z.enum(["INR", "USD"]).default("INR"),
   billing_address: z.string().trim().max(2000).optional(),
+  document_details: invoiceDocumentDetails.optional(),
   save_billing_address: z.boolean().default(false),
   installment_amount: money.optional(),
   request_id: z.string().uuid().optional(),
@@ -32,6 +34,8 @@ export const invoiceInput = z.object({
   }, "Invalid due date"),
   notes: z.string().trim().max(3000).default(""),
 }).superRefine((value, ctx) => {
+  if (value.company_code === "IBMP" && value.currency !== "USD")
+    ctx.addIssue({ code: "custom", message: "IBMP invoices use USD only.", path: ["currency"] });
   if (!value.parent_invoice_id && value.discount_percent > 0 && !value.discount_reason)
     ctx.addIssue({ code: "custom", message: "A discount reason is required.", path: ["discount_reason"] });
   if (!value.parent_invoice_id && value.discount_percent === 0 && value.discount_reason)

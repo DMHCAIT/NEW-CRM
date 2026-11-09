@@ -5,13 +5,16 @@ import Image from "next/image";
 import { SearchableDropdown } from "@/components/searchable-dropdown";
 import { apiRequest } from "@/lib/crm-data";
 import { OperationFeedback, formValues, useOperationalData, type LeadOption } from "@/app/integrations/operational-ui";
-import type { BillingCompany, Course } from "@/lib/billing";
+import type { BillingCompany, Course, InvoiceDocumentDetails } from "@/lib/billing";
+import { coursePrice } from "@/lib/billing";
 import { invoiceDeadline, invoiceTaxPercent } from "@/lib/invoice-policy";
 import { installmentLabel, invoiceDateToday, scheduledDueDate } from "@/lib/invoice-schedule";
 import { invoiceBranding } from "@/lib/invoice-branding";
 import { buildInvoiceHtml } from "@/lib/invoice-document";
 
 export type InstallmentParent = {
+  document_details?: Partial<InvoiceDocumentDetails>;
+  company_snapshot?: BillingCompany | null;
   id: string; invoice_no: string; course_total: number; currency: string; balance: number;
   lead_id: string; course_id: string | null; company_code: string | null;
   enrollment_subtotal: number; enrollment_discount: number; enrollment_tax: number;
@@ -59,6 +62,7 @@ export function InvoiceCreateForm({ leadId, leads, parents, busy, onSubmit, onCl
   const [reload, setReload] = useState(0);
   const [invoiceDate, setInvoiceDate] = useState(invoiceDateToday);
   const [extraInstallments, setExtraInstallments] = useState<{ amount: string; invoice_date: string }[]>([]);
+  const [detailEdits, setDetailEdits] = useState<{ context: string; values: Partial<InvoiceDocumentDetails> }>({ context: "", values: {} });
   const requestId = useRef("");
   const requestSignature = useRef("");
   useEffect(() => {
@@ -77,11 +81,20 @@ export function InvoiceCreateForm({ leadId, leads, parents, busy, onSubmit, onCl
   const selectedParent = isInstallment ? eligibleParents.find(item => item.id === parentId)
     ?? eligibleParents.find(item => item.course_id === courseId && Boolean(courseId)) : undefined;
   const effectiveParentId = selectedParent?.id ?? "";
+  const detailContext = `${billTo}:${effectiveParentId}`;
+  const documentDetails: Partial<InvoiceDocumentDetails> = {
+    billing_phone: billing?.lead.phone ?? "", ...selectedParent?.document_details,
+    ...(detailEdits.context === detailContext ? detailEdits.values : {}),
+  };
+  const editDetail = (key: keyof InvoiceDocumentDetails, value: string) => setDetailEdits({
+    context: detailContext, values: { ...(detailEdits.context === detailContext ? detailEdits.values : {}), [key]: value },
+  });
   const legacyParent = selectedParent && !selectedParent.course_id ? selectedParent : null;
   const course = catalog.data?.courses.find(item => item.id === courseId);
-  const issuer = catalog.data?.companies.find(item => item.code === company);
+  const issuer = selectedParent?.company_snapshot ?? catalog.data?.companies.find(item => item.code === "DMHCA");
   const brand = issuer ? invoiceBranding(issuer) : null;
-  const standardPrice = Number(selectedParent?.enrollment_subtotal ?? (currency === "USD" ? course?.price_usd ?? 0 : course?.price_inr ?? 0));
+  const catalogPrice = coursePrice(course, company, currency);
+  const standardPrice = Number(selectedParent?.enrollment_subtotal ?? catalogPrice ?? 0);
   const price = standardPrice;
   const discountPercent = selectedParent?.discount_percent ?? (Number(discount) || 0);
   const discountAmount = round(price * discountPercent / 100);
@@ -104,7 +117,7 @@ export function InvoiceCreateForm({ leadId, leads, parents, busy, onSubmit, onCl
   function resetParent() { setParentId(""); setAmount(""); setExtraInstallments([]); requestId.current = ""; }
   const canSubmit = !busy && !catalog.loading && Boolean(billing) && billing?.lead.id === billTo && Boolean(billing?.lead.email)
     && (Boolean(legacyParent) || Boolean(course && (course.is_active || selectedParent))) && Boolean(issuer?.address) && Boolean(address.trim())
-    && currentDue >= 1 && currentDue <= balance && !selectedParent?.tax_review_required && !leavesUnpayableBalance && !invalidSchedule;
+    && standardPrice > 0 && currentDue >= 1 && currentDue <= balance && !selectedParent?.tax_review_required && !leavesUnpayableBalance && !invalidSchedule;
   const previewDue = isInstallment ? Number(amount) || 0 : total;
   const previewSubtotal = isInstallment ? round(total > 0 ? price * previewDue / total : 0) : price;
   const previewDiscount = isInstallment ? round(total > 0 ? discountAmount * previewDue / total : 0) : discountAmount;
@@ -117,6 +130,11 @@ export function InvoiceCreateForm({ leadId, leads, parents, busy, onSubmit, onCl
       event.preventDefault();
       const values = formValues(event.currentTarget);
       const payload = { ...values, parent_invoice_id: effectiveParentId, discount_percent: discountPercent,
+        document_details: {
+          student_id: documentDetails.student_id ?? "", billing_phone: values.detail_billing_phone ?? "",
+          place_of_supply: documentDetails.place_of_supply ?? "", course_details: documentDetails.course_details ?? "",
+          sac_code: documentDetails.sac_code ?? "",
+        },
         ...(isInstallment ? { installments: installmentRows.map(row => ({ amount: Number(row.amount), invoice_date: row.invoice_date })) } : {}),
         tax_percent: effectiveTaxPercent, save_billing_address: values.save_billing_address === "on" };
       if (isInstallment) {
@@ -134,27 +152,24 @@ export function InvoiceCreateForm({ leadId, leads, parents, busy, onSubmit, onCl
         <Field label="Proforma Invoice Date" required><input className="zf-input" readOnly value={displayDate(isInstallment ? invoiceDate : today())} aria-label="Proforma Invoice Date" /></Field>
         <Field label="Lead Owner"><input className="zf-input" readOnly value={billing?.lead.owner_name || "—"} aria-label="Lead Owner" /></Field>
         <Field label="Due Date" required><input className="zf-input" name="due_date" type="date" required readOnly value={isInstallment ? invoiceDate ? scheduledDueDate(invoiceDate) : "" : dueDate} aria-label="Due Date" /></Field>
-        <Field label="Invoice Company" required><select className="zf-input" name="company_code" value={company} onChange={event => { setCompany(event.target.value); resetParent(); }}><option value="DMHCA">DMHCA</option><option value="IBMP">IBMP</option></select></Field>
+        <Field label="Invoice Company" required><select className="zf-input" name="company_code" value={company} onChange={event => { setCompany(event.target.value); if (event.target.value === "IBMP") setCurrency("USD"); resetParent(); }}><option value="DMHCA">DMHCA</option><option value="IBMP">IBMP</option></select></Field>
       </div>
+      <p className="zf-hint">Company selects the course price: DMHCA offers INR and USD; IBMP has its own USD fee. Both use the DMHCA invoice and Razorpay checkout.</p>
       {issuer && !issuer.address && <p className="zf-hint">An administrator must complete this company&apos;s billing address in <a href="/courses">Courses</a>.</p>}
 
       <h3 className="zf-section">Customer Details</h3>
       <div className="zf-grid">
         <Field label="Lead" required><SearchableDropdown name="lead_id" required disabled={Boolean(leadId)} placeholder="Select a lead" ariaLabel="Invoice lead" value={billTo} onChange={value => { setSelectedLead(value); resetParent(); }} options={leads.map(lead => ({ value: lead.id, label: lead.name }))} /></Field>
         <Field label="Billing Address" required><textarea className="zf-input" name="billing_address" rows={2} maxLength={2000} value={address} required onChange={event => setAddress(event.target.value)} /></Field>
-        <Field label="Mobile" required><input className="zf-input" readOnly value={billing?.lead.phone ?? ""} aria-label="Mobile" /></Field>
+        <Field label="Mobile"><input className="zf-input" name="detail_billing_phone" maxLength={100} value={documentDetails.billing_phone ?? ""} onChange={event => editDetail("billing_phone", event.target.value)} aria-label="Mobile" /></Field>
         {billing?.canSaveAddress ? <label className="zf-field zf-check"><span className="zf-label" /><span className="zf-control"><input type="checkbox" name="save_billing_address" defaultChecked /> Save billing address on this lead</span></label> : <span />}
         <Field label="Email" required><input className="zf-input" readOnly value={billing?.lead.email ?? ""} aria-label="Email" placeholder={billing ? "Set a lead email before issuing" : ""} /></Field>
         <Field label="Owner email"><input className="zf-input" readOnly value={billing?.lead.owner_email ?? ""} aria-label="Owner email" placeholder="Assigned lead owner's email" /></Field>
-        <Field label="Currency" required><select className="zf-input" name="currency" value={currency} onChange={event => { setCurrency(event.target.value); resetParent(); }}><option value="INR">INR</option><option value="USD">USD</option></select></Field>
+        <Field label="Currency" required><select className="zf-input" name="currency" value={currency} onChange={event => { setCurrency(event.target.value); resetParent(); }}>{company !== "IBMP" && <option value="INR">INR</option>}<option value="USD">USD</option></select></Field>
       </div>
-      {billing && <div className={`zf-delivery-card${hasDiscount || selectedParent?.approval_pending ? " is-approval" : ""}`}>
-        <strong>{hasDiscount || selectedParent?.approval_pending ? "Approval first, email automatically" : "Automatic invoice delivery"}</strong>
-        <p>To: {billing.lead.email || "Lead email required"}<br />Copy: {billing.lead.owner_name || "Assign a lead owner"}{billing.lead.owner_email ? ` (${billing.lead.owner_email})` : ""} and invoice creator.</p>
-        <p>{hasDiscount || selectedParent?.approval_pending ? "No invoice or payment link is sent before approval. Approval sends today's invoice automatically." : "Saving sends today's invoice with its PDF and secure payment link. Future-dated installments send on their invoice date."}</p>
-      </div>}
 
       <h3 className="zf-section">Payment Details</h3>
+      {course && !selectedParent && catalogPrice === null && <p role="alert" className="zf-alert">Set this course&apos;s {company} {currency} price in Courses before issuing an invoice.</p>}
       <h4 className="zf-subsection">Course<span className="zf-req"> *</span></h4>
       <div className="zf-table-wrap"><table className="zf-table">
         <thead><tr><th>Course</th><th>Price</th><th>Discount %</th><th>Discount</th><th>Tax %</th><th>Tax Amount</th><th>Total</th></tr></thead>
@@ -219,6 +234,17 @@ export function InvoiceCreateForm({ leadId, leads, parents, busy, onSubmit, onCl
           invoice_date: isInstallment ? invoiceDate || null : today(), due_date: isInstallment ? invoiceDate ? scheduledDueDate(invoiceDate) : null : dueDate,
           status: hasDiscount || selectedParent?.approval_pending ? "pending_approval" : isInstallment && invoiceDate > invoiceDateToday() ? "scheduled" : "sent",
           company_snapshot: issuer, billing_name: billing?.lead.name, billing_email: billing?.lead.email, billing_address: address,
+          document_details: documentDetails,
+          payment_summary: isInstallment ? {
+            courseTotal: total,
+            paidToDate: selectedParent?.already_paid ?? round(total - (selectedParent?.balance ?? total)),
+            outstanding: selectedParent?.balance ?? total,
+            balanceAfterPayment: Math.max(0, round((selectedParent?.balance ?? total) - previewDue)),
+            schedule: [
+              ...(selectedParent?.installments ?? []).map(row => ({ number: row.number, amount: row.amount, dueDate: row.due_date, status: row.status, current: false })),
+              ...installmentRows.map((row, index) => ({ number: (selectedParent?.next_installment ?? 1) + index, amount: Number(row.amount) || 0, dueDate: row.invoice_date ? scheduledDueDate(row.invoice_date) : null, status: hasDiscount || selectedParent?.approval_pending ? "pending_approval" : "scheduled", current: index === 0 })),
+            ],
+          } : undefined,
           invoice_items: [{ description: course?.name ?? legacyParent?.course_name ?? "Historical enrollment", quantity: 1, unit_price: previewSubtotal, amount: previewSubtotal }],
           subtotal: previewSubtotal, discount_amount: previewDiscount, discount_reason: null,
           tax_amount: round(previewDue - previewSubtotal + previewDiscount), total: previewDue, currency, notes: null,

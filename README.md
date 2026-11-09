@@ -6,7 +6,7 @@ are reported rather than replaced with demonstration records.
 
 ## Setup
 
-1. Install Node.js 20 or newer and run `npm install`.
+1. Install Node.js 20.11 or newer and run `npm install`.
 2. Copy `.env.example` to **`.env.local`**. Set `NEXT_PUBLIC_APP_URL` to the exact
    origin used in your browser, including its port locally (for example,
    `http://localhost:3001` if port 3000 is already occupied). Use HTTPS in production.
@@ -725,15 +725,23 @@ Save the Razorpay key ID, key secret and separate webhook signing secret in
 `/api/webhooks/razorpay` for `payment_link.paid`. The endpoint verifies the raw
 signature, invoice/link reference, payment ID, amount, currency and captured state.
 Verified payment recording is idempotent; link existence and browser redirects do
-not mark invoices paid. INR online invoices use Razorpay; USD uses Stripe.
-Invoice email, CRM and PDF Pay Now buttons go through a random-token checkout
-redirect directly to Razorpay (INR) or Stripe (USD), without an intermediate
-invoice page. The redirect checks approval, expiry and Paid status before opening
-checkout; Stripe sessions are safely reused or renewed when eligible. Provider
+not mark invoices paid. Both INR and USD online invoices use Razorpay Payment
+Links, with the amount specified in paise or USD cents respectively. Enable
+international payments and USD acceptance on the configured Razorpay account;
+provider rejection is surfaced as a delivery error, never converted to INR or
+silently routed to Stripe. Pay Now opens the validated saved Razorpay link.
+Legacy public checkout routes validate approval, expiry and Paid state and
+redirect only to an already-issued Razorpay link; they do not create Stripe sessions. Provider
 return pages use the same branded invoice template as CRM and email and refresh
 verified status automatically. They expose only information printed on the invoice.
 
-### Stripe (USD invoices)
+### Stripe (historical payment reconciliation only)
+
+New invoice delivery and checkout do not use Stripe or require Stripe credentials.
+The existing integration, signed webhooks and verification helpers remain for
+reconciling historical Stripe payments. Never replace an active historical Stripe
+link without verifying its unpaid state and cancelling it through the provider.
+Already-sent email/PDF attachments cannot be rewritten.
 
 Use the organization's Stripe merchant account enabled for USD payments.
 In Stripe developer settings, obtain a **secret API key** (start in test mode).
@@ -755,7 +763,7 @@ delivery attempts if payment is complete in Stripe but pending in CRM.
 ### Courses and company setup
 
 Before deploying this billing build, apply
-`202611030002_course_billing_stripe.sql` with the tracked migration process:
+all migrations through `202611090002_company_course_prices_razorpay_usd.sql` with the tracked migration process:
 `npm run db:check`, then `npm run db:migrate`. Back up first and coordinate
 migration and application deployment in a maintenance window: the new creation
 function requires catalog inputs that older application builds do not send.
@@ -764,29 +772,127 @@ columns without deleting existing invoices, leads, payments or approvals.
 
 Open **Courses** as an Admin/Super Admin with `settings.manage`:
 
-1. Add each course's standard **INR and USD prices separately**. There is no
+1. Add each course's **DMHCA INR**, **DMHCA USD** and **IBMP USD** prices separately. There is no
    automatic currency conversion. Staff with `invoices.view` can read prices;
-   only administrators can change them or deactivate courses.
-2. Complete DMHCA and IBMP's real legal billing names, addresses and applicable
-   tax registration IDs. Issuance is blocked until the company address is set;
-   no legal/tax details are fabricated.
-3. Invoice PDFs and invoice delivery emails use the supplied logos and their
-   palettes: DMHCA navy/red (`#1c1d4e` / `#a91e2c`), IBMP navy/teal
-   (`#091b3c` / `#188574`). CRM, email and public status use one shared invoice
-   template with the same company palette. Legal billing details remain snapshotted.
+   only administrators can change them or deactivate courses. The new
+   `price_ibmp_usd` field starts unset; no DMHCA price is copied into it.
+   Missing IBMP fees block new IBMP invoices. IBMP permits USD only in the UI,
+   API validation and database creation functions. DMHCA permits INR and USD.
+   Database catalog prices override browser-submitted amounts; existing
+   enrollment prices and paid history are not rewritten when course prices change.
+2. Complete DMHCA's legal billing address, bank profile and tax details.
+   Both pricing-company selections now issue the DMHCA document, as requested;
+   `company_code` still distinguishes DMHCA/IBMP prices and enrollment grouping,
+   while new issuer snapshots come from the DMHCA company profile.
+3. Invoice PDFs and invoice delivery emails use the supplied DMHCA wordmark and
+   navy/soft-red palette (`#1c1d4e` / `#c44754`) for both selections.
+   CRM, email and public status use one shared invoice template. Legal billing details remain snapshotted.
+   DMHCA uses lighter neutral item/totals backgrounds and the softened red for
+   document accents, preserving white-text contrast of at least 4.5:1.
+   The supplied logo artwork is unchanged.
 
-Invoice PDFs follow the reference's angled header/footer, bill-to and invoice
-details, course table, totals, payment schedule and payment details sections.
-The DMHCA PDF embeds `public/DMHCA-invoice-logo.png`, a lossless PNG conversion
-of `public/DMHCA-Logo.webp` (PDF does not support WebP); IBMP embeds
-`public/IBMP-logo.png`. Both assets are included in server output tracing.
+Invoice PDFs print the exact `buildInvoiceHtml` template used by email and CRM,
+not a separately drawn approximation. Chromium preserves its angled header,
+fonts, colors, table borders, spacing, bank grid, footer and payment button.
+PDF text remains selectable and payment buttons remain clickable.
+Customer invoices omit the live-status link and payment-deadline line in every
+output. Checkout expiry enforcement and automatic verified-payment updates are unchanged.
+Invoice and receipt emails contain only this invoice, with the matching PDF attached;
+there is no greeting, introductory message or extra email footer.
+The renderer runs locally on the server, embeds the logo, disables JavaScript
+and blocks network requests; invoice data is not sent to a conversion service.
+Linux deployments use bundled `@sparticuz/chromium` (included in Next.js server
+output tracing). Windows/macOS development requires installed Chrome (or Edge
+on Windows); set `INVOICE_PDF_BROWSER_EXECUTABLE` for a nonstandard executable path.
+PDF rendering failures are surfaced through existing download/delivery errors,
+not replaced with an alternate invoice format.
+The DMHCA PDF embeds `public/DMHCA-invoice-wordmark.png`, the cropped 160 x 28
+reference artwork with its background removed. Its lettering is not recreated
+with a substitute font: weight, letter shapes, spacing and colors are preserved.
+IBMP-priced invoices embed the same DMHCA artwork. Assets are included in server output tracing.
+DMHCA uses the combined transparent logo directly on a clean white left header,
+with navy/red diagonal accents and no logo box, background, border or recoloring.
+The header uses the same combined artwork in CRM/public views, PDF and email CID attachments.
+It displays at its native 160 CSS pixels before proportional A4 scaling. Sharpness is limited
+by the supplied raster source; a vector or higher-resolution original is needed
+for higher print resolution without changing the lettering. A thin neutral rule separates the
+DMHCA header from the invoice body in both HTML and PDF.
+The DMHCA footer prints **NEWDELHI MEDICAL HEALTH CARE PVT. LTD.** in larger
+type and omits the thank-you/computer-generated sentence. Body, bank and terms
+typography and row padding are sized for readability without large empty gaps.
+Bank details use a narrow label column, lighter rows and a brand-accent rule;
+bank instructions and the three terms use compact spacing in every output.
+Bank details have a bordered label/value grid with padded cells in HTML and PDF.
+DMHCA customer documents use the fixed Refund Policy URL
+(`dmhca.in/refund-returns-policy`), enrolment/program wording and billing contact
+`info@dmhca.in` requested for its three terms, replacing previous profile-derived
+terms. IBMP-priced invoices use these same DMHCA terms.
+Its invoice-details column contains the invoice number and dates (plus optional
+tax ID/paid date), not status, issuer or payment-type lines. Discount reasons stay
+in the internal approval record and are omitted from DMHCA customer documents.
+The same reference layout is used for CRM/public previews, sent email and PDF;
+verified Paid/Pay Now controls and installment schedule status remain intact.
 Approved, unexpired online invoices have a clickable **Pay Now** PDF annotation
-and email button. Both open the selected provider directly through the stable
-checkout redirect, which creates/reuses an eligible Stripe session when needed.
+and email button. Both open the saved Razorpay payment link directly,
+with a compact rounded, raised button and explicit click-to-pay caption. HTML
+uses the same button treatment in CRM/public views and email.
+Pay Now uses the invoice's primary navy fill, no arrow and no amount in its label;
+the PDF button and its clickable annotation follow the same HTML dimensions. The saved
+invoice total still determines the provider checkout amount. Paid badges retain
+their green color and received amount. DMHCA invoice details print
+`GST: 07AAICN9985A1Z3` and use the same padded rows and line spacing in HTML and PDF
+so billing details do not overlap. Both pricing selections use the DMHCA document identifier.
+PDFs fit the complete invoice onto exactly one page by measuring the rendered
+document and proportionally scaling it within A4 dimensions. The final PDF canvas
+is trimmed to the invoice's right edge and footer bottom, removing unused paper
+without stretching the design. Its page size follows the content aspect ratio,
+so it can be printed using fit-to-page on A4. Nothing is
+cropped or discarded; unusually long content necessarily prints smaller.
+The generated page count is checked and a layout failure is surfaced instead
+of delivering an unexpected multi-page PDF. The branded header and footer occur
+once, in the same document order as the email.
+Both outputs use 8px footer bottom padding without empty contact rows.
+INR documents split the saved GST into **CGST (9%)** and **SGST (9%)** in
+line items and totals, preserving the original tax and invoice amount exactly.
+Odd paise are allocated cumulatively so component line sums match component
+totals. USD documents retain their existing Tax row. This is a presentation
+split, not a change to the stored tax calculation or checkout amount.
 Pending approval, tax review, paid, expired and financing invoices do not expose
 a payable PDF button. Downloading a PDF never creates a payment link or sends mail.
-Bank account details are not invented; payment details describe the configured
-secure provider or finance arrangement instead.
+Bank account details print only when configured in the snapshotted company profile;
+payment details also describe the configured secure provider or finance arrangement.
+
+The invoice-document migration (`202611090001_invoice_document_details.sql`)
+adds optional invoice metadata and company invoice profiles. Apply it with
+`npm run db:migrate` before running this application version (or use the normal
+`build:live` deployment). In **Courses > Invoice companies**, administrators can
+privately enter up to four bank accounts (holder, bank, account number, branch
+and IFSC or SWIFT/BIC), billing email, company phone, website and refund-policy
+URL. These are invoice-printable details, not passwords or payment credentials.
+They are copied to new invoice snapshots; editing the company does not change
+old invoices or existing enrollment snapshots.
+When bank accounts are configured, their bank-details section replaces the
+generic provider payment-details text. Pay Now, payment deadlines and verified
+payment/approval status remain available; brands without bank details retain
+their existing provider instructions.
+
+The creation form supports optional Student ID, billing phone, place of supply,
+course duration/learning mode and SAC code. Subsequent installments inherit the
+original metadata and allow invoice-specific edits. CRM, email, the live public
+invoice and PDF use the same snapshotted fields, bank accounts and exactly three
+terms (refund policy, course enrollment and billing queries). Both existing brand
+palettes remain unchanged; tax calculations are unchanged.
+
+Installment documents distinguish **verified payments received**, **balance still
+unpaid**, **current payment due** and **balance after this installment is paid**.
+For a 100,000 course with 30,000 verified and a 20,000 installment, these show
+30,000 received, 70,000 unpaid and 50,000 projected after payment. Pending and
+scheduled invoices reserve their amounts for new plans but do not count as paid.
+Pay Now collects only the current invoice total. After provider/finance
+verification, the reopened invoice shows a green **Paid** amount with no payment
+link, and paid amounts are never deducted twice. Already-sent emails/downloaded
+PDFs are static: the live invoice and a newly issued paid receipt show the updated
+status and balances. No payment is marked paid merely because checkout was opened.
 
 Set each lead's billing address in Overview, or edit the prefilled invoice
 address. Users with `leads.edit` can save the edited address back to the lead;
@@ -808,7 +914,7 @@ verification require `invoices.approve` (Admin/Super Admin by default). Invoices
 support one-shot, installment, EMI and loan modes. Discounts use a percentage and
 mandatory reason; discounted invoices await approval, while un-discounted
 invoices issue immediately and automatically create a Razorpay Payment Link for
-INR or Stripe Checkout for USD (full payment/installments). The lead is the
+INR and USD (full payment/installments). The lead is the
 recipient; both the invoice creator and assigned lead owner are copied,
 deduplicated case-insensitively. A valid lead email, billing address and active
 assigned owner with an email are required. Discounted invoices are delivered
@@ -869,8 +975,8 @@ silently extending them.
 Invoice creation includes a company-branded preview and shows the lead and owner
 email recipients before save. The email body and saved CRM preview share the same
 invoice layout: logo header, billing details, course items, discount/tax totals,
-payment schedule and company footer. DMHCA uses its navy/red logo palette; IBMP
-uses navy/teal. Emails embed the company logo and attach the matching PDF.
+payment schedule and company footer. Both pricing selections use the DMHCA
+navy/red logo palette. Emails embed the DMHCA logo and attach the matching PDF.
 Save automatically sends non-discounted invoices to the lead, copying the current
 lead owner and original invoice creator. Discounted invoices stay in CRM awaiting
 approval; approval automatically sends eligible invoices without a second send
@@ -881,14 +987,23 @@ SMTP failures remain visible on the saved invoice and as warnings, not success
 notifications. Provider/SMTP leases prevent duplicate sends; uncertain delivery
 requires reconciliation before retrying.
 Ready online-payment invoices include a clickable **Pay Now** button in the CRM
-register, saved invoice, email and PDF. Each button opens Razorpay (INR) or Stripe
-(USD) directly for the exact full-payment or installment amount, never the full
+register, saved invoice, email and PDF. Each button opens Razorpay for INR or USD
+directly for the exact full-payment or installment amount, never the full
 course total for a partial installment. No second invoice design is displayed.
 PDFs use the configured public invoice origin.
 Verified Razorpay `payment_link.paid` and Stripe `checkout.session.completed` /
 `checkout.session.async_payment_succeeded` webhooks persist Paid status and send
 the receipt. Configure those events and webhook secrets with the providers;
 the public invoice and CRM refresh automatically to show Paid and remove Pay Now.
+Open public invoices and selected unpaid CRM invoices check every two seconds
+while visible, and immediately on return from checkout. The CRM uses a small,
+RLS-scoped status read and reloads the full register only when payment state
+changes; the unselected register retains its 15-second refresh. Requests do not
+overlap. This is automatic signed-webhook confirmation, not trust in a checkout
+redirect or a manual status button. Provider event delivery and network latency
+still apply; local-only servers need a public HTTPS webhook forwarder. Direct
+bank transfers still require evidence verification; printed bank details are
+not a bank-transaction feed.
 Email/PDF copies already delivered remain static; the checkout redirect rejects
 already-paid invoices and prevents another payment. Older copies with invoice-page
 links display the same shared branded template; newly delivered copies open checkout.
@@ -900,7 +1015,7 @@ excluding cancelled or rejected invoices. Outstanding still deducts confirmed
 payments only. Search also matches the
 course name. **Record payment** opens visible fields for an external payment.
 The creator, current lead owner (with `invoices.create`) or an administrator can
-paste a company Razorpay/Stripe URL and choose **Verify link & mark paid**.
+paste a company Razorpay URL (or a historical Stripe URL) and choose **Verify link & mark paid**.
 The server checks the configured merchant account, customer/invoice binding,
 currency, exact amount and captured/paid provider state before changing status.
 Payments cannot be reused across invoices. Approved scheduled or expired invoices
@@ -974,16 +1089,12 @@ be approved from the register. Approval always requires confirmation.
 
 New Razorpay links include the exact provider `expire_by` deadline. **Pay Now**
 in the CRM, public invoice, email and PDF opens the validated saved Razorpay link
-directly for INR. This does not depend on a public CRM redirect being deployed.
-USD uses the stable CRM payment redirect to Stripe Checkout. Browser payment buttons
+directly for INR and USD. This does not depend on a public CRM redirect being deployed.
+Browser payment buttons
 open a separate tab so the standard invoice remains available to show confirmation.
-Stripe reuses an
-open Checkout session or creates a new one after verified expiry. Stripe supports
-only 30-minute to 24-hour sessions, so each session has its own provider expiry
-and database history. A final session opened near the deadline may run **up to
-30 minutes after the four-day deadline**, as approved for this workflow. No new
-session is opened after the invoice deadline. Old-session webhook confirmations
-remain valid, and checkout is not renewed when a payment is complete/processing.
+Existing Stripe session history remains available for legacy reconciliation;
+new invoice delivery refuses an outstanding Stripe session rather than creating
+a second payable link. Old-session webhook confirmations remain valid.
 Ambiguous provider creation/cancellation retains a lease for finance reconciliation.
 
 The CRM and public page show **Expired** after the deadline and remove payment
@@ -1007,8 +1118,8 @@ only a verified Razorpay/Stripe webhook, authenticated provider verification, or
 an Admin/Super Admin confirmation with a reference and evidence can mark an invoice
 paid. The CRM register refreshes every 15 seconds while invoices await payment or
 approval. **Check payment status** reconciles the saved provider payment if a webhook
-was missed. **Verify payment URL** verifies a pasted Razorpay link (INR) or Stripe
-Checkout/Payment Link (USD) against the configured company merchant account.
+was missed. **Verify payment URL** verifies a pasted Razorpay link (INR or USD),
+or a historical Stripe Checkout/Payment Link, against the configured merchant account.
 Verification requires a paid/captured payment of the exact invoice amount/currency,
 bound to the invoice or matching billing email. Pasting an unpaid or arbitrary URL
 never marks an invoice paid. Reused payments cannot settle a different invoice.
@@ -1049,12 +1160,11 @@ host reachability alone does not prove that those routes have been deployed.
 Invoice/receipt email
 acceptance is recorded; SMTP acceptance is not a guarantee of inbox delivery.
 Configure the finance sender to be authorized for both company identities.
-Company choice changes branding, not merchant accounts or settlement currency;
-each currency currently uses the single configured provider account.
+Company choice selects separate catalog prices; both use DMHCA invoice branding
+and the single configured Razorpay merchant account. Settlement rules are controlled by Razorpay.
 
-Stripe Checkout sessions expire within 24 hours. Normal, confirmed session expiry
-is renewed through the stable public payment page within the invoice deadline;
-finance must reconcile uncertain provider operations before replacing a checkout.
+Historical Stripe sessions are not renewed by invoice delivery or public checkout.
+Finance must reconcile uncertain provider operations before replacing a checkout.
 Never clear locks or retry blindly. Existing payment/email/receipt locks prevent
 duplicate creation or delivery after ambiguous timeouts. Test INR/USD payments,
 discount approval, installment balances and Loan/EMI evidence in provider test mode

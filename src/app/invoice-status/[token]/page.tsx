@@ -5,6 +5,9 @@ import { useParams } from "next/navigation";
 import { legacyCompany } from "@/lib/billing";
 import { buildInvoiceHtml } from "@/lib/invoice-document";
 import { invoiceStatusShouldRefresh } from "@/lib/invoice-policy";
+import type { InvoiceDocumentDetails } from "@/lib/billing";
+import type { InstallmentPaymentSummary } from "@/lib/invoice-payment-summary";
+import type { BillingCompany } from "@/lib/billing";
 
 type PaymentStatus = {
   invoiceNo: string;
@@ -26,7 +29,9 @@ type PaymentStatus = {
   installmentNumber: number | null;
   paymentType: string;
   notes: string | null;
-  company: { name: string; address: string; taxId: string; code: string };
+  documentDetails?: Partial<InvoiceDocumentDetails>;
+  paymentSummary?: InstallmentPaymentSummary;
+  company: { name: string; address: string; taxId: string; code: string; invoiceProfile?: BillingCompany["invoice_profile"] };
   paymentUrl: string | null;
   expiresAt: string | null;
 };
@@ -44,6 +49,10 @@ export default function InvoiceStatusPage() {
     const load = async () => {
       if (!active || loading || finished) return;
       clearTimeout(timer);
+      if (document.visibilityState === "hidden") {
+        timer = setTimeout(load, 2000);
+        return;
+      }
       loading = true;
       try {
         const response = await fetch(`/api/invoice-status/${encodeURIComponent(params.token)}`, { cache: "no-store" });
@@ -60,7 +69,7 @@ export default function InvoiceStatusPage() {
         if (active) setError(error instanceof Error ? error.message : "Invoice status could not be refreshed. Reload this page to retry.");
       } finally {
         loading = false;
-        if (active && !finished) timer = setTimeout(load, 10000);
+        if (active && !finished) timer = setTimeout(load, 2000);
       }
     };
     const resume = () => { if (document.visibilityState === "visible") void load(); };
@@ -85,8 +94,10 @@ export default function InvoiceStatusPage() {
     payment_type: status.paymentType, course_total: status.courseTotal, installment_number: status.installmentNumber,
     payment_expires_at: status.expiresAt,
     paid_at: status.paidAt,
+    document_details: status.documentDetails,
+    payment_summary: status.paymentSummary,
     company_snapshot: { ...legacyCompany, code: status.company.code === "IBMP" ? "IBMP" : "DMHCA",
-      legal_name: status.company.name, address: status.company.address, tax_id: status.company.taxId },
+      legal_name: status.company.name, address: status.company.address, tax_id: status.company.taxId, invoice_profile: status.company.invoiceProfile },
   }, { paymentUrl: status.paymentUrl }) : "";
 
   return <main style={{ minHeight: "100vh", padding: "24px 12px", background: "#edf1f7" }}>

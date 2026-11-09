@@ -11,7 +11,7 @@ function load(relative, mocks) {
   const source = ts.transpileModule(readFileSync(path.join(__dirname, "..", relative), "utf8"), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021 },
   }).outputText;
-  new Function("exports", "require", source)(exports, name => name in mocks ? mocks[name] : require(name));
+  new Function("exports", "require", source)(exports, name => name in mocks ? mocks[name] : name.startsWith("@/") ? load(`${name.replace("@/", "src\\").replaceAll("/", "\\")}.ts`, mocks) : require(name));
   return exports;
 }
 function fixture({ denied = false, profileError = false, originAllowed = true, invoiceRows, role = "counselor", invoiceSchema, singleInvoice, issuedInvoice, invoiceById, assigneeId, verificationError, receiptError, deliveries = [], deliveryError, rpcData = "new-invoice", rpcError = null, beforeRead = (_name, value) => Promise.resolve(value) } = {}) {
@@ -79,8 +79,25 @@ function fixture({ denied = false, profileError = false, originAllowed = true, i
     "@/lib/server/env": { appUrl: () => "https://invoices.example.com" },
     "@/lib/server/integration-settings": { decryptIntegrationValues: () => ({ token: "saved-token" }) },
   });
-  return { calls, route: load("src\\app\\api\\invoices\\route.ts", mocks), detail: load("src\\app\\api\\invoices\\[id]\\route.ts", mocks) };
+  return { calls, route: load("src\\app\\api\\invoices\\route.ts", mocks), detail: load("src\\app\\api\\invoices\\[id]\\route.ts", mocks),
+    status: load("src\\app\\api\\invoices\\[id]\\status\\route.ts", mocks) };
 }
+test("lightweight invoice status uses the signed-in RLS client and exposes only status and paid date", async () => {
+  const { status, calls } = fixture({ singleInvoice: { status: "paid", paid_at: "2026-11-09T10:00:00Z", billing_email: "private@example.com" } });
+  const result = await status.GET(new Request("https://crm.example/status"), { params: Promise.resolve({ id: leadId }) });
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.data, { status: "paid", paidAt: "2026-11-09T10:00:00Z" });
+  assert.deepEqual(calls, [["permission", "invoices.view"], ["from", "invoices"], ["select", "status,paid_at"], ["eq", "id", leadId]]);
+});
+test("lightweight invoice status rejects inaccessible or invalid invoice IDs", async () => {
+  const { status, calls } = fixture({ invoiceById: {} });
+  const result = await status.GET(new Request("https://crm.example/status"), { params: Promise.resolve({ id: leadId }) });
+  assert.equal(result.status, 404);
+  calls.length = 0;
+  const invalid = await status.GET(new Request("https://crm.example/status"), { params: Promise.resolve({ id: "invalid" }) });
+  assert.equal(invalid.status, 400);
+  assert.ok(!calls.some(call => call[0] === "from"));
+});
 test("lead invoices validate access and filter in the database before the latest-200 limit", async () => {
   const { route, calls } = fixture();
   const result = await route.GET(new Request(`https://crm.example/api/invoices?leadId=${leadId}`));
@@ -101,14 +118,14 @@ test("global invoices preserve RLS-scoped listing and accessible lead choices", 
   assert.ok(!calls.some(call => call[0] === "eq"));
   assert.deepEqual(calls[0], ["permission", "invoices.view"]);
 });
-test("CRM payment URLs use the live public invoice and disappear after payment or when unavailable", async () => {
+test("CRM payment URLs use Razorpay for both currencies and disappear after payment or when unavailable", async () => {
   for (const payment_type of ["one_shot", "installments"]) {
     for (const currency of ["INR", "USD"]) {
       const invoice = { id: "payable", lead_id: leadId, payment_type, currency, status: "sent", total: 125,
-        course_total: 1000, created_at: new Date().toISOString(), status_token_encrypted: "encrypted" };
+        course_total: 1000, created_at: new Date().toISOString(), status_token_encrypted: "encrypted", razorpay_short_url: "https://rzp.io/i/payment" };
       const { route } = fixture({ invoiceRows: [invoice] });
       const read = () => route.GET(new Request("https://crm.example/api/invoices"));
-      assert.equal((await read()).data.invoices[0].payment_url, "https://invoices.example.com/api/invoice-status/saved-token/pay");
+      assert.equal((await read()).data.invoices[0].payment_url, invoice.razorpay_short_url);
       for (const status of ["paid", "scheduled", "pending_approval", "cancelled", "rejected", "expired"]) {
         invoice.status = status;
         assert.equal((await read()).data.invoices[0].payment_url, null, status);
@@ -162,7 +179,7 @@ test("independent invoice reads start together and all must finish before return
   let finished = false;
   const response = route.GET(new Request("https://crm.example/api/invoices")).then(result => { finished = true; return result; });
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual([...pending.keys()].sort(), ["invoices", "leads", "profiles", "razorpay", "smtp", "stripe"]);
+  assert.deepEqual([...pending.keys()].sort(), ["invoices", "leads", "profiles", "razorpay", "smtp"]);
   for (const [name, release] of pending) if (name !== "smtp") release();
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(finished, false);

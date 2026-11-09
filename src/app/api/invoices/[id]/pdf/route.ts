@@ -1,7 +1,8 @@
 import { HttpError, jsonError, requireUser } from "@/lib/server/auth";
 import { databaseError, parseInput, uuid } from "@/lib/server/operational";
 import { buildInvoicePdf } from "@/lib/server/invoice-pdf";
-import { invoicePaymentUrl } from "@/lib/server/invoice-payment-url";
+import { invoicePaymentUrl, invoiceViewUrl } from "@/lib/server/invoice-payment-url";
+import { loadInvoicePaymentSummary } from "@/lib/server/invoice-payment-summary";
 
 export async function GET(_request: Request, context: { params: Promise<{ id: string }> }) {
   try {
@@ -13,7 +14,8 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
     const { data: lead, error: leadError } = await supabase.from("leads").select("name,email").eq("id", invoice.lead_id).maybeSingle();
     databaseError(leadError);
     const paymentUrl = invoicePaymentUrl(invoice);
-    const pdf = await buildInvoicePdf(invoice, lead, paymentUrl);
+    const payment_summary = await loadInvoicePaymentSummary(supabase, invoice);
+    const pdf = await buildInvoicePdf({ ...invoice, payment_summary }, lead, paymentUrl, invoiceViewUrl(invoice));
     return new Response(pdf, { headers: { "Content-Type": "application/pdf", "Content-Disposition": `attachment; filename="${invoice.invoice_no}.pdf"`, "Cache-Control": "private, no-store" } });
   } catch (error) { return jsonError(error); }
 }

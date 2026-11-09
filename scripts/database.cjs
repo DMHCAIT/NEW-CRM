@@ -6,7 +6,7 @@ const { Client } = require("pg");
 const root = resolve(__dirname, "..");
 const requiredColumns = [
   "leads.billing_address", "gmail_connections.auth_mode",
-  "courses.price_inr", "courses.price_usd", "invoice_companies.code",
+  "courses.price_inr", "courses.price_usd", "courses.price_ibmp_usd", "invoice_companies.code",
   "invoices.course_id", "invoices.company_code", "invoices.company_snapshot",
   "invoices.billing_address", "invoices.status_token_encrypted",
   "invoices.stripe_session_id", "invoices.stripe_checkout_url", "payments.stripe_payment_id",
@@ -16,6 +16,7 @@ const requiredColumns = [
   "invoices.pricing_review_note", "invoices.payment_revision", "invoice_checkout_sessions.session_id",
   "invoices.invoice_date", "invoices.scheduled_for", "invoices.plan_request_id",
   "invoices.delivery_error", "invoices.delivery_attempted_at",
+  "invoice_companies.invoice_profile", "invoices.document_details",
 ];
 
 function databaseOptions(env, projectRoot = root) {

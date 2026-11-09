@@ -49,7 +49,7 @@ export async function POST(request: Request) {
       .select("id,invoice_no,total,currency,status,razorpay_payment_link_id,payment_revision")
       .eq("razorpay_payment_link_id", link.id).maybeSingle();
     databaseError(error);
-    if (!invoice || invoice.currency !== "INR" || invoicePaymentReference(invoice.id, invoice.payment_revision) !== link.reference_id || Math.round(Number(invoice.total) * 100) !== payment.amount || invoice.currency !== payment.currency)
+    if (!invoice || !["INR", "USD"].includes(invoice.currency) || invoicePaymentReference(invoice.id, invoice.payment_revision) !== link.reference_id || Math.round(Number(invoice.total) * 100) !== payment.amount || invoice.currency !== payment.currency)
       throw new HttpError(400, "Razorpay payment link does not match an invoice.");
     const { data: recorded, error: paymentError } = await admin.rpc("operational_record_payment_link", {
       p_invoice_id: invoice.id,

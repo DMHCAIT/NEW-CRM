@@ -6,13 +6,13 @@ import { databaseError, integrationRequirements } from "@/lib/server/operational
 import { decryptIntegrationValues, encryptIntegrationValues, integrationStatus } from "@/lib/server/integration-settings";
 import { createInvoicePaymentLink, createPublicStatusToken } from "@/lib/server/razorpay";
 import { buildInvoicePdf, type InvoicePdfRecord } from "@/lib/server/invoice-pdf";
-import { escapeHtml, sendMail } from "@/lib/server/mailer";
+import { sendMail } from "@/lib/server/mailer";
 import { appUrl } from "@/lib/server/env";
-import { ensureInvoiceCheckout } from "@/lib/server/invoice-checkout";
 import { invoiceDeadline, invoiceProviderUrlValid, invoiceWindowExpired } from "@/lib/invoice-policy";
 import { invoiceBranding } from "@/lib/invoice-branding";
 import { legacyCompany } from "@/lib/billing";
 import { buildInvoiceHtml } from "@/lib/invoice-document";
+import { loadInvoicePaymentSummary } from "@/lib/server/invoice-payment-summary";
 
 type InvoiceRow = InvoicePdfRecord & {
   id: string;
@@ -37,8 +37,8 @@ type InvoiceRow = InvoicePdfRecord & {
 };
 type LeadRow = { id: string; name: string; email: string | null };
 
-function invoiceEmail(document: string, name: string, message: string) {
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;padding:24px 12px;background:#edf1f7;font-family:Arial,sans-serif"><div style="max-width:820px;margin:0 auto"><p style="color:#34465e;font-size:14px">Hello ${escapeHtml(name)},<br>${escapeHtml(message)}</p>${document}<p style="color:#637187;font-size:12px">A copy is sent to your lead owner and invoice creator. Keep this invoice for your records.</p></div></body></html>`;
+function invoiceEmail(document: string) {
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;padding:24px 12px;background:#edf1f7;font-family:Arial,sans-serif"><div style="max-width:820px;margin:0 auto">${document}</div></body></html>`;
 }
 
 export async function deliverInvoice(admin: SupabaseClient, invoice: InvoiceRow, lead: LeadRow, creatorEmail?: string | null) {
@@ -81,7 +81,7 @@ async function sendInvoice(admin: SupabaseClient, invoice: InvoiceRow, lead: Lea
   if (!emailClaim) throw new HttpError(409, "Invoice email delivery is in progress or requires reconciliation.");
 
   let shortUrl = ["one_shot", "installments"].includes(invoice.payment_type)
-    ? invoice.currency === "USD" ? invoice.stripe_checkout_url ?? null : invoice.razorpay_short_url ?? null
+    ? invoice.razorpay_short_url ?? null
     : null;
   let statusUrl = "";
   let paymentUrl = "";
@@ -100,13 +100,12 @@ async function sendInvoice(admin: SupabaseClient, invoice: InvoiceRow, lead: Lea
     paymentUrl = `${appUrl("invoice")}/api/invoice-status/${encodeURIComponent(publicToken.token)}/pay`;
     if (invoice.payment_type === "one_shot" || invoice.payment_type === "installments") {
       if (!["INR", "USD"].includes(invoice.currency)) throw new HttpError(400, "Only INR and USD online payments are supported.");
-      const provider = invoice.currency === "USD" ? "stripe" : "razorpay";
+      const provider = "razorpay";
       const configuration = await integrationStatus(provider, integrationRequirements[provider]);
       if (!configuration.configured) throw new HttpError(503, `Payment setup missing: ${configuration.missing.join(", ")}.`);
-      if (provider === "stripe") {
-        await ensureInvoiceCheckout(admin, { ...invoice, payment_expires_at: deadline, billing_email: lead.email }, publicToken.token);
-        shortUrl = statusUrl;
-      } else if (!shortUrl) {
+      if (invoice.stripe_session_id)
+        throw new HttpError(409, "Cancel and reconcile the existing Stripe checkout before issuing a Razorpay payment link.");
+      if (!shortUrl) {
         const lockAt = new Date().toISOString();
         const { data: claim, error: claimError } = await admin.from("invoices")
           .update({ payment_link_lock_at: lockAt })
@@ -136,8 +135,8 @@ async function sendInvoice(admin: SupabaseClient, invoice: InvoiceRow, lead: Lea
         }
       }
     }
-    if (invoice.currency === "INR" && shortUrl) {
-      if (!invoiceProviderUrlValid(shortUrl, "INR")) throw new HttpError(502, "The Razorpay payment URL is invalid. Contact finance.");
+    if (shortUrl) {
+      if (!invoiceProviderUrlValid(shortUrl, invoice.currency)) throw new HttpError(502, "The Razorpay payment URL is invalid. Contact finance.");
       paymentUrl = shortUrl;
     }
     if (!smtp.configured) throw new HttpError(503, `Email setup missing: ${smtp.missing.join(", ")}.`);
@@ -153,18 +152,19 @@ async function sendInvoice(admin: SupabaseClient, invoice: InvoiceRow, lead: Lea
       .select("*,invoice_items(*)").eq("id", invoice.id).maybeSingle();
     databaseError(invoiceError);
     if (!fullInvoice) throw new HttpError(500, "The saved invoice could not be loaded for its email and PDF.");
+    fullInvoice.payment_summary = await loadInvoicePaymentSummary(admin, fullInvoice);
     const branding = invoiceBranding(fullInvoice.company_snapshot ?? { ...legacyCompany, code: invoice.company_code === "IBMP" ? "IBMP" : "DMHCA", legal_name: invoice.company_code ?? legacyCompany.legal_name });
     const document = buildInvoiceHtml(fullInvoice, {
       leadName: lead.name, leadEmail: lead.email, logoUrl: "cid:invoice-logo",
-      paymentUrl: shortUrl ? paymentUrl : null, viewUrl: shortUrl ? undefined : statusUrl,
+      paymentUrl: shortUrl ? paymentUrl : null, viewUrl: statusUrl,
     });
     const [pdf, logo] = await Promise.all([
-      buildInvoicePdf(fullInvoice, lead, shortUrl ? paymentUrl : null),
-      readFile(join(process.cwd(), "public", branding.code === "IBMP" ? "IBMP-logo.png" : "DMHCA-invoice-logo.png")),
+      buildInvoicePdf(fullInvoice, lead, shortUrl ? paymentUrl : null, statusUrl),
+      readFile(join(process.cwd(), "public", "DMHCA-invoice-wordmark.png")),
     ]);
     mail = {
       to: lead.email, cc, subject: `Invoice ${invoice.invoice_no}`, fromName: branding.legal_name,
-      html: invoiceEmail(document, lead.name, "Please find your invoice below and attached as a PDF."),
+      html: invoiceEmail(document),
       attachments: [
         { filename: `${invoice.invoice_no}.pdf`, content: pdf, contentType: "application/pdf" },
         { filename: `${branding.code}-logo.png`, content: logo, contentType: "image/png", cid: "invoice-logo" },
@@ -186,6 +186,7 @@ export async function sendPaymentReceipt(admin: SupabaseClient, invoiceId: strin
   const { data: invoice, error } = await admin.from("invoices").select("*,invoice_items(*)").eq("id", invoiceId).maybeSingle();
   databaseError(error);
   if (!invoice) throw new Error("Paid invoice is unavailable for receipt delivery.");
+  invoice.payment_summary = await loadInvoicePaymentSummary(admin, invoice);
   const { data: lead, error: leadError } = await admin.from("leads").select("id,name,email").eq("id", invoice.lead_id).maybeSingle();
   databaseError(leadError);
   if (lead) {
@@ -199,7 +200,7 @@ export async function sendPaymentReceipt(admin: SupabaseClient, invoiceId: strin
   const branding = invoiceBranding(invoice.company_snapshot ?? { ...legacyCompany, code: invoice.company_code === "IBMP" ? "IBMP" : "DMHCA", legal_name: invoice.company_code ?? legacyCompany.legal_name });
   const [pdf, logo] = await Promise.all([
     buildInvoicePdf(invoice, lead),
-    readFile(join(process.cwd(), "public", branding.code === "IBMP" ? "IBMP-logo.png" : "DMHCA-invoice-logo.png")),
+    readFile(join(process.cwd(), "public", "DMHCA-invoice-wordmark.png")),
   ]);
   const receiptLock = new Date().toISOString();
   const { data: receiptClaim, error: receiptClaimError } = await admin.from("invoices")
@@ -220,7 +221,6 @@ export async function sendPaymentReceipt(admin: SupabaseClient, invoiceId: strin
     fromName: branding.legal_name,
     html: invoiceEmail(
       buildInvoiceHtml(invoice, { leadName: lead.name, leadEmail: lead.email, logoUrl: "cid:invoice-logo" }),
-      lead.name, "Your payment has been verified. The same invoice is now Paid, shown below and attached as a PDF.",
     ),
     attachments: [
       { filename: `${invoice.invoice_no}-receipt.pdf`, content: pdf, contentType: "application/pdf" },

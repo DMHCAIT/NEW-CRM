@@ -9,7 +9,7 @@ function load(file, mocks = {}) {
   const code = ts.transpileModule(readFileSync(path.join(__dirname, "..", file), "utf8"), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021 },
   }).outputText;
-  new Function("exports", "require", code)(exports, name => name in mocks ? mocks[name] : require(name));
+  new Function("exports", "require", code)(exports, name => name in mocks ? mocks[name] : name.startsWith("@/") ? load(`${name.replace("@/", "src\\").replaceAll("/", "\\")}.ts`, mocks) : require(name));
   return exports;
 }
 class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }

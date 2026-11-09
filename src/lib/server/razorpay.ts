@@ -33,8 +33,8 @@ export async function createInvoicePaymentLink(input: {
   revision?: number;
 }) {
   const amountPaise = Math.round(input.amount * 100);
-  if (input.currency !== "INR") throw new Error("Razorpay invoice payments must use INR. USD invoices use Stripe.");
-  if (amountPaise < 100) throw new Error("Invoice total must be at least ₹1 to create a Razorpay Payment Link.");
+  if (!["INR", "USD"].includes(input.currency)) throw new Error("Razorpay invoice payments support INR and USD only.");
+  if (!Number.isSafeInteger(amountPaise) || amountPaise < 100) throw new Error("Invoice total must be at least one currency unit to create a Razorpay Payment Link.");
   const response = await fetch("https://api.razorpay.com/v1/payment_links", {
     method: "POST",
     redirect: "error",
