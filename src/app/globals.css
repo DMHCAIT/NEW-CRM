@@ -450,10 +450,18 @@ label.form-field { display: grid; align-content: start; gap: 7px; min-width: 0; 
   border-color: #c84a42;
   background-color: #fff1f0;
 }
-:root body :is([role="tab"][aria-selected="true"], .detail-tabs button.selected) {
+:root body :is([role="tab"], .detail-tabs button, .role-tab, .workspace-view-tabs > button) {
+  background-color: transparent;
+  border-radius: 0;
+  box-shadow: none;
+}
+:root body :is([role="tab"][aria-selected="true"], .detail-tabs button.selected, .role-tab.selected, .workspace-view-tabs > button[aria-current="page"]) {
   color: #176ac0;
-  background-color: #edf5ff;
-  border-radius: 6px;
+  border-bottom: 3px solid #1677d2;
+}
+:root body :is([role="tab"], .detail-tabs button, .role-tab, .workspace-view-tabs > button):hover:not(:disabled) {
+  color: #176ac0;
+  background-color: transparent;
 }
 :root body :is(dialog, .searchable-dropdown-floating, .searchable-dropdown-panel) {
   box-shadow: 0 12px 36px #203b601f !important;
@@ -463,6 +471,16 @@ label.form-field { display: grid; align-content: start; gap: 7px; min-width: 0; 
 .section-loading > [role="status"] { margin: 0 0 18px; color: var(--muted); }
 .section-content { display: contents; }
 .section-content[hidden] { display: none; }
+.notification-bell { position: relative; }
+.notification-badge { position: absolute; top: -3px; right: -5px; min-width: 17px; padding: 1px 4px; border-radius: 10px; background: #c83d42; color: #fff; font-size: 10px; line-height: 15px; text-align: center; }
+.notification-load-error { position: absolute; right: 0; top: 100%; z-index: 30; width: 180px; padding: 6px; background: #fff1f0; color: #b42318; font-size: 11px; }
+.notification-list { margin: 0; padding: 0; list-style: none; }
+.notification-list li { display: flex; align-items: center; gap: 12px; padding: 12px 18px; border-bottom: 1px solid var(--border); }
+.notification-list li > :first-child { display: grid; flex: 1; min-width: 0; gap: 4px; overflow-wrap: anywhere; }
+.notification-list strong { font-weight: 500; }
+.notification-list span, .notification-list time { font-size: 12px; color: var(--muted); }
+.notification-list a:hover strong { color: var(--accent); text-decoration: underline; }
+.notification-unread { background: #f0f6ff; }
 .global-lead-search { position: relative; width: clamp(150px, 22vw, 300px); }
 .global-search-input { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 10px; border: 1px solid var(--border); border-radius: 7px; background: #fff; }
 .global-search-input input { min-width: 0; width: 100%; border: 0; background: transparent; font: inherit; font-size: 13px; }

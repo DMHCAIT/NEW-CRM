@@ -6,15 +6,17 @@ export function requireEnv(name: string): string {
   return value;
 }
 
-export function appUrl(purpose?: "invoice"): string {
-  if (purpose === "invoice" && process.env.INVOICE_PUBLIC_URL) {
+export function appUrl(purpose?: "invoice" | "notification"): string {
+  const publicUrlKey = purpose === "notification" ? "NOTIFICATION_PUBLIC_URL" : "INVOICE_PUBLIC_URL";
+  const publicUrl = purpose ? process.env[publicUrlKey] : undefined;
+  if (publicUrl) {
     try {
-      const url = new URL(process.env.INVOICE_PUBLIC_URL);
+      const url = new URL(publicUrl);
       if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || url.pathname !== "/")
-        throw new Error("Invalid invoice origin");
+        throw new Error("Invalid public origin");
       return url.origin;
     } catch {
-      throw new ConfigurationError("INVOICE_PUBLIC_URL must be a public HTTPS origin without a path, query or credentials.");
+      throw new ConfigurationError(`${publicUrlKey} must be a public HTTPS origin without a path, query or credentials.`);
     }
   }
   const explicit = process.env.NEXT_PUBLIC_APP_URL;

@@ -21,7 +21,7 @@ export const integrationDefinitions: IntegrationDefinition[] = [
     { key: "SMTP_FROM", label: "Sender address", required: true, placeholder: "Finance <finance@example.com>" },
     { key: "SMTP_SECURE", label: "TLS mode", placeholder: "true for port 465; false for STARTTLS" },
   ], help: "Use a public SMTP hostname. TLS is required; private or loopback servers are not supported. Test the saved connection, then send a test email to check provider acceptance, not guaranteed inbox delivery. These settings also send login verification codes: incorrect credentials can prevent future sign-ins. Lead emails continue to use each user's Gmail." },
-  { id: "gmail", name: "Gmail mailbox", category: "Personal email", detail: "Connect any @dmhca.in Google mailbox matching the signed-in user's CRM login.", endpoint: "/api/auth/gmail/callback",
+  { id: "gmail", name: "Gmail mailbox", category: "Personal email", detail: "Automatically use each employee's Workspace mailbox with delegated service-account access, or connect individual @dmhca.in accounts.", endpoint: "/api/auth/gmail/callback",
     fields: [
       { key: "GOOGLE_MAILBOX_MODE", label: "Mailbox authorization mode" },
       { key: "GOOGLE_CLIENT_ID", label: "Google OAuth client ID" }, { key: "GOOGLE_CLIENT_SECRET", label: "Google OAuth client secret", secret: true },

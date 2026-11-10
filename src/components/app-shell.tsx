@@ -4,18 +4,18 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { PrefetchKind } from "next/dist/client/components/router-reducer/router-reducer-types";
 import {
-  Bell,
   LogOut,
   Menu,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState, useTransition, type MouseEvent, type SyntheticEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useTransition, type MouseEvent, type SyntheticEvent } from "react";
 import { navigationItems } from "@/lib/navigation";
 import { RolePreviewContext } from "@/components/role-preview-context";
 import type { CurrentUser } from "@/lib/types";
 import { apiRequest, clearApiReadCache, errorMessage, getApiReadSnapshot, getPendingApiRead, prefetchApiRead, subscribeApiWrites } from "@/lib/crm-data";
 import { SectionLoading } from "@/components/section-loading";
 import { GlobalLeadSearch } from "@/components/global-lead-search";
+import { NotificationBell } from "@/components/notification-bell";
 import { loadLeadDetailData } from "@/lib/live-leads-client";
 import { prepareSidebarSections, sectionReadPaths } from "@/lib/section-preparation";
 
@@ -31,7 +31,7 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
   const preparedSections = useRef(new Map<string, number>());
   function prefetchSection(href: string, prepareRoute = true, background = false) {
     const preparedAt = preparedSections.current.get(href);
-    if (prepareRoute && href !== "/" && href !== "/admin/login-activity"
+    if (prepareRoute && href !== "/admin/login-activity"
       && (preparedAt === undefined || Date.now() - preparedAt >= 25000)) {
       router.prefetch(href, { kind: PrefetchKind.FULL });
       preparedSections.current.set(href, Date.now());
@@ -83,7 +83,8 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
   const latestPreparation = useRef({ user, pathname, prepare: prefetchSection, router });
   latestPreparation.current = { user, pathname, prepare: prefetchSection, router };
   const permissionKey = user?.permissions.join(",");
-  useEffect(() => {
+  // Clear identity-bound data before child effects start their initial reads.
+  useLayoutEffect(() => {
     clearApiReadCache(); preparedSections.current.clear(); preparedDetails.current.clear();
   }, [user?.id, permissionKey]);
   useEffect(() => subscribeApiWrites(() => {
@@ -100,7 +101,7 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
       const currentReads = sectionReadPaths(current.pathname, actor).map(path => getPendingApiRead(path));
       void Promise.allSettled(currentReads).then(() => {
         if (cancelled || document.visibilityState !== "visible") return;
-        if (sectionReadPaths(current.pathname, actor).length > 0) {
+        if (current.pathname === "/" || sectionReadPaths(current.pathname, actor).length > 0) {
           current.router.prefetch(current.pathname, { kind: PrefetchKind.FULL });
           preparedSections.current.set(current.pathname, Date.now());
         }
@@ -109,9 +110,9 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
           onError: error => setAccountError(errorMessage(error, "Could not prepare section data. Open the section to retry.")),
         });
       });
-    }, 1500);
+    }, 0);
     return () => { cancelled = true; window.clearTimeout(timer); task?.cancel(); };
-  }, [user?.id, permissionKey]);
+  }, [user?.id, permissionKey, pathname]);
   useEffect(() => {
     if (!user) return;
     const record = () => {
@@ -239,9 +240,7 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
           <div className="breadcrumb"><span>Workspace</span><span className="breadcrumb-slash">/</span><strong>{pageName(navigating ? destination : pathname)}</strong></div>
           <div className="topbar-actions">
             {user.permissions.includes("leads.view") && <GlobalLeadSearch />}
-            <Link className="icon-button topbar-icon" href="/notifications" aria-label="Notifications">
-              <Bell size={19} />
-            </Link>
+            <NotificationBell key={user.id} userId={user.id} />
             <div className="topbar-divider" />
             <button className="topbar-user" aria-label="Sign out" disabled={signingOut} onClick={async () => {
               setSigningOut(true);

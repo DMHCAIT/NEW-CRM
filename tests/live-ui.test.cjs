@@ -296,6 +296,44 @@ for (const [name, file, options] of cases) test(`live UI renders ${name} inside 
   }
 });
 
+test("compact timelines retain actor, timestamps and every field change without padded cards", async () => {
+  const data = { ...live, lead, notes: [], emails: [], activities: [
+    { id: "first", type: "updated", description: "Lead details updated", user_id: id, created_at: lead.createdAt,
+      meta: { actor_name: "First counselor", changes: { billing_address: { before: "Old address", after: "New address" }, custom_fields: { before: { Campus: "Delhi" }, after: { Campus: "Dubai" } } } } },
+    { id: "second", type: "created", description: "Lead created", user_id: id, created_at: lead.createdAt, meta: { actor_name: "Second counselor" } },
+  ] };
+  const html = await renderPage("src\\app\\leads\\[id]\\page.tsx", {
+    states: [false,false,"","","","",false,false,"","","overview",false,"","",false,Date.now(),"","timeline"],
+    overrides: { "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({ data, loading: false, error: "", reload() {}, setError() {} }) } },
+  });
+  assert.equal((html.match(/class="lead-timeline-day"/g) ?? []).length, 1, "same-day updates share a date heading");
+  assert.equal((html.match(/class="lead-event-summary"/g) ?? []).length, 2);
+  assert.equal((html.match(/class="lead-change-values"/g) ?? []).length, 2);
+  for (const text of ["First counselor", "Second counselor", "Old address", "New address", "Delhi", "Dubai", "Lead created"])
+    assert.ok(html.includes(text), text);
+  assert.equal((html.match(/dateTime="2026-10-21T09:00:00Z"/g) ?? []).length, 2);
+  const invoiceData = structuredClone(operations["/api/invoices"]);
+  const invoiceHtml = renderToStaticMarkup(invoiceHarness(invoiceData).render({ timelineOnly: true, leadId: lead.id }));
+  assert.match(invoiceHtml, /class="invoice-timeline-day"/);
+  assert.match(invoiceHtml, /class="invoice-event-heading"/);
+  assert.match(invoiceHtml, /dateTime=/);
+  const css = readFileSync(path.join(root, "src", "app", "leads", "leads.css"), "utf8");
+  assert.match(css, /\.lead-refined-workspace \.timeline-item \{[^}]*min-height: 0;/);
+  assert.match(css, /\.lead-event-card \{[^}]*background: transparent;[^}]*padding: 8px 0;/);
+  assert.match(css, /\.lead-event-heading time \{[^}]*margin-left: auto;/);
+});
+
+test("section tabs use persistent flat underlines rather than filled rounded boxes", () => {
+  const css = readFileSync(path.join(root, "src", "app", "globals.css"), "utf8");
+  assert.match(css, /:root body :is\(\[role="tab"\], \.detail-tabs button, \.role-tab, \.workspace-view-tabs > button\) \{\s*background-color: transparent;\s*border-radius: 0;\s*box-shadow: none;/);
+  assert.match(css, /\[role="tab"\]\[aria-selected="true"\][^{]+\{\s*color: #176ac0;\s*border-bottom: 3px solid #1677d2;/);
+  assert.match(css, /\.workspace-view-tabs > button\):hover:not\(:disabled\) \{\s*color: #176ac0;\s*background-color: transparent;/);
+  const modules = readFileSync(path.join(root, "src", "app", "modules.css"), "utf8");
+  assert.match(modules, /\.integration-provider-switcher button \{[^}]*border-bottom: 3px solid transparent;[^}]*border-radius: 0;/);
+  assert.match(modules, /\.integration-provider-switcher button\[aria-pressed="true"\] \{ border-bottom-color: #1677d2;/);
+  assert.match(css, /:focus-visible \{ outline: 2px solid var\(--accent\)/);
+});
+
 test("CRM controls and mobile layout share explicit styles rather than browser defaults", () => {
   const css = readFileSync(path.join(root, "src", "app", "modules.css"), "utf8");
   assert.match(css, /\.operational-form > label/);
@@ -1107,7 +1145,7 @@ test("shared CRM theme preserves field boundaries, focus and error states", () =
   assert.match(css, /:focus-visible \{ outline: 2px solid var\(--accent\)/);
   assert.match(css, /\.panel \{ border: 1px solid var\(--border\)/);
   assert.match(css, /\[aria-invalid="true"\][\s\S]*?background-color: #fff1f0/);
-  assert.match(css, /aria-selected="true"[\s\S]*?background-color: #edf5ff/);
+  assert.match(css, /aria-selected="true"[^{]*\{[^}]*border-bottom: 3px solid #1677d2/);
 });
 
 test("all icon search controls share nonwrapping, shrinkable input geometry and a whole-field focus indicator", () => {
@@ -1159,22 +1197,23 @@ test("email composer combines addresses and connection controls without changing
         assert.doesNotMatch(html, />Connect Gmail<|>Reconnect Gmail</);
         if (eligible) {
           assert.match(html, /Workspace-managed/);
-          assert.doesNotMatch(html, /disabled=""[^>]*>Send email/);
+          assert.match(html, /Loading your signature and invoice details/);
           assert.match(html, /no individual Google connection is required/);
         } else {
           assert.match(html, /restricted to your Workspace domain/);
-          assert.match(html, /disabled=""[^>]*>Send email/);
+          assert.match(html, /class="gmail-send-button" disabled=""/);
         }
       }
     });
-    assert.match(html, /lead-email-envelope/);
-    assert.match(html, /lead-mailbox-control/);
-    assert.match(html, /Add a subject/);
+    assert.match(html, /gmail-address-row/);
+    assert.match(html, /gmail-compose-status/);
+    assert.match(html, /aria-label="Email subject"/);
+    for (const name of ["Course enquiry", "Follow-up", "Invoice reminder"]) assert.ok(html.includes(name));
     assert.ok(html.includes(profile.email));
     assert.ok(html.includes(lead.email));
     assert.match(html, /No shared SMTP sender is used/);
     if (connected) { assert.match(html, /Gmail connected/); assert.doesNotMatch(html, /lead-compose-warning/); }
-    else { assert.match(html, /Mailbox not connected/); assert.match(html, /lead-compose-warning/); assert.match(html, /disabled=""[^>]*>Send email/); }
+    else { assert.match(html, /Mailbox not connected/); assert.match(html, /lead-compose-warning/); assert.match(html, /class="gmail-send-button" disabled=""/); }
   }
 });
 
@@ -2186,7 +2225,8 @@ test("lead workspace keeps notes separate from overview and email history", asyn
       nodes().find(node=>node.props?.id===`lead-section-${section}`).props.onClick();
       assert.match(renderToStaticMarkup(render()),new RegExp(`${label} views`));
       if(section!=="calls"){
-        nodes().find(node=>node.type==="textarea").props.onChange({target:{value:`${section} draft`}});
+        if (section === "email") nodes().find(node => node.type?.name === "LeadEmailComposer").props.onContent(`${section} draft`);
+        else nodes().find(node=>node.type==="textarea").props.onChange({target:{value:`${section} draft`}});
       }
       nodes().find(node=>node.props?.id===`lead-${section}-tab-timeline`).props.onClick();
       assert.match(renderToStaticMarkup(render()),new RegExp(`${section==="email"?"Email":label} timeline`));
@@ -2194,7 +2234,8 @@ test("lead workspace keeps notes separate from overview and email history", asyn
       let focused="";
       nodes().find(node=>node.props?.role==="tablist").props.onKeyDown({key:"Home",preventDefault(){},currentTarget:{querySelector:selector=>({focus(){focused=selector;}})}});
       assert.equal(focused,`#lead-${section}-tab-overview`);
-      if(section!=="calls")assert.equal(nodes().find(node=>node.type==="textarea").props.value,`${section} draft`);
+      if (section === "email") assert.equal(nodes().find(node => node.type?.name === "LeadEmailComposer").props.content, `${section} draft`);
+      else if(section!=="calls")assert.equal(nodes().find(node=>node.type==="textarea").props.value,`${section} draft`);
     }
     assert.equal(states[2],"note draft");
     assert.equal(states[3],"email draft");
@@ -2631,9 +2672,9 @@ test("lead email composer shows login address and blocks unconnected or mismatch
       states: [false, false, "", "Hello", "Course details", "", false, [], "", "", "email"],
       overrides: { "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({ data, loading: false, error: "", reload() {}, setError() {} }) } },
     });
-    assert.match(html, /<strong>From<\/strong> guneswari@dmhca.in/);
+    assert.match(html, /<span>From<\/span><span>guneswari@dmhca.in<\/span>/);
     assert.match(html, /CRM sign-in alone does not grant mailbox access/);
-    assert.match(html, /disabled="">Send email/);
+    assert.match(html, /class="gmail-send-button" disabled=""/);
     assert.match(html, mailbox ? /does not match your login/ : /Connect Gmail using guneswari@dmhca.in/);
   }
 });
@@ -2728,4 +2769,8 @@ test("signed-out and expired sessions disappear from Login activity and active c
   assert.match(html, /admin@example.com/);
   assert.doesNotMatch(html, /signed-out@example.com|expired@example.com/);
   assert.match(html, /1 active sessions/);
+  assert.match(html, /India Standard Time \(IST, UTC\+05:30\)/);
+  assert.match(html, /21 Oct 2026, 2:30:00 pm IST/);
+  assert.match(html, /21 Oct 2026, 3:00:00 pm IST/);
+  assert.match(html, /dateTime="2026-10-21T09:00:00Z"/i);
 });

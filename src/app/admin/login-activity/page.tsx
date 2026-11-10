@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requirePageUser } from "@/lib/server/auth";
-import { formatDateTime } from "@/lib/crm-data";
+import { formatLoginActivityTime } from "@/lib/login-activity-time";
 import { RevokeSession } from "@/components/revoke-session";
 
 export const dynamic = "force-dynamic";
@@ -18,13 +18,13 @@ export default async function LoginActivityPage({ searchParams }: { searchParams
   if (error) throw error;
   return <>
     <div className="page-heading"><div><h1>Login activity</h1><p>Currently signed-in devices and last-used time. Signed-out and expired sessions are hidden.</p></div><Link className="button button-secondary" href="/admin/login-activity">Refresh</Link></div>
-    <p className="helper-banner">Last used updates while the CRM tab is visible (at most once per minute). Device labels are approximate, not unique hardware identifiers. {user.profile.role === "super_admin" ? "You can revoke any active device session, including your current one." : "Only Super Admin can sign out device sessions."}</p>
+    <p className="helper-banner">All times are shown in India Standard Time (IST, UTC+05:30). Last used updates while the CRM tab is visible (at most once per minute). Device labels are approximate, not unique hardware identifiers. {user.profile.role === "super_admin" ? "You can revoke any active device session, including your current one." : "Only Super Admin can sign out device sessions."}</p>
     <section className="panel"><div className="table-wrap"><table className="data-table">
       <thead><tr><th>User</th><th>Signed in</th><th>Last used</th><th>Device</th><th>Status</th>{user.profile.role === "super_admin" && <th>Actions</th>}</tr></thead>
       <tbody>{data?.map((session) => <tr key={session.session_id}>
-        <td>{session.email}</td><td>{formatDateTime(session.signed_in_at)}</td><td>{formatDateTime(session.last_seen_at)}</td>
+        <td>{session.email}</td><td><time dateTime={session.signed_in_at}>{formatLoginActivityTime(session.signed_in_at)}</time></td><td><time dateTime={session.last_seen_at}>{formatLoginActivityTime(session.last_seen_at)}</time></td>
         <td>{session.device}</td>
-        <td>{session.signed_out_at ? `Signed out ${formatDateTime(session.signed_out_at)}` : new Date(session.expires_at) < new Date() ? "Expired" : "Signed in"}</td>
+        <td>{session.signed_out_at ? `Signed out ${formatLoginActivityTime(session.signed_out_at)}` : new Date(session.expires_at) < new Date() ? "Expired" : "Signed in"}</td>
         {user.profile.role === "super_admin" && <td>{!session.signed_out_at && new Date(session.expires_at) > new Date() ? <RevokeSession sessionId={session.session_id} email={session.email} device={session.device} /> : "—"}</td>}
       </tr>)}</tbody>
     </table>{!data?.length && <p style={{ padding: 24 }}>No active device sessions on this page.</p>}</div>

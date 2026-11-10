@@ -9,8 +9,16 @@ class HttpError extends Error { constructor(status, message) { super(message); t
 function load(file, dependencies, globals = {}) {
   const api = {};
   vm.runInNewContext(ts.transpileModule(readFileSync(join(__dirname, "..", file), "utf8"), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021, jsx: ts.JsxEmit.ReactJSX },
-  }).outputText, { exports: api, require: (name) => dependencies[name] ?? require(name), console: { error() {} }, ...globals });
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true },
+  }).outputText, { exports: api, require: (name) => {
+    if (name in dependencies) return dependencies[name];
+    if (name.startsWith("@/")) {
+      const base = name.replace("@/", "src\\").replaceAll("/", "\\");
+      const { existsSync } = require("node:fs");
+      return load(`${base}${existsSync(join(__dirname, "..", `${base}.ts`)) ? ".ts" : ".tsx"}`, dependencies, globals);
+    }
+    return require(name);
+  }, console: { error() {} }, ...globals });
   return api;
 }
 const passwordApi = load("src\\lib\\server\\password-management.ts", { "@/lib/server/auth": { HttpError } });

@@ -54,6 +54,27 @@ function fixture({ role = "admin", permission = true, failRead = false } = {}) {
   return { rows, requests, settings, route, post, setCheckFailure: () => { checkFailure = true; }, setRace: () => { race = true; } };
 }
 const smtp = { SMTP_HOST: "smtp.example.com", SMTP_PORT: "587", SMTP_USER: "finance@example.com", SMTP_PASSWORD: "top-secret-password", SMTP_FROM: "Finance <finance@example.com>", SMTP_SECURE: "false" };
+test("pasting a service account automatically enables Workspace and verifies before activating", async () => {
+  const { privateKey } = require("node:crypto").generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const json = JSON.stringify({ type: "service_account", client_email: "crm@project.iam.gserviceaccount.com", client_id: "123456789", private_key: privateKey.export({ type: "pkcs8", format: "pem" }) });
+  const f = fixture();
+  const result = await f.post({ provider: "gmail", action: "save", values: { GOOGLE_SERVICE_ACCOUNT_JSON: json }, revision: null });
+  assert.equal(result.status, 200);
+  assert.match(result.data.message, /Workspace connected/);
+  const saved = f.settings.decryptIntegrationValues(f.rows.get("gmail").encrypted_values);
+  assert.equal(saved.GOOGLE_MAILBOX_MODE, "workspace");
+  assert.equal(saved.GOOGLE_WORKSPACE_DOMAIN, "example.com");
+  assert.equal(f.rows.get("gmail").test_status, "passed");
+  assert.equal(f.requests.find(Array.isArray)[2], "admin@example.com");
+  const previous = f.rows.get("gmail");
+  f.setCheckFailure();
+  const failed = await f.post({ provider: "gmail", action: "save", values: { GOOGLE_SERVICE_ACCOUNT_JSON: json }, revision: previous.revision });
+  assert.equal(failed.status, 502);
+  assert.equal(f.rows.get("gmail"), previous, "failed delegation must not replace the active configuration");
+  const fresh = fixture(); fresh.setCheckFailure();
+  assert.equal((await fresh.post({ provider: "gmail", action: "save", values: { GOOGLE_SERVICE_ACCOUNT_JSON: json }, revision: null })).status, 502);
+  assert.equal(fresh.rows.size, 0);
+});
 test("credential ciphertext round-trips and tampering fails authentication", () => {
   const { settings } = fixture();
   const encrypted = settings.encryptIntegrationValues(smtp);

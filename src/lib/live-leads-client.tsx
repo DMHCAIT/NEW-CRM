@@ -31,6 +31,17 @@ export async function loadLeadListData(path: string, options: { maxAgeMs: number
   return { ...metadata, ...page };
 }
 
+export function getCachedLeadListData(path: string): LiveLeadData | undefined {
+  const cached = getCachedApiRead<LiveLeadData>(path);
+  if (cached !== undefined) return cached;
+  const metadata = getCachedApiRead<LiveLeadData>(leadQueryPath(emptyFilter()));
+  if (!metadata) return undefined;
+  const params = new URLSearchParams(path.split("?")[1]);
+  params.set("metadata", "0");
+  const page = getCachedApiRead<LeadPage>(`/api/leads?${params}`);
+  return page ? { ...metadata, ...page } : undefined;
+}
+
 function leadDetailRecordsPath(path: string) {
   const url = new URL(path, "http://crm.local");
   url.searchParams.set("metadata", "0");

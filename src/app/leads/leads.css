@@ -410,9 +410,10 @@
 .lead-call-row { flex-wrap: wrap; }
 .lead-call-row-actions { display: flex; gap: 6px; flex-wrap: wrap; width: 100%; padding-left: 47px; }
 .lead-call-row-actions .button { font-size: 11px; min-height: 29px; padding: 4px 9px; background: #f0f5fb; color: #3c6a9a; }
-.lead-change-list { margin: 10px 0; padding: 0; list-style: none; display: grid; gap: 8px; }
-.lead-change-list li { padding: 9px 12px; background: #f6f9fd; border-radius: 6px; color: #50657f; font-size: 12px; overflow-wrap: anywhere; white-space: pre-wrap; }
-.lead-change-list li > strong { display: block; color: #304c6a; font-weight: 600; margin-bottom: 4px; }
+.lead-change-list { margin: 6px 0; padding: 0; list-style: none; display: grid; gap: 4px; }
+.lead-change-list li { display: grid; grid-template-columns: minmax(100px, 160px) minmax(0, 1fr); gap: 4px 12px; padding: 3px 0; color: #50657f; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
+.lead-change-list li > strong { color: #304c6a; font-weight: 500; }
+.lead-change-values { min-width: 0; }
 .lead-legacy-history { font-size: 11px; color: #8491a3; }
 .lead-refined-workspace .detail-sidebar { padding: 14px 10px; }
 .lead-refined-workspace .detail-nav-item { margin-bottom: 4px; border-radius: 6px; min-height: 39px; gap: 10px; font-size: 13px; }
@@ -448,18 +449,21 @@
 .lead-compose-footer .button:disabled { background: #dce5ef; color: #8190a4; opacity: 1; }
 .lead-refined-workspace .detail-history-heading { padding: 24px 28px 0; }
 .lead-refined-workspace .timeline-list { padding: 18px 28px 24px; }
-.lead-timeline-day { margin: 12px 0 18px; color: #71839b; font-size: 11px; font-weight: 600; display: flex; gap: 12px; align-items: center; }
-.lead-refined-workspace .timeline-item { padding: 0 0 18px 24px; margin-left: 5px; border-left: 1px solid #dce6f3; }
-.lead-refined-workspace .timeline-dot { top: 20px; left: -5px; width: 9px; height: 9px; background: #78a7df; border: 2px solid #fff; box-shadow: 0 0 0 1px #c1d7f1; }
+.lead-timeline-day { margin: 12px 0 6px; color: #526880; font-size: 11px; font-weight: 600; display: flex; gap: 12px; align-items: center; }
+.lead-timeline-entry:first-child .lead-timeline-day { margin-top: 0; }
+.lead-refined-workspace .timeline-item { padding: 0 0 4px 18px; margin-left: 5px; border-left: 1px solid #dce6f3; min-height: 0; }
+.lead-refined-workspace .timeline-item::before { content: none; }
+.lead-refined-workspace .timeline-dot { position: absolute; top: 11px; left: -5px; margin: 0; width: 9px; height: 9px; background: #78a7df; border: 2px solid #fff; box-shadow: 0 0 0 1px #c1d7f1; }
 .lead-refined-workspace .lead-event-note .timeline-dot { background: #b28ad9; }
 .lead-refined-workspace .lead-event-call .timeline-dot { background: #6cb38a; }
-.lead-event-card { min-width: 0; width: 100%; background: #f7f9fc; border-radius: 8px; padding: 15px 17px; }
-.lead-event-heading { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
-.lead-event-category { font-size: 10px; color: #5b7da6; background: #eff5fd; padding: 4px 7px; border-radius: 4px; }
-.lead-event-heading time { font-size: 11px; color: #8a99ad; }
+.lead-event-card { min-width: 0; width: 100%; background: transparent; border-bottom: 1px solid #edf1f7; border-radius: 0; padding: 8px 0; }
+.lead-event-heading { display: flex; align-items: baseline; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; margin-bottom: 2px; }
+.lead-event-summary { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; min-width: 0; overflow-wrap: anywhere; }
+.lead-event-category { font-size: 10px; color: #5b7da6; }
+.lead-event-heading time { margin-left: auto; font-size: 11px; color: #697d96; white-space: nowrap; }
 .lead-refined-workspace .timeline-title { font-size: 13px; color: #2e4a69; }
-.lead-event-card > p { font-size: 12px; margin: 7px 0; color: #667b95; }
-.lead-refined-workspace .lead-change-list { border-top: 1px solid #edf1f7; padding-top: 10px; margin-bottom: 0; }
+.lead-event-card > p { font-size: 12px; margin: 2px 0; color: #667b95; line-height: 1.5; }
+.lead-refined-workspace .lead-change-list { padding-top: 2px; margin-bottom: 0; }
 .lead-refined-workspace .empty-notes { text-align: center; padding: 42px 20px; margin: 12px 0; border: 1px dashed #dce5f0; background: #fafcff; border-radius: 8px; color: #8292a9; font-size: 13px; }
 .lead-refined-workspace input:focus-visible, .lead-refined-workspace textarea:focus-visible, .lead-refined-workspace button:focus-visible, .lead-refined-workspace summary:focus-visible { outline: 2px solid #398be0 !important; outline-offset: 2px; }
 .lead-refined-workspace .lead-call-row { background: #fff; border: 1px solid #e9eef5; border-radius: 7px; margin-bottom: 9px; padding: 13px; }
@@ -471,7 +475,8 @@
   .lead-mailbox-control { flex-direction: row; justify-content: space-between; align-items: center; flex-wrap: wrap; }
   .lead-section-symbol { width: 35px; height: 35px; border-radius: 8px; }
   .lead-section-intro h2 { font-size: 16px; }
-  .lead-event-card { padding: 13px; }
+  .lead-event-card { padding: 8px 0; }
+  .lead-change-list li { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   .lead-refined-workspace .timeline-item { padding-left: 17px; }
   .lead-refined-workspace .detail-sidebar { padding: 10px; }
 }
@@ -598,14 +603,58 @@
 .lead-crm-workspace .lead-compose-section .lead-section-eyebrow { display: none; }
 .lead-crm-workspace .lead-compose-section textarea { min-height: 180px; resize: vertical; }
 .lead-crm-workspace .lead-compose-section .live-update-form { margin-top: 20px; }
-.lead-crm-workspace .lead-section-history .timeline-list { padding: 20px 24px; }
-.lead-crm-workspace .lead-section-history .detail-history-heading { padding: 24px 24px 0; }
+.lead-crm-workspace .lead-section-history .timeline-list { padding: 12px 20px; }
+.lead-crm-workspace .lead-section-history .detail-history-heading { padding: 14px 20px 0; }
+.lead-crm-workspace .lead-section-history .lead-section-symbol { width: 30px; height: 30px; border-radius: 6px; }
+.lead-crm-workspace .lead-section-history .lead-section-intro { gap: 8px; }
+.lead-crm-workspace .lead-section-history .lead-section-intro h2 { font-size: 15px; }
+.lead-crm-workspace .lead-section-history .lead-section-intro p { margin-top: 2px; line-height: 1.5; }
 .lead-crm-workspace .lead-compose-section + .lead-section-history .timeline-list { max-height: 650px; overflow-y: auto; overscroll-behavior: contain; }
-.lead-crm-workspace .lead-event-card { box-shadow: none; background: #fafbfd; }
+.lead-crm-workspace .lead-event-card { box-shadow: none; background: transparent; }
+.lead-crm-workspace .lead-email-record details { margin: 4px 0; }
 .lead-call-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 22px 0; }
 .lead-call-metrics > div { padding: 14px 16px; border: 1px solid #e6ebf2; border-radius: 7px; background: #fafbfd; }
 .lead-call-metrics span { display: block; font-size: 12px; color: #64748b; margin-bottom: 6px; }
 .lead-call-metrics strong { color: #263c57; font-size: 23px; font-weight: 600; }
+.gmail-compose { min-width: 0; margin: 18px; border: 1px solid #dadce0; border-radius: 12px; overflow: hidden; background: #fff; box-shadow: 0 2px 6px #24364b0d; }
+.gmail-compose-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 13px 18px; background: #f2f6fc; color: #202124; font-size: 14px; }
+.gmail-compose-header > span:first-child { display: flex; align-items: center; gap: 9px; font-weight: 600; }
+.gmail-compose-header > span:last-child { color: #5f6368; font-size: 12px; }
+.gmail-compose-status { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 18px 0; }
+.gmail-address-row, .gmail-subject { display: flex; align-items: center; gap: 12px; margin: 0 18px; padding: 12px 0; border-bottom: 1px solid #eceff1; color: #202124; font-size: 13px; overflow-wrap: anywhere; }
+.gmail-address-row > span:first-child, .gmail-subject > span { width: 48px; flex: 0 0 48px; color: #5f6368; }
+.gmail-subject input { width: 100%; min-width: 0; border: 0; background: transparent; padding: 0; border-radius: 0; font: inherit; color: #202124; }
+.gmail-template-picker { padding: 14px 18px; background: #fafbfd; border-bottom: 1px solid #eceff1; }
+.gmail-template-picker > div:first-child { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; font-size: 12px; }
+.gmail-template-picker small { color: #667085; font-size: 11px; }
+.gmail-template-options { display: flex; flex-wrap: wrap; gap: 0 18px; margin-top: 6px; }
+.gmail-template-options button { border: 0; border-bottom: 2px solid transparent; background: transparent; color: #1967d2; font-size: 12px; font-weight: 500; padding: 8px 0 6px; cursor: pointer; }
+.gmail-template-options button:hover, .gmail-template-options button:focus-visible { border-bottom-color: #1a73e8; }
+.gmail-template-options button:disabled { color: #8a94a4; cursor: default; }
+.gmail-invoice-picker { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 0 6px; color: #5f6368; font-size: 11px; }
+.gmail-invoice-picker select { min-width: 0; max-width: 100%; border: 1px solid #dadce0; padding: 5px 7px; border-radius: 4px; background: #fff; font: inherit; color: #202124; }
+.gmail-message-body { padding: 16px 18px 8px; }
+.gmail-message-body textarea { display: block; width: 100%; min-height: 260px; resize: vertical; border: 0; padding: 0; background: transparent; color: #202124; font: 14px/1.65 Arial,sans-serif; }
+.gmail-compose-signature { margin-top: 12px; border-top: 1px solid #f1f3f4; padding-top: 8px; }
+.gmail-signature-option { display: flex; align-items: center; gap: 7px; padding: 5px 18px; color: #5f6368; font-size: 12px; }
+.gmail-compose-hint { margin: 8px 18px; color: #667085; font-size: 11px; line-height: 1.6; }
+.gmail-compose .lead-compose-warning, .gmail-compose-error { margin: 10px 18px; padding: 9px 12px; font-size: 12px; line-height: 1.5; }
+.gmail-compose-error { background: #fef3f2; color: #b42318; }
+.gmail-compose-footer { display: flex; gap: 16px; align-items: center; padding: 14px 18px; }
+.gmail-compose-footer > span { color: #667085; font-size: 11px; }
+.gmail-send-button { display: flex; align-items: center; gap: 9px; border: 0; border-radius: 24px; padding: 11px 26px; background: #0b57d0; color: #fff; font-size: 14px; font-weight: 500; cursor: pointer; }
+.gmail-send-button:disabled { background: #e4e9f1; color: #748195; cursor: default; }
+.gmail-discard-button { margin-left: auto; border: 0; padding: 8px; background: transparent; color: #5f6368; cursor: pointer; }
+.gmail-compose :is(button,input,textarea,select):focus-visible { outline: 2px solid #1a73e8; outline-offset: 3px; }
+@media (min-width: 1400px) {
+  .lead-crm-workspace .detail-tab-content:has(.gmail-compose) > [role="tabpanel"] { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); align-items: start; }
+  .gmail-compose + .lead-section-history { min-width: 0; border-top: 0; }
+}
+@media (max-width: 760px) {
+  .gmail-compose { margin: 12px; }
+  .gmail-compose-footer { gap: 10px; }
+  .gmail-send-button { padding: 10px 22px; }
+}
 @media (max-width: 1200px) {
   .lead-crm-workspace .detail-tab-content:has(.lead-compose-section) > [role="tabpanel"] { grid-template-columns: minmax(0, 1fr); }
   .lead-crm-workspace .lead-compose-section { border-right: 0; border-bottom: 1px solid #e6ebf2; }
@@ -620,8 +669,8 @@
   .lead-crm-workspace .detail-overview { padding: 18px 16px; }
   .lead-crm-workspace .lead-inline-grid { grid-template-columns: minmax(0, 1fr); padding: 4px 14px 12px; }
   .lead-crm-workspace .detail-content { min-height: 360px; }
-  .lead-crm-workspace .lead-section-history .timeline-list { padding: 18px 16px; }
-  .lead-crm-workspace .lead-section-history .detail-history-heading { padding: 18px 16px 0; }
+  .lead-crm-workspace .lead-section-history .timeline-list { padding: 10px 14px; }
+  .lead-crm-workspace .lead-section-history .detail-history-heading { padding: 12px 14px 0; }
   .lead-call-metrics { gap: 8px; }
   .lead-call-metrics > div { padding: 12px; }
 }

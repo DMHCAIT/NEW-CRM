@@ -6,10 +6,11 @@ import { createPortal } from "react-dom";
 import { ArrowRightLeft, CheckCircle2, Columns3, Download, ListFilter, Plus, Save, Search, Trash2, Users, X } from "lucide-react";
 import { SearchableDropdown } from "@/components/searchable-dropdown";
 import { StageBadge } from "@/components/lead-helpers";
+import { LeadNavigationPreparation } from "@/components/lead-navigation-preparation";
 import { apiRequest, formatDateTime } from "@/lib/crm-data";
 import { criterionError, type SavedLeadFilter } from "@/lib/lead-filters";
 import { REPORT_COLUMNS, type ReportColumn } from "@/lib/reports";
-import { LiveFilterEditor, downloadLiveCsv, emptyFilter, leadQueryPath, loadLeadListData, useDebouncedValue, useLiveLeadData } from "@/lib/live-leads-client";
+import { LiveFilterEditor, downloadLiveCsv, emptyFilter, getCachedLeadListData, leadQueryPath, loadLeadListData, useDebouncedValue, useLiveLeadData } from "@/lib/live-leads-client";
 import type { LeadCursor } from "@/lib/server/lead-query";
 
 export default function LeadsWorkspace({ initialFilter, dashboard = false }: { initialFilter?: SavedLeadFilter; dashboard?: boolean } = {}) {
@@ -32,7 +33,7 @@ export default function LeadsWorkspace({ initialFilter, dashboard = false }: { i
   const validation = filter.criteria.map(criterionError).find(Boolean);
   const queryFilter = useDebouncedValue(filter, 120, !validation);
   const path = leadQueryPath(queryFilter, { cursor: cursors[page], dashboard });
-  const { data, loading, error, reload, setError } = useLiveLeadData(path, loadLeadListData);
+  const { data, loading, error, reload, setError } = useLiveLeadData(path, loadLeadListData, getCachedLeadListData);
   useEffect(() => {
     if (!data?.nextCursor || !data.hasMore || loading || queryFilter !== filter) return;
     const nextPath = leadQueryPath(queryFilter, { cursor: data.nextCursor, dashboard });
@@ -148,6 +149,7 @@ export default function LeadsWorkspace({ initialFilter, dashboard = false }: { i
     </div></header>
     {error && <p className="helper-banner" role="alert">{error} <button className="text-link" onClick={() => void reload().catch(() => {})}>Retry</button></p>}{notice && <p className="helper-banner" role="status">{notice}</p>}
     {validation && <p className="helper-banner" role="alert">{validation}</p>}
+    <LeadNavigationPreparation leads={rows} enabled={!loading && queryFilter === filter} />
     {(loading || queryFilter !== filter) && <span role="status">Updating lead results...</span>}
     {dashboardView && <p className="helper-banner"><Link href="/">Dashboard</Link><span> / {filter.name || "Dashboard leads"} · Role-scoped results</span></p>}
     <div className="leads-layout">

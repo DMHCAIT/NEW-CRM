@@ -6,9 +6,14 @@ import type { Profile } from "@/lib/types";
 import { createCredentialPdf, downloadCredentialPdf } from "@/lib/credential-pdf";
 import { KeyRound, Plus, Search, Trash2, Users } from "lucide-react";
 import { SectionLoading } from "@/components/section-loading";
+import { EmailSignaturePreview } from "@/components/email-signature-preview";
+import { SignatureImageInput } from "@/components/signature-image-input";
+import { MAX_SIGNATURE_FILE_BYTES, MAX_SIGNATURE_LENGTH, SIGNATURE_LENGTH_ERROR } from "@/lib/email-signature-policy";
+import { preparePastedSignature } from "@/lib/signature-images";
+import { uploadSignatureFile } from "@/lib/signature-image-client";
 
 type UserData = { profiles: Profile[]; activity: { user_id: string; signed_in_at: string; last_seen_at: string }[]; canManage: boolean; currentUserId: string };
-const blank: Omit<Profile, "id" | "deletedAt"> = { fullName: "", email: "", phone: "", role: "counselor", reportingTo: null, status: "active", ivrExtension: "" };
+const blank: Omit<Profile, "id" | "deletedAt"> = { fullName: "", email: "", phone: "", role: "counselor", reportingTo: null, status: "active", ivrExtension: "", emailSignatureHtml: "" };
 
 export default function UsersPage() {
   const [data, setData] = useState<UserData | null>(() => getPreparedApiRead<UserData>("/api/users") ?? getApiReadSnapshot<UserData>("/api/users") ?? null);
@@ -42,8 +47,11 @@ export default function UsersPage() {
       if (busy) return;
       if (editing === "new" && password !== confirmPassword) { setError("Passwords do not match."); return; }
       action(async () => {
+        const signature = form.emailSignatureHtml?.trim()
+          ? await preparePastedSignature(form.emailSignatureHtml, [], uploadSignatureFile) : "";
+        const profile = { ...form, emailSignatureHtml: signature };
         const pdf = editing === "new" && downloadCredentials ? await createCredentialPdf(form.email.trim(), password) : null;
-        await apiRequest("/api/users", { method: editing === "new" ? "POST" : "PATCH", body: editing === "new" ? { ...form, password } : { action: "update", id: editing, profile: form } });
+        await apiRequest("/api/users", { method: editing === "new" ? "POST" : "PATCH", body: editing === "new" ? { ...profile, password } : { action: "update", id: editing, profile } });
         if (pdf) {
           try { downloadCredentialPdf(pdf); }
           catch (error) { setError(`User was created, but the credential PDF could not be downloaded. Do not create the user again. ${errorMessage(error, "Check browser download permissions.")}`); }
@@ -56,6 +64,27 @@ export default function UsersPage() {
       <label className="form-field">Reports to<select value={form.reportingTo ?? ""} onChange={(event) => setForm({ ...form, reportingTo: event.target.value || null })}><option value="">No manager</option>{data?.profiles.filter((profile) => profile.id !== editing && profile.status === "active").map((profile) => <option key={profile.id} value={profile.id}>{profile.fullName}</option>)}</select></label>
       <label className="form-field">Phone<input value={form.phone} onChange={(event) => setForm({ ...form, phone: event.target.value })} /></label>
       <label className="form-field">IVR extension<input value={form.ivrExtension} onChange={(event) => setForm({ ...form, ivrExtension: event.target.value })} /></label>
+      <div className="form-field user-email-signature"><label htmlFor="user-email-signature">Gmail signature (HTML)</label><textarea id="user-email-signature" rows={5} maxLength={MAX_SIGNATURE_LENGTH} value={form.emailSignatureHtml ?? ""} placeholder="<p>Your name<br>Admission Counsellor | DMHCA</p>" onChange={event => setForm({ ...form, emailSignatureHtml: event.target.value })} />
+        <label>Upload an HTML signature<input type="file" accept=".html,.htm,text/html" onChange={async event => {
+          const file = event.target.files?.[0]; event.target.value = "";
+          if (!file) return;
+          if (!/\.html?$/i.test(file.name) || file.size > MAX_SIGNATURE_FILE_BYTES) { setError("Choose an HTML signature file no larger than 4 MB (up to 1,000,000 characters)."); return; }
+          try {
+            const html = await file.text();
+            if (html.length > MAX_SIGNATURE_LENGTH) throw new Error(SIGNATURE_LENGTH_ERROR);
+            setBusy(true);
+            const signature = await preparePastedSignature(html, [], uploadSignatureFile);
+            setForm(previous => ({ ...previous, emailSignatureHtml: signature })); setError("");
+          } catch (failure) { setError(errorMessage(failure, "Could not read the signature file.")); }
+          finally { setBusy(false); }
+        }} /></label><small>Paste HTML or upload an HTML file (up to 1,000,000 characters). Formatting, links and HTTPS logo images are supported. Scripts and unsafe styling are removed when saved. This signature appears in the user&apos;s lead emails.</small>
+        <SignatureImageInput key={editing} disabled={busy} onBusyChange={setBusy} onInsert={html => {
+          const signature = `${form.emailSignatureHtml ?? ""}\n${html}`;
+          if (signature.length > MAX_SIGNATURE_LENGTH) throw new Error(SIGNATURE_LENGTH_ERROR);
+          setForm(previous => ({ ...previous, emailSignatureHtml: signature }));
+        }} />
+        {form.emailSignatureHtml && <EmailSignaturePreview html={form.emailSignatureHtml} />}
+      </div>
       {editing === "new" && <><label className="form-field">Password<input type="password" autoComplete="new-password" required minLength={12} maxLength={128} value={password} onChange={(event) => setPassword(event.target.value)} /></label><label className="form-field">Confirm password<input type="password" autoComplete="new-password" required minLength={12} maxLength={128} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} /></label></>}
       <label className="checkbox-field"><input type="checkbox" checked={form.status === "active"} onChange={(event) => setForm({ ...form, status: event.target.checked ? "active" : "inactive" })} /> Active account</label>
     </div>{editing === "new" && <><label className="checkbox-field"><input type="checkbox" checked={downloadCredentials} onChange={(event) => setDownloadCredentials(event.target.checked)} /> Download email and password as a PDF when saved</label><p className="form-hint">The PDF contains a plaintext password. Store it securely and delete it after securely sharing the credentials.</p></>}<div className="form-actions"><button className="button button-primary" disabled={busy}>{busy ? "Saving..." : "Save user"}</button><button type="button" className="button button-secondary" onClick={() => { setEditing(null); clearPassword(); }}>Cancel</button></div></fieldset></form></section>}

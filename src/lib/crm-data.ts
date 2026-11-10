@@ -179,10 +179,12 @@ const preparedBrowserReads = new Map<string, { promise: Promise<unknown>; expire
 const browserSnapshots = new Map<string, { value: unknown; savedAt: number }>();
 let readGeneration = 0;
 const writeListeners = new Set<() => void>();
+const completedWriteListeners = new Set<() => void>();
 
-export function subscribeApiWrites(listener: () => void) {
-  writeListeners.add(listener);
-  return () => { writeListeners.delete(listener); };
+export function subscribeApiWrites(listener: () => void, phase: "started" | "completed" = "started") {
+  const listeners = phase === "completed" ? completedWriteListeners : writeListeners;
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
 }
 
 export function clearApiReadCache() {
@@ -263,7 +265,10 @@ export async function apiRequest<T = unknown>(path: string, init: { method?: str
       }
       return payload;
     } finally {
-      if (method !== "GET") clearApiReadCache();
+      if (method !== "GET") {
+        clearApiReadCache();
+        completedWriteListeners.forEach(listener => listener());
+      }
     }
   };
   const pending = request();

@@ -92,6 +92,7 @@ export interface Lead {
 }
 
 export interface Profile {
+  emailSignatureHtml?: string;
   id: string;
   fullName: string;
   email: string;

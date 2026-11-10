@@ -84,7 +84,7 @@ export async function ensureWorkspaceSync(admin: SupabaseClient, userId: string,
   }, { onConflict: "user_id", ignoreDuplicates: true });
   databaseError(error);
 }
-export function gmailRawMessage(from: string, to: string, subject: string, text: string) {
+export function gmailRawMessage(from: string, to: string, subject: string, text: string, html?: string) {
   const email = z.string().email().refine(value => !/[\r\n]/.test(value));
   if (!email.safeParse(from).success || !email.safeParse(to).success || /[\r\n]/.test(subject)) throw new HttpError(400, "Invalid email headers.");
   const characters = Array.from(subject);
@@ -92,13 +92,22 @@ export function gmailRawMessage(from: string, to: string, subject: string, text:
   for (let index = 0; index < characters.length; index += 10) words.push(`=?UTF-8?B?${Buffer.from(characters.slice(index, index + 10).join("")).toString("base64")}?=`);
   const encodedSubject = words.join("\r\n ");
   const body = Buffer.from(text).toString("base64").match(/.{1,76}/g)?.join("\r\n") ?? "";
+  if (html) {
+    const boundary = `crm_${randomBytes(18).toString("hex")}`;
+    const htmlBody = Buffer.from(html).toString("base64").match(/.{1,76}/g)?.join("\r\n") ?? "";
+    return Buffer.from([`From: ${from}`, `To: ${to}`, `Subject: ${encodedSubject}`, "MIME-Version: 1.0",
+      `Content-Type: multipart/alternative; boundary="${boundary}"`, "", `--${boundary}`,
+      'Content-Type: text/plain; charset="UTF-8"', "Content-Transfer-Encoding: base64", "", body,
+      `--${boundary}`, 'Content-Type: text/html; charset="UTF-8"', "Content-Transfer-Encoding: base64", "", htmlBody,
+      `--${boundary}--`, ""].join("\r\n")).toString("base64url");
+  }
   return Buffer.from([`From: ${from}`, `To: ${to}`, `Subject: ${encodedSubject}`, "MIME-Version: 1.0",
     'Content-Type: text/plain; charset="UTF-8"', "Content-Transfer-Encoding: base64", "", body].join("\r\n")).toString("base64url");
 }
-export async function sendGmailMessage(mailbox: { email: string; accessToken: string }, to: string, subject: string, text: string) {
+export async function sendGmailMessage(mailbox: { email: string; accessToken: string }, to: string, subject: string, text: string, html?: string) {
   const response = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
     method: "POST", headers: { Authorization: `Bearer ${mailbox.accessToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ raw: gmailRawMessage(mailbox.email, to, subject, text) }),
+    body: JSON.stringify({ raw: gmailRawMessage(mailbox.email, to, subject, text, html) }),
     cache: "no-store", signal: AbortSignal.timeout(20000),
   });
   if (!response.ok) throw new HttpError(response.status === 429 ? 429 : 502, response.status === 403 || response.status === 401

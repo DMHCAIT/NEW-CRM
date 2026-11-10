@@ -5,6 +5,7 @@ import { useRef, useState } from "react";
 import { CalendarDays, GitBranch, List, Phone, Search, UserRound, X } from "lucide-react";
 import { SearchableDropdown } from "@/components/searchable-dropdown";
 import { initials } from "@/components/lead-helpers";
+import { LeadNavigationPreparation } from "@/components/lead-navigation-preparation";
 import { apiRequest } from "@/lib/crm-data";
 import { emptyFilter, leadQueryPath, useDebouncedValue, useLiveLeadData, type LiveLeadData } from "@/lib/live-leads-client";
 import type { LeadCursor, LeadPage } from "@/lib/server/lead-query";
@@ -78,6 +79,7 @@ export default function PipelinePage() {
     <header className="page-heading pipeline-heading"><div className="pipeline-heading-copy"><span className="pipeline-module-icon"><GitBranch size={22} aria-hidden="true" /></span><div><h1>Pipeline</h1><p>{rows.length} displayed leads · Up to 25 per stage</p></div></div><div className="heading-actions">{data.user.permissions.includes("leads.view") && <Link className="button button-secondary" href="/leads"><List size={15} aria-hidden="true" />Manage leads</Link>}</div></header>
     {error && <p className="helper-banner" role="alert">{error}</p>}
     {notice && <p className="helper-banner" role="status">{notice}</p>}
+    <LeadNavigationPreparation leads={rows} enabled={!loading && query === search && data.user.permissions.includes("leads.view")} />
     <section className="panel pipeline-panel" aria-label="Admissions pipeline">
     <div className="pipeline-view-bar"><div><GitBranch size={16} aria-hidden="true" /><h2>Admissions pipeline</h2><span className="pipeline-record-count">{rows.length} leads</span></div><span className="pipeline-group-label">Grouped by stage</span></div>
     <div className="pipeline-controls">

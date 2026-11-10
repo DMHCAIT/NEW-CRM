@@ -9,11 +9,13 @@ function load(path, dependencies = {}) {
   const exports = {};
   const source = readFileSync(join(__dirname, "..", path), "utf8");
   vm.runInNewContext(ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021, jsx: ts.JsxEmit.ReactJSX },
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true },
   }).outputText, {
     exports, require: (name) => name in dependencies ? dependencies[name] :
       name === "@/lib/server/login" ? { checkOrigin: () => {} } :
-      name === "@/lib/server/operational-gmail" ? { currentGmailMailbox: async () => null } : require(name),
+      name === "@/lib/server/operational-gmail" ? { currentGmailMailbox: async () => null } :
+      name === "@/lib/email-signature-policy" ? load("src\\lib\\email-signature-policy.ts", dependencies) :
+      name === "@/lib/server/email-signature" ? load("src\\lib\\server\\email-signature.ts", dependencies) : require(name),
     Date, Set, URL, Response, Buffer, console,
   });
   return exports;
@@ -168,6 +170,7 @@ function leadActionRoute({ missing = false, sendError = null, logError = null } 
     "@/lib/server/auth": { ...auth, isEmail: () => true, requireString: (value) => value, requireUser: async permission => {
       assert.equal(permission, "leads.edit");
       return { user: { id: "signed-in-user", email: "signed-in@gmail.com" }, supabase: { from(table) {
+        if (table === "profiles") return { select: () => ({ eq: () => ({ single: async () => ({ data: { email_signature_html: "" }, error: null }) }) }) };
         assert.equal(table, "emails");
         return {
           insert(row) { writes.push(row); return { select: () => ({ single: async () => ({ data: { id: "email-row" }, error: null }) }) }; },

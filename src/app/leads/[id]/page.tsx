@@ -13,6 +13,7 @@ import { getCachedLeadDetail, loadLeadDetailData, useLiveLeadData, type LeadDraf
 import type { LeadConfiguration } from "@/lib/live-leads";
 import { leadCallNumber } from "@/lib/lead-phone";
 import { SectionLoading } from "@/components/section-loading";
+import { LeadEmailComposer } from "@/components/lead-email-composer";
 
 const loadInvoiceWorkspace = () => import("@/components/invoice-workspace").then(module => module.InvoiceWorkspace);
 const loadCourseCatalog = () => import("@/components/course-catalog").then(module => module.CourseCatalog);
@@ -67,6 +68,7 @@ export default function LeadDetailPage() {
   const modifiedAt = data?.lead.id === id ? data.lead.modifiedAt : undefined;
   const userId = data?.user.id;
   const canViewInvoices = data?.user.permissions.includes("invoices.view") ?? false;
+  const canEditLead = data?.user.permissions.includes("leads.edit") ?? false;
   useEffect(() => {
     const timer = window.setInterval(() => setCallNow(Date.now()), 30000);
     return () => window.clearInterval(timer);
@@ -90,13 +92,15 @@ export default function LeadDetailPage() {
       loadInvoiceWorkspace(), loadCourseCatalog(),
       prefetchApiRead(`/api/invoices?leadId=${encodeURIComponent(id)}`), prefetchApiRead("/api/courses"),
     );
+    if (canEditLead) preparations.push(prefetchApiRead(`/api/leads/${id}/email-context`));
     void Promise.allSettled(preparations).then(results => {
       if (!active) return;
       const failures = results.flatMap(result => result.status === "rejected" ? [result.reason instanceof Error ? result.reason.message : "A related list could not be prepared."] : []);
       setPreparationError(failures.join(" "));
     });
     return () => { active = false; };
-  }, [id, modifiedAt, userId, canViewInvoices, preparationAttempt]);
+  }, [id, modifiedAt, userId, canViewInvoices, canEditLead, preparationAttempt]);
+  useEffect(() => { setEmailContent(""); setSubject(""); }, [id]);
   async function reload() {
     await reloadData();
     setPreparationAttempt(value => value + 1);
@@ -157,7 +161,6 @@ export default function LeadDetailPage() {
   const duplicates = data.duplicates ?? [];
   const mergeTargets = duplicates.filter(item => item.merge_target_id !== null);
   const canMergeDuplicates = can("leads.merge") && mergeTargets.length > 0;
-  const mailboxMatchesLogin = Boolean(data.mailbox?.email && data.user.email && data.mailbox.email.toLowerCase() === data.user.email.toLowerCase());
   const tabs = [
     { id: "overview", label: "Overview", icon: UserRound, count: null },
     { id: "note", label: "Notes", icon: FileText, count: data.counts?.notes ?? data.notes.length },
@@ -183,15 +186,14 @@ export default function LeadDetailPage() {
     {rows.slice(0, historyLimit).map((row, index) => <div className="lead-timeline-entry" key={row.id}>
       {(index === 0 || new Date(row.created_at).toDateString() !== new Date(rows[index - 1].created_at).toDateString()) && <div className="lead-timeline-day">{new Intl.DateTimeFormat("en-IN", { dateStyle: "full" }).format(new Date(row.created_at))}</div>}
       <article className={`timeline-item lead-event-${row.type ?? (row.content ? "note" : "activity")}`}><span className="timeline-dot" /><div className="lead-event-card">
-      <div className="lead-event-heading"><span className="lead-event-category">{row.content ? "Note" : row.type === "call" ? "Call activity" : "Record activity"}</span><time dateTime={row.created_at}>{formatDateTime(row.created_at)}</time></div>
-      <strong className="timeline-title">{row.meta?.actor_name || data.profiles.find(profile => profile.id === row.user_id)?.fullName || (row.user_id ? "User name unavailable (legacy record)" : "System")}</strong>
+      <div className="lead-event-heading"><div className="lead-event-summary"><strong className="timeline-title">{row.meta?.actor_name || data.profiles.find(profile => profile.id === row.user_id)?.fullName || (row.user_id ? "User name unavailable (legacy record)" : "System")}</strong><span className="lead-event-category">{row.content ? "Note" : row.type === "call" ? "Call activity" : "Record activity"}</span></div><time dateTime={row.created_at}>{formatDateTime(row.created_at)}</time></div>
       <p>{row.content ? "Added a note" : row.description}</p>{row.content && <p>{row.content}</p>}
       {row.meta?.changes && <ul className="lead-change-list">{Object.entries(row.meta.changes).filter(([, change]) => JSON.stringify(change.before) !== JSON.stringify(change.after)).flatMap(([key, change]) => {
         if (key === "custom_fields") {
           const before = isRecord(change.before) ? change.before : {}, after = isRecord(change.after) ? change.after : {};
-          return [...new Set([...Object.keys(before), ...Object.keys(after)])].filter(name => before[name] !== after[name]).map(name => <li key={`${key}-${name}`}><strong>{name}</strong><span>{changeValue(name, before[name])}</span><span aria-label="changed to"> → </span><span>{changeValue(name, after[name])}</span></li>);
+          return [...new Set([...Object.keys(before), ...Object.keys(after)])].filter(name => before[name] !== after[name]).map(name => <li key={`${key}-${name}`}><strong>{name}</strong><span className="lead-change-values"><span>{changeValue(name, before[name])}</span><span aria-label="changed to"> → </span><span>{changeValue(name, after[name])}</span></span></li>);
         }
-        return <li key={key}><strong>{fieldLabel(key)}</strong><span>{change.before_label ?? changeValue(key, change.before)}</span><span aria-label="changed to"> → </span><span>{change.after_label ?? changeValue(key, change.after)}</span></li>;
+        return <li key={key}><strong>{fieldLabel(key)}</strong><span className="lead-change-values"><span>{change.before_label ?? changeValue(key, change.before)}</span><span aria-label="changed to"> → </span><span>{change.after_label ?? changeValue(key, change.after)}</span></span></li>;
       })}</ul>}
       {row.type === "updated" && !row.meta?.changes && <p className="lead-legacy-history">Field-level values were not recorded for this older change.</p>}
     </div></article></div>)}
@@ -217,7 +219,10 @@ export default function LeadDetailPage() {
       </>}
     </div></div><div className="lead-record-actionbar"><div className="lead-communication-actions">
       {can("leads.edit") && <>
-        {callNumber ? <a className="button lead-call-button" href={`tel:${callNumber}`} title={`Open your phone app to call ${callNumber}`}><Phone size={16} />Click to call</a> : <button className="button lead-call-button" disabled title="Add a valid phone number to call this lead."><Phone size={16} />Click to call</button>}
+        {callNumber ? <a className="button lead-call-button" href={`tel:${callNumber}`} title={`Open your phone app to call ${callNumber}`} onClick={() => void act(async () => {
+          await apiRequest(`/api/leads/${id}/actions`, { body: { action: "call_started" } });
+          setNotice("Call attempt recorded. Your phone app controls the call; connection is not confirmed.");
+        })}><Phone size={16} />Click to call</a> : <button className="button lead-call-button" disabled title="Add a valid phone number to call this lead."><Phone size={16} />Click to call</button>}
         <button className="button lead-schedule-button" disabled={busy || saving || scheduling || scheduleLocked} title={scheduleLocked ? scheduleLockMessage : undefined} onClick={openSchedule}><CalendarClock size={16} />Schedule a call</button>
       </>}
     </div><span className="lead-call-caption">{scheduleLocked ? scheduleLockMessage : "Calls open in your device's phone app"}</span></div><div className="lead-contact-row"><span><Phone size={13} /><strong>Phone</strong> {callNumber || lead.phone}</span><span><Mail size={13} /><strong>Email</strong> {lead.email || "Not provided"}</span><span><strong>Source</strong> {lead.source}</span></div></section>
@@ -282,23 +287,26 @@ export default function LeadDetailPage() {
       <div className="lead-call-metrics" aria-label="Call status summary">{[["Upcoming", upcomingCalls.length], ["Past due", pastDueCalls.length], ["Completed", (data.scheduledCalls ?? []).filter(call => call.status === "completed").length]].map(([label, count]) => <div key={label}><span>{label}</span><strong>{count}</strong></div>)}</div>
       {!scheduledCalls.length ? <div className="lead-calls-empty"><CalendarClock size={30} /><h3>No calls scheduled yet</h3><p>Schedule your next conversation with this lead. Appointments will appear here.</p></div> :
         <div className="lead-calls-scroll" role="region" aria-label="Call appointments" tabIndex={0}>{[{ title: "Upcoming", calls: upcomingCalls, overdue: false }, { title: "Past due", calls: pastDueCalls, overdue: true }].map(group => <section key={group.title} className="lead-call-group" aria-label={`${group.title} calls`}><h3>{group.title}<span>{group.calls.length}</span></h3>{!group.calls.length ? <p className="lead-call-group-empty">{group.overdue ? "No past-due calls." : "No upcoming calls."}</p> : <ol>{group.calls.map(call => <li className="lead-call-row" key={call.id}><span className="lead-call-card-icon"><Phone size={16} /></span><div className="lead-call-row-copy"><time dateTime={call.scheduled_at}>{formatDateTime(call.scheduled_at)}</time><span>{data.profiles.find(profile => profile.id === call.user_id)?.fullName ?? "CRM user"}</span></div><span className={`lead-call-chip${group.overdue ? " is-overdue" : ""}`}><Clock3 size={12} />{group.overdue ? "Past due" : "Scheduled"}</span>{can("leads.edit") && <div className="lead-call-row-actions"><button className="button button-secondary" disabled={busy || saving || scheduling} onClick={() => { setRescheduleId(call.id); setCallDate(localDate(call.scheduled_at)); setCallError(""); setScheduleOpen(true); }}>Reschedule</button><button className="button button-secondary" disabled={busy || saving || scheduling} onClick={() => updateCall(call.id, "completed")}>Complete</button><button className="button button-secondary" disabled={busy || saving || scheduling} onClick={() => updateCall(call.id, "cancelled")}>Cancel call</button></div>}</li>)}</ol>}</section>)}</div>}
-      <p className="lead-calls-footnote">Appointments use your local time zone. Scheduling does not automatically place a call or send a reminder.</p>
+      <p className="lead-calls-footnote">Appointments use your local time zone. The lead owner is notified when the call is due. Scheduling does not place a call.</p>
     </section>}
     {tab === "calls" && overviewTab === "timeline" && <section aria-label="Calls timeline" className="lead-section-history"><div className="detail-history-heading">{sectionIntro("Calls timeline", "Scheduling, rescheduling and outcomes, newest first", Phone)}</div>{history(data.activities.filter(row => row.type === "call"), "No recorded call changes yet. Older appointments may not have a change log.")}</section>}
     {tab === "invoices" && can("invoices.view") && <InvoiceWorkspace key={id} leadId={id} timelineOnly={overviewTab === "timeline"} />}
     {tab === "courses" && can("invoices.view") && <CourseCatalog leadCourse={lead.course} onOpenInvoices={() => selectTab("invoices")} />}
     {["note", "email"].includes(tab) && overviewTab === "overview" && !can("leads.edit") && <section className="detail-overview"><h2>{sectionLabel}</h2><p>Read only. This lead&apos;s {tab === "note" ? "notes" : "email history"} appears below.</p></section>}
-    {["note", "email"].includes(tab) && overviewTab === "overview" && can("leads.edit") && <section className={`detail-overview lead-compose-section lead-compose-${tab}`}>{sectionIntro(tab === "note" ? "Add a note" : "Compose email", tab === "note" ? "Capture your conversation, decisions and next steps. Notes stay with this lead." : "Write to this lead from your connected Google Workspace mailbox.", tab === "note" ? FileText : Mail)}<form onSubmit={(e) => { e.preventDefault(); const action = tab; void act(async () => {
-      await apiRequest(`/api/leads/${id}/actions`, { body: { action, subject: action === "email" ? subject : "", content: action === "email" ? emailContent : noteContent } });
-      if (action === "email") { setEmailContent(""); setSubject(""); } else setNoteContent("");
-      await reload(); setNotice(action === "email" ? "Gmail accepted your email. This does not confirm recipient delivery." : "Note added.");
+    {tab === "email" && overviewTab === "overview" && can("leads.edit") && <LeadEmailComposer key={id} lead={lead} login={data.user.email} mailbox={data.mailbox} subject={subject} content={emailContent} onSubject={setSubject} onContent={setEmailContent} busy={busy} onSend={includeSignature => act(async () => {
+      await apiRequest(`/api/leads/${id}/actions`, { body: { action: "email", subject, content: emailContent, includeSignature } });
+      setEmailContent(""); setSubject("");
+      await reload(); setNotice("Gmail accepted your email. This does not confirm recipient delivery.");
+    })} onConnect={() => void act(async () => {
+      const result = await apiRequest<{ url: string }>("/api/integrations/gmail/connect", { method: "POST" }); window.location.assign(result.url);
+    })} />}
+    {tab === "note" && overviewTab === "overview" && can("leads.edit") && <section className={`detail-overview lead-compose-section lead-compose-${tab}`}>{sectionIntro("Add a note", "Capture your conversation, decisions and next steps. Notes stay with this lead.", FileText)}<form onSubmit={(e) => { e.preventDefault(); const action = tab; void act(async () => {
+      await apiRequest(`/api/leads/${id}/actions`, { body: { action, content: noteContent } });
+      setNoteContent("");
+      await reload(); setNotice("Note added.");
     }); }} className="live-update-form">
-      {tab === "email" && <><div className="lead-email-envelope"><div className="lead-email-addresses"><p><strong>From</strong> {data.user.email}</p><p><strong>To</strong> {lead.email || "No lead email address"}</p></div><div className="lead-mailbox-control"><span className={`lead-mailbox-state${mailboxMatchesLogin ? " is-connected" : ""}`}>{data.mailbox?.managed ? mailboxMatchesLogin ? "Workspace-managed" : "Managed mailbox unavailable" : mailboxMatchesLogin ? "Gmail connected" : "Mailbox not connected"}</span>{!data.mailbox?.managed && <button type="button" className="button button-secondary" disabled={busy} onClick={() => void act(async () => {
-        const result = await apiRequest<{ url: string }>("/api/integrations/gmail/connect", { method: "POST" }); window.location.assign(result.url);
-      })}>{data.mailbox ? "Reconnect Gmail" : "Connect Gmail"}</button>}</div></div><p className="lead-compose-hint">{data.mailbox?.managed ? data.mailbox.reason || "Your administrator has configured Workspace-managed access. Gmail authorization is checked when sending; no individual Google connection is required." : mailboxMatchesLogin ? "Your Google Workspace mailbox is connected. Emails are sent from your CRM login address." : `Authorize Google Workspace for ${data.user.email} once to send from your login address. CRM sign-in alone does not grant mailbox access.`} No shared SMTP sender is used.</p><label className="form-field">Subject<input value={subject} maxLength={200} required placeholder="Add a subject" onChange={e => setSubject(e.target.value)} /></label></>}
-      <label className="form-field">{tab === "email" ? "Message" : "Note"}<textarea required maxLength={tab === "email" ? 20000 : 10000} rows={5} value={tab === "email" ? emailContent : noteContent} onChange={e => tab === "email" ? setEmailContent(e.target.value) : setNoteContent(e.target.value)} /></label>
-      {tab === "email" && (!lead.email || !mailboxMatchesLogin) && <p className="lead-compose-warning" role="alert">{!lead.email ? "Add an email address to the lead before sending." : data.mailbox?.reason || (data.mailbox ? `The connected account (${data.mailbox.email}) does not match your login. Reconnect Gmail using ${data.user.email}.` : `Connect Gmail using ${data.user.email} before sending.`)}</p>}
-      <div className="lead-compose-footer"><span>{(tab === "email" ? emailContent : noteContent).length.toLocaleString()} / {tab === "email" ? "20,000" : "10,000"} characters</span><button className="button button-primary" disabled={busy || !(tab === "email" ? emailContent : noteContent).trim() || (tab === "email" && (!subject.trim() || !lead.email || !mailboxMatchesLogin))}>{busy ? tab === "email" ? "Sending..." : "Saving..." : tab === "email" ? "Send email" : "Add note"}</button></div>
+      <label className="form-field">Note<textarea required maxLength={10000} rows={5} value={noteContent} onChange={e => setNoteContent(e.target.value)} /></label>
+      <div className="lead-compose-footer"><span>{noteContent.length.toLocaleString()} / 10,000 characters</span><button className="button button-primary" disabled={busy || !noteContent.trim()}>{busy ? "Saving..." : "Add note"}</button></div>
     </form></section>}
     {tab === "note" && <section aria-label="Notes timeline" className="lead-section-history"><div className="detail-history-heading">{sectionIntro("Notes timeline", "Notes and conversations, newest first", FileText)}</div>{history(data.notes, "No notes yet. Open Notes to add your first note.")}</section>}
     {<>

@@ -9,6 +9,7 @@ import { parseInput, databaseError } from "@/lib/server/operational";
 import { assertIntegrationAdmin, decryptIntegrationValues, encryptIntegrationValues, getIntegrationConfig, integrationRecord, integrationRuntimeConfig, validateIntegrationConfig } from "@/lib/server/integration-settings";
 import { checkIntegration } from "@/lib/server/integration-checks";
 import { appUrl } from "@/lib/server/env";
+import { workspaceManaged } from "@/lib/server/gmail-delegation";
 
 const providerSchema = z.enum(["zoom", "razorpay", "stripe", "smtp", "gmail", "intake", "facebook"]);
 export async function GET() {
@@ -42,10 +43,17 @@ export async function POST(request: Request) {
     const row = await integrationRecord(input.provider);
     if ((row?.revision ?? null) !== input.revision) throw new HttpError(409, "Integration settings changed in another session. Refresh before saving or testing.");
     const current = row ? integrationRuntimeConfig(input.provider, decryptIntegrationValues(row.encrypted_values)) : await getIntegrationConfig(input.provider);
-    const values = validateIntegrationConfig(input.provider, { ...current, ...Object.fromEntries(Object.entries(supplied).filter(([key, value]) => value !== "" || !definition.fields.find(field => field.key === key)?.secret)) });
+    if (input.provider === "gmail" && supplied.GOOGLE_SERVICE_ACCOUNT_JSON?.trim()) {
+      supplied.GOOGLE_MAILBOX_MODE = "workspace";
+      supplied.GOOGLE_WORKSPACE_DOMAIN = supplied.GOOGLE_WORKSPACE_DOMAIN?.trim() || current.GOOGLE_WORKSPACE_DOMAIN || user.email.split("@")[1];
+    }
+    const merged = { ...current, ...Object.fromEntries(Object.entries(supplied).filter(([key, value]) => value !== "" || !definition.fields.find(field => field.key === key)?.secret)) };
+    if (input.provider === "gmail" && merged.GOOGLE_MAILBOX_MODE === "workspace" && !merged.GOOGLE_WORKSPACE_DOMAIN?.trim()) merged.GOOGLE_WORKSPACE_DOMAIN = user.email.split("@")[1];
+    const values = validateIntegrationConfig(input.provider, merged);
     const admin = getSupabaseAdminClient();
     if (input.action === "save") {
-      const saved = { encrypted_values: encryptIntegrationValues(values), revision: randomUUID(), updated_at: new Date().toISOString(), updated_by: user.id, tested_at: null, test_status: null, test_message: null };
+      const connectionMessage = input.provider === "gmail" && workspaceManaged(values) ? await checkIntegration("gmail", values, user.email) : null;
+      const saved = { encrypted_values: encryptIntegrationValues(values), revision: randomUUID(), updated_at: new Date().toISOString(), updated_by: user.id, tested_at: connectionMessage ? new Date().toISOString() : null, test_status: connectionMessage ? "passed" : null, test_message: connectionMessage };
       if (row) {
         const { data, error } = await admin.from("integration_credentials").update(saved).eq("provider", input.provider).eq("revision", row.revision).select("provider").maybeSingle();
         databaseError(error);
@@ -55,7 +63,7 @@ export async function POST(request: Request) {
         if (error?.code === "23505") throw new HttpError(409, "Settings were created in another session. Refresh and try again.");
         databaseError(error);
       }
-      return NextResponse.json({ message: "Credentials saved encrypted. Run a connection check before using this integration." });
+      return NextResponse.json({ message: connectionMessage ? `Workspace connected and credentials saved encrypted. ${connectionMessage}` : "Credentials saved encrypted. Run a connection check before using this integration." });
     }
     // Tests use only saved credentials, so their result always describes the active configuration.
     if (Object.keys(supplied).length) throw new HttpError(400, "Save changes before running a connection check.");

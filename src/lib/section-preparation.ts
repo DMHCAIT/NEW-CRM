@@ -18,7 +18,18 @@ export function sectionReadPaths(href: string, user: CurrentUser) {
 export function prepareSidebarSections(user: CurrentUser, currentPath: string, prepare: (href: string) => Promise<unknown>,
   options: { isVisible: () => boolean; onError: (error: unknown) => void }) {
   const queue = navigationItems.filter(item => item.href !== currentPath && user.permissions.includes(item.permission)
-    && sectionReadPaths(item.href, user).length > 0).map(item => item.href);
+    && (item.href === "/" || sectionReadPaths(item.href, user).length > 0)).map(item => item.href);
+  return prepareQueue(queue, prepare, options);
+}
+
+export function prepareLeadLinks(ids: string[], prepare: (href: string) => Promise<unknown>,
+  options: { isVisible: () => boolean; onError: (error: unknown) => void }) {
+  const queue = [...new Set(ids)].slice(0, 4).map(id => `/leads/${id}`);
+  return prepareQueue(queue, prepare, options);
+}
+
+function prepareQueue(queue: string[], prepare: (href: string) => Promise<unknown>,
+  options: { isVisible: () => boolean; onError: (error: unknown) => void }) {
   let cancelled = false;
   async function worker() {
     while (!cancelled && options.isVisible()) {

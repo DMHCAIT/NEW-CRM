@@ -33,6 +33,28 @@ test("ten repeat lead visits within 30 seconds use one request; manual refresh b
   assert.equal((await api.apiRequest("/api/leads", { maxAgeMs: 30000 })).version, 3);
 });
 
+test("notification write subscribers refresh only after a persisted response, including failed writes", async () => {
+  let release, completions = 0, starts = 0;
+  const api = client(async () => new Promise(resolve => { release = resolve; }));
+  api.subscribeApiWrites(() => { starts++; });
+  const unsubscribe = api.subscribeApiWrites(() => { completions++; }, "completed");
+  const write = api.apiRequest("/api/leads/record", { method: "PATCH", body: { course: "Updated" } });
+  assert.equal(starts, 1);
+  assert.equal(completions, 0);
+  release(ok({ ok: true }));
+  await write;
+  assert.equal(completions, 1);
+  const failure = api.apiRequest("/api/leads/record", { method: "PATCH", body: {} });
+  assert.equal(completions, 1);
+  release(Response.json({ error: "Write failed" }, { status: 500 }));
+  await assert.rejects(failure, /Write failed/);
+  assert.equal(completions, 2);
+  unsubscribe();
+  const next = api.apiRequest("/api/leads/record", { method: "PATCH", body: {} });
+  release(ok({ ok: true })); await next;
+  assert.equal(completions, 2);
+});
+
 test("simultaneous browser reads share one request without caching invoice status", async () => {
   let requests = 0;
   let release;
@@ -215,7 +237,7 @@ test("lead links prepare route and data once on hover/focus/touch and click star
     hasAttribute() { return false; }
   }
   const { AppShell } = loadModule("src\\components\\app-shell.tsx", {
-    react: { ...React, useEffect() {}, useRef: initial => ({ current: initial }),
+    react: { ...React, useEffect() {}, useLayoutEffect() {}, useRef: initial => ({ current: initial }),
       useState: initial => [initial, () => {}], useTransition: () => [false, callback => callback()] },
     "next/link": { default: () => null },
     "next/navigation": { usePathname: () => "/leads", useRouter: () => ({
@@ -756,6 +778,7 @@ function loadModule(relative, dependencies, globals = {}) {
   vm.runInNewContext(source, {
     exports, console, URL, URLSearchParams, ...globals,
     require: name => name in dependencies ? dependencies[name]
+      : name === "@/components/notification-bell" ? { NotificationBell: () => null }
       : name === "@/lib/section-preparation" ? loadModule("src\\lib\\section-preparation.ts", { "@/lib/navigation": dependencies["@/lib/navigation"] ?? { navigationItems: [] } }, globals)
       : require(name),
   });
@@ -810,7 +833,7 @@ test("every private API handler explicitly invokes requireUser", () => {
       if (entry.isDirectory()) { inspect(file); continue; }
       if (entry.name !== "route.ts") continue;
       const route = relative(root, file).replaceAll("\\", "/");
-      if (/^(auth|webhooks|invoice-status)\//.test(route) || route === "cron/invoices/route.ts") continue;
+      if (/^(auth|webhooks|invoice-status)\//.test(route) || ["cron/invoices/route.ts", "cron/notifications/route.ts"].includes(route)) continue;
       const source = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
       for (const node of source.statements) {
         if (!ts.isFunctionDeclaration(node) || !/^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$/.test(node.name?.text ?? "")) continue;
@@ -903,6 +926,7 @@ test("sidebar intent explicitly prepares full routes once and keeps payment read
   const api = client(async path => { requests.push(path); return ok({ leads: [] }); });
   const leadsPath = `/api/leads?${new URLSearchParams({ timezone: Intl.DateTimeFormat().resolvedOptions().timeZone })}`;
   const items = [
+    { href: "/", permission: "dashboard.view" },
     { href: "/leads", permission: "leads.view" },
     { href: "/pipeline", permission: "pipeline.view" },
     { href: "/invoices", permission: "invoices.view" },
@@ -915,7 +939,7 @@ test("sidebar intent explicitly prepares full routes once and keeps payment read
     const key = stateIndex++;
     if (!(key in states)) states[key] = initial;
     return [states[key], value => { states[key] = value; }];
-  }, useRef: initial => ({ current: initial }), useEffect() {}, useTransition: () => [false, callback => callback()] };
+  }, useRef: initial => ({ current: initial }), useEffect() {}, useLayoutEffect() {}, useTransition: () => [false, callback => callback()] };
   const { AppShell } = loadModule("src\\components\\app-shell.tsx", {
     react: hooks, "next/link": { default: () => null },
     "next/navigation": { usePathname: () => "/", useRouter: () => ({ prefetch: href => routes.push(href) }) },
@@ -928,7 +952,7 @@ test("sidebar intent explicitly prepares full routes once and keeps payment read
   });
   const props = { children: null, user: {
     id: "actor", profile: { role: "counselor", fullName: "Counselor" },
-    permissions: ["leads.view", "pipeline.view", "invoices.view", "meetings.view"],
+    permissions: ["dashboard.view", "leads.view", "pipeline.view", "invoices.view", "meetings.view"],
   } };
   const tree = AppShell(props);
   const links = new Map();
@@ -965,6 +989,9 @@ test("sidebar intent explicitly prepares full routes once and keeps payment read
   assert.equal(links.get("/meetings").prefetch, false, "explicit full prefetch avoids a duplicate Link request");
   assert.equal(links.get("/invoices").prefetch, false);
   assert.deepEqual(routes, ["/leads", "/pipeline", "/invoices", "/meetings"]);
+  links.get("/").onFocus();
+  assert.deepEqual(routes, ["/leads", "/pipeline", "/invoices", "/meetings", "/"],
+    "Dashboard intent prepares its complete server-rendered summary too");
 });
 
 test("sidebar preparation is permission-bound, limited to two sections, and stops on cleanup or hidden tabs", async () => {
@@ -998,6 +1025,137 @@ test("sidebar preparation is permission-bound, limited to two sections, and stop
   visible = false;
   const hidden = helpers.prepareSidebarSections(user, "/", () => assert.fail("hidden tab must not warm requests"), { isVisible: () => visible, onError: () => {} });
   await hidden.done;
+});
+
+test("Dashboard is prepared before a return click, without preparing unauthorized sections", async () => {
+  const items = [
+    { href: "/", permission: "dashboard.view" }, { href: "/leads", permission: "leads.view" },
+    { href: "/pipeline", permission: "pipeline.view" },
+  ];
+  const helpers = loadModule("src\\lib\\section-preparation.ts", { "@/lib/navigation": { navigationItems: items } }, { Intl });
+  const prepared = [];
+  const options = { isVisible: () => true, onError: error => assert.fail(error.message) };
+  await helpers.prepareSidebarSections({ permissions: ["dashboard.view", "leads.view"] }, "/leads",
+    async href => { prepared.push(href); }, options).done;
+  assert.deepEqual(prepared, ["/"]);
+  prepared.length = 0;
+  await helpers.prepareSidebarSections({ permissions: ["leads.view"] }, "/leads",
+    async href => { prepared.push(href); }, options).done;
+  assert.deepEqual(prepared, []);
+});
+
+test("automatic lead preparation is deduplicated, limited to four records and two concurrent reads", async () => {
+  const helpers = loadModule("src\\lib\\section-preparation.ts", { "@/lib/navigation": { navigationItems: [] } });
+  const started = [], pending = new Map(), errors = [];
+  const task = helpers.prepareLeadLinks(["one", "one", "two", "three", "four", "five"], href => {
+    started.push(href);
+    return new Promise((resolve, reject) => pending.set(href, { resolve, reject }));
+  }, { isVisible: () => true, onError: error => errors.push(error.message) });
+  assert.deepEqual(started, ["/leads/one", "/leads/two"]);
+  pending.get("/leads/one").resolve();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(started, ["/leads/one", "/leads/two", "/leads/three"]);
+  pending.get("/leads/two").reject(new Error("Cannot prepare lead"));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(errors, ["Cannot prepare lead"]);
+  assert.deepEqual(started, ["/leads/one", "/leads/two", "/leads/three", "/leads/four"]);
+  pending.get("/leads/three").resolve(); pending.get("/leads/four").resolve();
+  await task.done;
+  const releases = [];
+  const cancelled = helpers.prepareLeadLinks(["one", "two", "three"], async () => {
+    await new Promise(resolve => { releases.push(resolve); });
+  }, { isVisible: () => true, onError: error => assert.fail(error.message) });
+  cancelled.cancel();
+  releases.forEach(release => release());
+  await cancelled.done;
+  assert.equal(releases.length, 2, "cleanup prevents the third read from starting");
+  const hidden = helpers.prepareLeadLinks(["one"], () => assert.fail("hidden tab must not prepare records"),
+    { isVisible: () => false, onError: error => assert.fail(error.message) });
+  await hidden.done;
+});
+
+test("prepared lead links have synchronous overview data and opening them needs no additional API read", async () => {
+  const reads = [], routes = [], effects = [], timers = [];
+  const api = client(async path => {
+    reads.push(path);
+    return ok({ lead: { id: path.split("/")[3].split("?")[0] }, stages: [], profiles: [], configuration: {} });
+  });
+  const helpers = loadModule("src\\lib\\live-leads-client.tsx", {
+    react: {}, "@/lib/crm-data": api, "lucide-react": {},
+    "@/components/searchable-dropdown": {}, "@/lib/lead-filters": {}, "@/lib/lead-picklists": {},
+  }, { window: {}, Intl });
+  const { LeadNavigationPreparation } = loadModule("src\\components\\lead-navigation-preparation.tsx", {
+    react: { useEffect: effect => effects.push(effect), useState: initial => [initial, () => {}] },
+    "next/navigation": { useRouter: () => ({ prefetch: (href, options) => { assert.equal(options.kind, "full"); routes.push(href); } }) },
+    "@/lib/crm-data": api, "@/lib/live-leads-client": helpers,
+  }, { window: { setTimeout: (callback, delay) => { assert.equal(delay, 0); timers.push(callback); }, clearTimeout() {} },
+    document: { visibilityState: "visible" } });
+  LeadNavigationPreparation({ leads: Array.from({ length: 10 }, (_, index) => ({ id: `record-${index}` })) });
+  const cleanup = effects[0]();
+  assert.equal(reads.length, 0, "preparation yields until the page has rendered");
+  timers[0]();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reads.length, 4);
+  assert.equal(routes.length, 4);
+  for (let index = 0; index < 4; index++) {
+    const path = `/api/leads/record-${index}?section=overview`;
+    assert.equal(helpers.getCachedLeadDetail(path).lead.id, `record-${index}`);
+    await helpers.loadLeadDetailData(path, { maxAgeMs: 30000 });
+  }
+  assert.equal(reads.length, 4, "all four overview visits use their completed preparations");
+  cleanup();
+  effects.length = 0;
+  LeadNavigationPreparation({ leads: [{ id: "unauthorized" }], enabled: false });
+  effects[0]();
+  assert.equal(timers.length, 1, "no automatic reads without lead-view permission");
+});
+
+test("filtered lead revisits synchronously combine cached pages with current metadata", async () => {
+  const reads = [];
+  const api = client(async path => {
+    reads.push(path);
+    return ok(path.includes("metadata=0") ? { leads: [{ id: "match" }], hasMore: false, nextCursor: null }
+      : { leads: [], profiles: [], stages: [], configuration: {}, user: { id: "actor" } });
+  });
+  const helpers = loadModule("src\\lib\\live-leads-client.tsx", {
+    react: {}, "@/lib/crm-data": api, "lucide-react": {},
+    "@/components/searchable-dropdown": {}, "@/lib/lead-filters": {}, "@/lib/lead-picklists": {},
+  }, { window: {}, Intl });
+  await helpers.loadLeadListData(helpers.leadQueryPath(helpers.emptyFilter()), { maxAgeMs: 30000 });
+  const path = helpers.leadQueryPath({ ...helpers.emptyFilter(), query: "match" });
+  assert.equal(helpers.getCachedLeadListData(path), undefined);
+  await helpers.loadLeadListData(path, { maxAgeMs: 30000 });
+  const prepared = helpers.getCachedLeadListData(path);
+  assert.equal(prepared.leads[0].id, "match");
+  assert.equal(prepared.user.id, "actor");
+  assert.equal(reads.length, 2);
+  api.clearApiReadCache();
+  assert.equal(helpers.getCachedLeadListData(path), undefined);
+});
+
+test("shell identity invalidation precedes the initial page request instead of discarding it on mount", async () => {
+  const React = require("react");
+  const layouts = [], effects = [];
+  let release;
+  const api = client(async () => { await new Promise(resolve => { release = resolve; }); return ok({ leads: ["initial"] }); });
+  const { AppShell } = loadModule("src\\components\\app-shell.tsx", {
+    react: { ...React, useLayoutEffect: effect => layouts.push(effect), useEffect: effect => effects.push(effect),
+      useRef: initial => ({ current: initial }), useState: initial => [initial, () => {}],
+      useTransition: () => [false, callback => callback()] },
+    "next/navigation": { usePathname: () => "/leads", useRouter: () => ({}) },
+    "next/link": { default: () => null }, "@/lib/navigation": { navigationItems: [] },
+    "@/components/role-preview-context": { RolePreviewContext: React.createContext(null) },
+    "@/components/section-loading": {}, "@/components/global-lead-search": {},
+    "@/lib/crm-data": api, "@/lib/live-leads-client": {},
+  });
+  AppShell({ children: null, user: { id: "actor", permissions: ["leads.view"], profile: { role: "counselor", fullName: "Actor" } } });
+  assert.equal(layouts.length, 1, "identity invalidation must run during layout, before child passive loading effects");
+  layouts[0]();
+  const first = api.apiRequest("/api/leads", { maxAgeMs: 30000 });
+  assert.equal(api.getPendingApiRead("/api/leads") !== undefined, true);
+  release();
+  await first;
+  assert.deepEqual(api.getCachedApiRead("/api/leads").leads, ["initial"]);
 });
 
 test("short-lived route reuse is paired with router invalidation after successful and failed writes", async () => {
@@ -1048,7 +1206,7 @@ test("a section click immediately replaces the old page with its destination, wh
     hasAttribute(name) { return name === "download" && this.download; }
   }
   const { AppShell } = loadModule("src\\components\\app-shell.tsx", {
-    react: { ...React, useEffect() {}, useRef: initial => ({ current: initial }), useState(initial) {
+    react: { ...React, useEffect() {}, useLayoutEffect() {}, useRef: initial => ({ current: initial }), useState(initial) {
       const key = index++;
       if (!(key in states)) states[key] = initial;
       return [states[key], value => { states[key] = value; }];

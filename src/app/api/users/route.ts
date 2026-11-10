@@ -5,6 +5,7 @@ import { HttpError, jsonError, readJson, requireUser } from "@/lib/server/auth";
 import { getSupabaseAdminClient } from "@/lib/supabase/server";
 import { checkOrigin } from "@/lib/server/login";
 import { changeManagedPassword } from "@/lib/server/password-management";
+import { MAX_SIGNATURE_LENGTH, sanitizeSignature } from "@/lib/server/email-signature";
 
 const passwordSchema = z.string().min(12).max(128);
 
@@ -16,12 +17,19 @@ const profileSchema = z.object({
   status: z.enum(["active", "inactive"]),
   phone: z.string().max(50).default(""),
   ivrExtension: z.string().max(100).default(""),
+  emailSignatureHtml: z.string().max(MAX_SIGNATURE_LENGTH).transform(sanitizeSignature).refine(value => value.length <= MAX_SIGNATURE_LENGTH).optional(),
 });
 
 export async function GET() {
   try {
     const { supabase, user } = await requireUser("users.view");
-    const profiles = await fetchProfiles(supabase, { includeInactive: true });
+    let profiles = await fetchProfiles(supabase, { includeInactive: true });
+    if (user.profile.role === "super_admin") {
+      const { data: signatures, error } = await supabase.from("profiles").select("id,email_signature_html").is("deleted_at", null);
+      if (error) throw error;
+      const byId = new Map((signatures ?? []).map(row => [row.id, sanitizeSignature(row.email_signature_html)]));
+      profiles = profiles.map(profile => ({ ...profile, emailSignatureHtml: byId.get(profile.id) ?? "" }));
+    }
     const admin = user.profile.role === "admin" || user.profile.role === "super_admin";
     const { data: activity, error } = admin ? await supabase.rpc("admin_user_last_activity")
       : { data: [], error: null };
@@ -49,6 +57,7 @@ export async function POST(request: Request) {
     const { error: insertError } = await admin.from("profiles").insert({
       id: data.user.id, full_name: profile.fullName, email: profile.email, role: profile.role,
       reporting_to: profile.reportingTo, status: profile.status, phone: profile.phone, ivr_extension: profile.ivrExtension,
+      email_signature_html: sanitizeSignature(profile.emailSignatureHtml ?? ""),
     });
     if (insertError) {
       const { error: cleanupError } = await admin.auth.admin.deleteUser(data.user.id);
@@ -101,6 +110,7 @@ export async function PATCH(request: Request) {
       const { error } = await admin.from("profiles").update({
         full_name: body.profile.fullName, role: body.profile.role, reporting_to: body.profile.reportingTo,
         status: body.profile.status, phone: body.profile.phone, ivr_extension: body.profile.ivrExtension, updated_at: new Date().toISOString(),
+        ...(body.profile.emailSignatureHtml !== undefined ? { email_signature_html: sanitizeSignature(body.profile.emailSignatureHtml) } : {}),
       }).eq("id", body.id);
       if (error) throw error;
       if (body.profile.status === "inactive") {

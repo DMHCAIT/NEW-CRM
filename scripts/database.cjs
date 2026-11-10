@@ -17,6 +17,8 @@ const requiredColumns = [
   "invoices.invoice_date", "invoices.scheduled_for", "invoices.plan_request_id",
   "invoices.delivery_error", "invoices.delivery_attempted_at",
   "invoice_companies.invoice_profile", "invoices.document_details",
+  "notifications.lead_id", "notifications.event_key", "notification_email_queue.claim_token",
+  "profiles.email_signature_html", "emails.body_html",
 ];
 
 function databaseOptions(env, projectRoot = root) {

@@ -4,9 +4,57 @@ Next.js App Router, TypeScript, Tailwind CSS and Supabase. CRM screens read and
 write authenticated database records; missing configuration or failed operations
 are reported rather than replaced with demonstration records.
 
+Section tabs use a flat underline style: the selected tab stays underlined without
+hover, with no filled or rounded box. Keyboard focus remains visibly outlined.
+Related-list timelines use compact date-grouped rows, right-aligned timestamps,
+and wrapping field changes. Notes, emails, calls and invoice events retain their
+full details without large padded event cards.
+
+### Lead alerts and scheduled-call reminders
+
+Apply the lead-notifications migration before starting this build. The bell shows
+the owner's unread count and checks every 15 seconds while visible, on navigation,
+and after CRM writes. Notifications open their associated lead through normal
+permission checks; use **Mark read** to clear an unread item.
+
+New calls notify only when due, not when first scheduled. Reschedules, completion,
+cancellation, phone-app call attempts, lead edits, notes and sent/received emails
+create owner alerts and a transactional SMTP outbox entry. A phone-app launch is
+an attempt, not proof the call connected. Unassigned, archived leads and inactive
+owners are excluded. Transfers notify the new owner; existing alerts stay with
+their original recipient. No historical modifications are backfilled. Outstanding
+overdue scheduled calls produce one reminder per call/time, even after downtime;
+rescheduling permits a new reminder at the new time, while closing a call prevents
+future reminders. Existing reminders remain in history.
+
+For unattended reminders **and all notification emails**, configure a trusted
+scheduler to call `GET /api/cron/notifications` every minute with
+`Authorization: Bearer <NOTIFICATION_CRON_SECRET>`. Set that independent secret
+(at least 32 characters) in the server environment and scheduler, and configure
+SMTP in Integrations plus the public CRM origin in `NEXT_PUBLIC_APP_URL`.
+When running locally, set `NOTIFICATION_PUBLIC_URL=https://www.ibmpcrm.xyz` to
+send owners usable production lead links while keeping `NEXT_PUBLIC_APP_URL`
+pointing to localhost for local login. On the hosted app, the same override can
+be set or left unset to use its normal CRM origin.
+Never put the secret in a URL or browser code. A build does not activate a live
+scheduler. Without it, an open owner's bell can record due in-app reminders,
+but emails remain queued. Delivery timing follows scheduler cadence, backlog,
+SMTP latency and the bell's refresh interval; it is not guaranteed to the second.
+
+Workers claim up to 25 emails, with a five-minute lease and unique claim tokens.
+Due calls release in batches of 100. Concurrent runs cannot claim the same active
+lease or insert duplicate reminder events. Failed emails retain `last_error` and
+retry after one minute, at most five attempts; missing/inactive owner addresses
+are recorded failures, not successful delivery. Monitor the scheduler's non-2xx
+responses and `notification_email_queue` for failed/exhausted attempts. SMTP
+acceptance is not confirmation of inbox delivery; a process crash after SMTP
+acceptance but before saving can cause a duplicate on retry.
+
 ## Setup
 
-1. Install Node.js 20.11 or newer and run `npm install`.
+1. Install Node.js 22.12 or newer and run `npm install`. The maintained HTML
+   signature sanitizer requires this runtime; older sanitizer releases are not
+   used because of published sanitization vulnerabilities.
 2. Copy `.env.example` to **`.env.local`**. Set `NEXT_PUBLIC_APP_URL` to the exact
    origin used in your browser, including its port locally (for example,
    `http://localhost:3001` if port 3000 is already occupied). Use HTTPS in production.
@@ -56,18 +104,21 @@ does not remove development compilation or database latency.
 
 Lead screens reuse browser-memory responses for up to 30 seconds when revisiting
 a page; valid cached data renders immediately instead of flashing a loading screen.
-After a 1.5-second startup delay, the sidebar prepares permitted client-rendered
-sections in a bounded queue (at most two sections at a time), overlapping full
-route preparation with their API reads before a click. The current route is also
+After the current section's pending read settles, the sidebar prepares permitted
+sections without a fixed startup delay in a bounded queue (at most two sections
+at a time), overlapping full route preparation with their API reads before a click.
+The current route is also
 prepared for a quick return visit. The queue stops launching work when the tab
-is hidden, the shell unmounts, or identity/permissions change. Dashboard and login
-activity are excluded from this preparation queue.
+is hidden, the shell unmounts, or identity/permissions change. Login
+activity is excluded from this preparation queue. Dashboard is fully route-prefetched,
+including its authenticated summary, rather than waiting for a click to start it.
+Preparation runs again after navigation so expired destinations can be warmed again.
 Hover, keyboard focus and touch prioritize the selected route immediately.
 Explicit full route preparation is deduplicated for 25 seconds; automatic Link
 viewport prefetch is disabled so it cannot compete with the bounded queue.
 Intended client-rendered sections use Next Link's full prefetch rather than the
-automatic mode that can stop at a dynamic route's loading boundary. Dashboard
-and login activity are not fully prefetched in the background.
+automatic mode that can stop at a dynamic route's loading boundary. Login activity
+is not fully prefetched in the background.
 Clicking any internal section link immediately updates the navigation and breadcrumb
 and shows a destination-specific skeleton, keeping the previous page hidden and inert
 until the route is ready. Existing route layouts remain mounted during the transition.
@@ -134,6 +185,13 @@ list metadata (stages, profiles and field settings) while requesting current
 record-specific data and authenticated identity. Completed preparations render
 synchronously. Direct entry and explicit refresh still load complete metadata;
 writes, identity changes and authorization failures invalidate browser snapshots.
+Cache invalidation for identity changes runs before page-loading effects, so the
+initial page request is not discarded by shell startup. Filtered lead-list revisits
+also reconstruct their first render from fresh cached records and metadata.
+Once Leads or Pipeline has rendered its current results, up to four leading lead
+links prepare their full routes and overviews in the background, two at a time.
+This work yields to rendering, stops launching reads in hidden tabs or on cleanup,
+and does not prepare lead records for users without lead-view permission.
 Opening a lead starts one authorized workspace preparation for Notes, Emails
 and both activity timelines without waiting for a related-list click. The first
 overview is not blocked by this work. Successful sections share that bounded
@@ -466,6 +524,10 @@ are not correctly configured; there is no demo-login bypass.
 
 Admins and Super Admins see device activity at `/admin/login-activity`, not on
 the dashboard. Users shows each person's latest recorded use.
+Login activity always displays timestamps in India Standard Time
+(`Asia/Kolkata`, UTC+05:30), including seconds and an explicit IST label,
+regardless of the hosting server's or viewer's timezone. Database timestamps
+remain timezone-aware instants; no stored times are shifted.
 History stores verified sign-in time, last-used time, sign-out/expiry, email and
 an approximate device label (for example, Windows computer or iPhone). Browser
 names/versions and raw user-agent strings are not retained. IP and location
@@ -1174,11 +1236,66 @@ before accepting live payments.
 
 The shared workspace uses a compact Zoho-style sidebar, blue primary actions,
 subtle panel and table boundaries, and consistent bordered form controls.
-Selected tabs use a tinted background and validation messages remain visible.
+Selected tabs use a flat underline and validation messages remain visible.
 Broad border/focus suppression is not applied. Keyboard-only focus indicators are retained for
 accessibility; dropdowns and dialogs retain soft elevation. The email composer
 places sender, recipient and Gmail connection controls together without nested
 framed cards. These presentation changes do not alter permissions or delivery.
+
+The Emails section now uses a Gmail-style **New message** composer with editable
+subject/body fields and three shared DMHCA templates: **Course enquiry**,
+**Follow-up**, and **Invoice reminder**. Templates fill the lead's doctor name
+and course and the signed-in sender's name/phone. Selecting another template
+asks before replacing a draft; typing an entirely manual email is also supported.
+The enquiry does not claim a brochure is attached; attachments are not added
+automatically. Invoice reminders require choosing an actual sent, unpaid invoice
+for this lead and `invoices.view` permission. Amount, currency, course and due date
+come from that invoice; missing data is reported rather than invented.
+
+Apply `202611100002_email_signatures.sql` before deploying this composer. A Super
+Admin can paste signature HTML up to 1,000,000 characters or upload an
+`.html`/`.htm` file (maximum 4 MB, still limited to 1,000,000 characters)
+when creating or editing a user. The same form also supports **Paste signature
+image** (focus the paste area, then Ctrl+V/Cmd+V) and **Upload signature image**.
+Copying the rendered HTML signature preserves its existing clickable links,
+images and formatting; clipboard HTML takes priority over an accompanying bitmap.
+No new destination URL is required for this. Screenshots/plain image files do
+not retain HTML links. Embedded base64 PNG, JPEG, GIF and WebP images are uploaded
+automatically and replaced with permanent HTTPS URLs without changing surrounding
+links. Repeated image sources upload once. A local/temporary image is recovered
+when the clipboard includes exactly one matching image file for one distinct
+local source; otherwise an actionable error is shown instead of guessing or
+losing images. Local files are never fetched from their source URLs.
+HTML-file uploads and manually pasted HTML are processed the same way before
+saving, so embedded images are not silently removed by the server sanitizer.
+Safe table dimensions, borders, spacing, photo rounding and email layout styles
+are retained. The sandboxed, scrollable preview preserves original image sizing
+and provides 380px of height rather than cropping a full signature to 150px.
+PNG, JPEG, GIF and WebP files up to 1 MB are accepted; SVG is rejected. Enter an
+optional image click-through URL before pasting/uploading to wrap the image in a
+clickable link. Images append to the existing signature HTML, so text and images
+can be combined. Save the user to persist the signature change.
+
+Apply `202611100003_large_email_signatures.sql` to increase the database signature
+limit from 20,000 to 1,000,000 characters. Paste, HTML upload, combined signatures
+and server validation use the same limit. The separate 1 MB image-upload limit
+and 20,000-character lead-message limit are unchanged.
+
+Only a Super Admin with `users.manage` can upload. The server verifies file type
+and size, then stores the image with a unique, immutable filename in the public
+Supabase Storage `email-signatures` bucket (created automatically on first
+upload). Images must remain publicly readable so email recipients can load them;
+do not upload private information. No public upload policy is added. Storage
+failures are shown explicitly. Old images are retained so previously sent emails
+do not break. Recipients' email clients may block remote images until enabled.
+
+Safe formatting, links, tables and HTTPS-hosted
+logo images are retained; scripts, handlers, embeds and unsafe CSS/URLs are
+stripped on save and again before sending. Preview is sandboxed. The signed-in
+sender's signature appears below the editable message and can be omitted for an
+individual email. Sending re-reads only that sender's saved signature, never an
+arbitrary lead owner's. Gmail receives multipart plain-text/HTML alternatives;
+both bodies are stored in the email log, and existing timelines remain plain text.
 
 On desktop screens (1100px and wider), lead details use a compact header and
 one continuous three-column field grid without section headings or divided panels.
@@ -1252,9 +1369,10 @@ not leave it incorrectly locked. New lead change
 logs retain the actor name and before/after field values; call changes have their
 own timeline. Each timeline shows the actor, action and local date/time. Legacy
 records without detailed field values are labelled rather than inventing history.
-This is a CRM appointment only: no automatic dialing, external calendar event,
-or scheduled reminder is implied. Scheduling does not change the lead's existing
-next-follow-up field. No additional migration or dialer credentials are required.
+This is a CRM appointment only: no automatic dialing or external calendar event
+is implied. Owner reminders require the lead-notifications migration and scheduler
+described above. Scheduling does not change the lead's existing next-follow-up
+field. No dialer credentials are required.
 
 Lead details use inline editing: text fields save on blur or Enter, and dropdowns
 save on selection. There is no separate Edit or Save button. Each field reports
@@ -1302,12 +1420,17 @@ still apply; users cannot select a different sender or impersonate another user.
 4. As a CRM Admin/Super Admin with integration management access, open
    **Integrations > Gmail mailbox**, choose **Workspace-managed**, enter
    `dmhca.in` as the domain and paste the complete JSON into the service account
-   field. Save credentials. The key is encrypted with the existing
+   field. Pasting JSON selects Workspace mode automatically. Click **Save & connect
+   Workspace** to verify delegated access to your CRM login mailbox before
+   activating the configuration. If Google rejects access, the existing saved
+   credentials are retained and the error explains the required setup.
+   The key is encrypted with the existing
    `AUTH_ENCRYPTION_KEY`, write-only, and never returned through settings reads.
    Keep that encryption key stable across production instances. A Web OAuth
    client, client secret and callback registration are not needed in this mode.
-5. Run **Check saved setup**, signed in with your primary `@dmhca.in` mailbox.
-   This requests delegated authorization and verifies your Gmail profile, without
+5. Saving automatically checks the connection; **Check saved setup** can repeat
+   this later. Sign in with your primary Workspace mailbox.
+   The check requests delegated authorization and verifies your Gmail profile, without
    reading messages or sending email. Then verify lead sending and inbox sync
    with two employee CRM accounts. Every user must have an enabled/licensed Gmail
    mailbox matching their CRM login. No individual **Connect Gmail** is needed.
