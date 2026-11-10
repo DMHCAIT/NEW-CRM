@@ -2,7 +2,7 @@ import { z } from "zod";
 import { HttpError } from "@/lib/server/auth";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { CurrentUser } from "@/lib/types";
-import { DEFAULT_LEAD_PICKLISTS } from "@/lib/lead-picklists";
+import { DEFAULT_LEAD_PICKLISTS, LEAD_PICKLIST_KEYS } from "@/lib/lead-picklists";
 import { normalizePhone } from "@/lib/lead-phone";
 export { normalizePhone } from "@/lib/lead-phone";
 
@@ -18,7 +18,8 @@ export const leadConfiguration = z.object({
   picklists: z.object({
     countryCode: z.array(z.string().trim().min(1).max(160)).default(DEFAULT_LEAD_PICKLISTS.countryCode),
     country: z.array(z.string().trim().min(1).max(100)).default(DEFAULT_LEAD_PICKLISTS.country),
-    qualification: z.array(z.string().trim().min(1).max(100)).default(DEFAULT_LEAD_PICKLISTS.qualification),
+    qualification: z.array(z.string().trim().min(1).max(200)).default(DEFAULT_LEAD_PICKLISTS.qualification),
+    speciality: z.array(z.string().trim().min(1).max(200)).default(DEFAULT_LEAD_PICKLISTS.speciality),
     category: z.array(z.string().trim().min(1).max(100)).default(DEFAULT_LEAD_PICKLISTS.category),
     course: z.array(z.string().trim().min(1).max(200)).default(DEFAULT_LEAD_PICKLISTS.course),
     source: z.array(z.string().trim().min(1).max(100)).default(DEFAULT_LEAD_PICKLISTS.source),
@@ -26,10 +27,24 @@ export const leadConfiguration = z.object({
 });
 export type LeadConfiguration = z.infer<typeof leadConfiguration>;
 export async function fetchLeadConfiguration(client: SupabaseClient): Promise<LeadConfiguration> {
-  const { data, error } = await client.from("crm_settings").select("value").eq("setting_key", "lead_configuration").maybeSingle();
-  dbError(error);
+  const [{ data, error }, observed] = await Promise.all([
+    client.from("crm_settings").select("value").eq("setting_key", "lead_configuration").maybeSingle(),
+    client.from("crm_settings").select("value").eq("setting_key", "lead_observed_picklists").maybeSingle(),
+  ]);
+  dbError(error); dbError(observed.error);
   const parsed = leadConfiguration.safeParse(data?.value ?? {});
   if (!parsed.success) throw new HttpError(500, "Lead configuration is invalid. Contact an administrator.");
+  const discovered = z.record(z.array(z.string().trim().min(1).max(200))).safeParse(observed.data?.value ?? {});
+  if (!discovered.success) throw new HttpError(500, "Observed lead picklists are invalid. Contact an administrator.");
+  for (const key of LEAD_PICKLIST_KEYS) {
+    const values = [...parsed.data.picklists[key], ...(discovered.data[key] ?? [])];
+    const seen = new Set<string>();
+    parsed.data.picklists[key] = values.filter(value => {
+      const normalized = value.trim().toLocaleLowerCase();
+      if (seen.has(normalized)) return false;
+      seen.add(normalized); return true;
+    });
+  }
   return parsed.data;
 }
 
@@ -43,12 +58,14 @@ export const leadInput = z.object({
   billingAddress: z.string().trim().max(2000).optional().default(""),
   course: z.string().trim().max(200).optional().default(""),
   qualification: z.string().trim().max(200).optional().default(""),
+  speciality: z.string().trim().max(200).optional().default(""),
   category: z.string().trim().max(100).optional().default(""),
   source: z.string().trim().min(1).max(100).optional().default("manual"),
   stageId: z.string().uuid().nullable().optional(),
   assigneeId: z.string().uuid().nullable().optional(),
   followUpAt: z.union([z.literal(""), z.string().datetime({ offset: true })]).nullable().optional(),
   closureFee: z.number().finite().min(0).max(9999999999.99).optional().default(0),
+  expectedClosureDate: z.union([z.literal(""), z.string().date()]).nullable().optional(),
   customFields: z.record(z.string().max(100), z.string().max(2000)).refine((v) => Object.keys(v).length <= 100, "Too many custom fields").optional().default({}),
 }).strict();
 
@@ -61,9 +78,10 @@ export function parseLead(value: unknown) {
     name: v.name, phone: `${v.phone.startsWith("+") || /\(\+\d+/.test(v.countryCode) ? "+" : ""}${normalizedPhone}`,
     country_code: v.countryCode || null, normalized_phone: normalizedPhone,
     alt_phone: v.altPhone || null, email: v.email || null, normalized_email: v.email?.toLowerCase() || null,
-    country: v.country || null, billing_address: v.billingAddress, course: v.course || null, qualification: v.qualification || null, category: v.category || null,
+    country: v.country || null, billing_address: v.billingAddress, course: v.course || null, qualification: v.qualification || null,
+    speciality: v.speciality || null, category: v.category || null,
     source: v.source, stage_id: v.stageId, assignee_id: v.assigneeId,
-    next_followup_at: v.followUpAt || null, closure_fee: v.closureFee, custom_fields: v.customFields,
+    next_followup_at: v.followUpAt || null, closure_fee: v.closureFee, expected_closure_date: v.expectedClosureDate || null, custom_fields: v.customFields,
   };
 }
 

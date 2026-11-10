@@ -46,6 +46,20 @@ test("relative filter days follow the browser timezone while dashboard queries r
   assert.equal(overdue.criteria[0].value,"2026-10-26");
 });
 
+test("Most Recent Visits source selections reach SQL as source conditions without dates", () => {
+  for (const operator of ["is", "in"]) {
+    const filter = { ...base().filter, criteria: [{
+      id: "recent", field: "recentVisitSource", operator,
+      value: operator === "is" ? "DMHCA-Chatbot" : "Website\nWebsite-IBMP",
+    }] };
+    const parsed = leadQuery.parseQueryFilter(filter);
+    const converted = leadQuery.databaseFilter(parsed, "Asia/Kolkata");
+    assert.equal(converted.criteria[0].field, "source");
+    assert.equal(converted.criteria[0].operator, operator);
+    assert.equal(converted.criteria[0].value, filter.criteria[0].value);
+  }
+});
+
 test("paged reads fetch only returned IDs, preserve SQL order, and keep a cursor even if a lead is archived between queries", async () => {
   const rpcCalls = [], selections = [];
   const cursor = { id: "b",createdAt: "2026-10-20T00:00:00Z",name: "Beta",followUpAt: null };

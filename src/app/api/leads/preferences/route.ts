@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import { HttpError, jsonError, readJson, requireString, requireUser } from "@/lib/server/auth";
-import { dbError, uuid } from "@/lib/live-leads";
+import { dbError, fetchLeadConfiguration, uuid } from "@/lib/live-leads";
 import { isSavedLeadFilter, criterionError } from "@/lib/lead-filters";
-import { REPORT_COLUMNS } from "@/lib/reports";
+import { leadColumns } from "@/lib/reports";
 import { checkOrigin } from "@/lib/server/login";
 
 export async function POST(request: Request) {
@@ -11,7 +11,9 @@ export async function POST(request: Request) {
     const { supabase, user } = await requireUser("leads.view");
     const body = await readJson<Record<string, unknown>>(request);
     if (body.action === "columns") {
-      if (!Array.isArray(body.columns) || !body.columns.length || !body.columns.every((key) => REPORT_COLUMNS.some((c) => c.key === key))) throw new HttpError(400, "Invalid columns.");
+      const configuration = await fetchLeadConfiguration(supabase);
+      const available = leadColumns(configuration.fields);
+      if (!Array.isArray(body.columns) || !body.columns.length || body.columns.length > available.length || !body.columns.every((key) => available.some((c) => c.key === key)) || new Set(body.columns).size !== body.columns.length) throw new HttpError(400, "Invalid columns.");
       dbError((await supabase.from("user_columns").upsert({ user_id: user.id, view_name: "leads", columns_json: body.columns }, { onConflict: "user_id,view_name" })).error);
     } else if (body.action === "save") {
       if (!isSavedLeadFilter(body.filter) || body.filter.criteria.some(criterionError)) throw new HttpError(400, "Invalid filter.");

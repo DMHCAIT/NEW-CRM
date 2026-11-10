@@ -1,6 +1,6 @@
 import type { Lead } from "@/lib/types";
 
-export type FilterField = "name" | "phone" | "email" | "country" | "course" | "qualification" | "category" | "stage" | "assignee" | "source" | "createdAt" | "modifiedAt" | "modifiedBy" | "followUpAt" | "lastVisitAt" | "untouched";
+export type FilterField = "name" | "phone" | "email" | "country" | "course" | "qualification" | "speciality" | "category" | "stage" | "assignee" | "source" | "createdAt" | "modifiedAt" | "modifiedBy" | "followUpAt" | "expectedClosureDate" | "lastVisitAt" | "recentVisitSource" | "untouched";
 export type FilterOperator = "is" | "is_not" | "in" | "not_in" | "contains" | "not_contains" | "begins_with" | "ends_with" | "is_empty" | "is_not_empty" | "before" | "after" | "on_or_before" | "on_or_after" | "between" | "not_between" | "today" | "tomorrow" | "yesterday" | "this_week" | "last_week" | "this_month" | "last_month" | "next_month" | "next_week" | "custom_date" | "last_days" | "next_days" | "overdue" | "is_true" | "is_false";
 export type FilterCriterion = { id: string; field: FilterField; operator: FilterOperator; value: string; secondValue?: string };
 export type MatchMode = "all" | "any";
@@ -8,16 +8,20 @@ export type SavedLeadFilter = { id: string; name: string; criteria: FilterCriter
 
 export const FILTERS_STORAGE_KEY = "northstar.leads.saved-filters";
 export const FILTERS_CHANGED_EVENT = "northstar:lead-filters-changed";
+export const RECENT_VISIT_SOURCES = ["Website", "DMHCA-Chatbot", "DMHCA-Contact form", "Website-IBMP"] as const;
 export const FILTER_FIELDS: { key: FilterField; label: string; kind: "text" | "choice" | "date" | "boolean" }[] = [
   { key: "name", label: "Lead name", kind: "text" }, { key: "phone", label: "Phone", kind: "text" },
   { key: "email", label: "Email", kind: "text" }, { key: "country", label: "Country", kind: "choice" },
   { key: "course", label: "Course", kind: "choice" },
   { key: "category", label: "Category", kind: "choice" }, { key: "followUpAt", label: "Follow up", kind: "date" },
-  { key: "qualification", label: "Qualification", kind: "choice" }, { key: "source", label: "Lead source", kind: "choice" },
+  { key: "qualification", label: "Qualification", kind: "choice" }, { key: "speciality", label: "Speciality", kind: "choice" },
+  { key: "source", label: "Lead source", kind: "choice" },
   { key: "stage", label: "Lead stage", kind: "choice" }, { key: "assignee", label: "Assignee", kind: "choice" },
   { key: "createdAt", label: "Created", kind: "date" }, { key: "modifiedAt", label: "Modified", kind: "date" },
   { key: "modifiedBy", label: "Last Modified", kind: "choice" }, { key: "untouched", label: "Untouched", kind: "boolean" },
-  { key: "lastVisitAt", label: "Most Recent Visits", kind: "date" },
+  { key: "recentVisitSource", label: "Most Recent Visits", kind: "choice" },
+  { key: "lastVisitAt", label: "Last recorded visit", kind: "date" },
+  { key: "expectedClosureDate", label: "Expected closure date", kind: "date" },
 ];
 
 type OperatorOption = { value: FilterOperator; label: string };
@@ -52,6 +56,7 @@ const LEGACY_UNTOUCHED_OPERATORS: OperatorOption[] = [{ value: "is_false", label
 const LEGACY_UNTOUCHED_RENAMES: Record<string, FilterOperator> = { untouched_before: "before", untouched_after: "after", untouched_between: "between" };
 const FILTER_OPERATORS = [...TEXT_OPERATORS, ...CHOICE_OPERATORS, ...DATE_OPERATORS, ...UNTOUCHED_OPERATORS, ...LEGACY_UNTOUCHED_OPERATORS, { value: "overdue" }];
 export function operatorsForField(field: FilterField): OperatorOption[] {
+  if (field === "recentVisitSource") return CHOICE_OPERATORS.filter(operator => ["is", "in"].includes(operator.value));
   const kind = FILTER_FIELDS.find(({ key }) => key === field)?.kind;
   if (kind === "boolean") return UNTOUCHED_OPERATORS;
   if (kind === "date") return field === "followUpAt" ? [...DATE_OPERATORS, { value: "overdue", label: "Overdue" }] : DATE_OPERATORS;
@@ -65,7 +70,7 @@ export function defaultOperator(field: FilterField): FilterOperator {
   return kind === "date" ? "is" : kind === "boolean" ? "is_true" : kind === "choice" ? "is" : "contains";
 }
 export function isWebsiteLead(lead: Lead) {
-  return ["website", "website form", "web form", "website lead", "landing page"].includes(lead.source.trim().toLocaleLowerCase());
+  return RECENT_VISIT_SOURCES.some(source => source.toLocaleLowerCase() === lead.source.trim().toLocaleLowerCase());
 }
 export function leadIsUntouched(lead: Lead): boolean | undefined {
   if (lead.hasBeenEdited !== undefined) return !lead.hasBeenEdited;
@@ -179,6 +184,8 @@ export function criterionError(criterion: FilterCriterion): string | null {
   if (!legacy && !operatorsForField(criterion.field).some(({ value }) => value === criterion.operator)) return "Choose an operator supported by this field.";
   if (!operatorNeedsValue(criterion.operator)) return null;
   if (!criterion.value.trim()) return "Enter or choose a value.";
+  if (criterion.field === "recentVisitSource" && !criterion.value.split("\n").every(value =>
+    RECENT_VISIT_SOURCES.some(source => source.toLocaleLowerCase() === value.trim().toLocaleLowerCase()))) return "Choose one of the available lead sources.";
   if (criterion.operator === "last_days" || criterion.operator === "next_days") {
     return /^\d+$/.test(criterion.value) && Number(criterion.value) >= 1 && Number(criterion.value) <= 36500 ? null : "Enter a whole number of days from 1 to 36500.";
   }
@@ -242,7 +249,7 @@ function matchesCriterion(lead: Lead, criterion: FilterCriterion, now: Date) {
     }
     return leadUntouchedInPeriod(lead, criterion);
   }
-  const raw = lead[criterion.field];
+  const raw = criterion.field === "recentVisitSource" ? lead.source : lead[criterion.field];
   const actual = raw == null ? "" : String(raw);
   const expected = criterion.value.trim();
   const isDate = FILTER_FIELDS.find(({ key }) => key === criterion.field)?.kind === "date";

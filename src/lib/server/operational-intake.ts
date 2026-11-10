@@ -11,6 +11,8 @@ export const intakeLeadSchema = z.object({
   country: z.string().trim().max(100).optional(),
   course: z.string().trim().max(200).optional(),
   qualification: z.string().trim().max(200).optional(),
+  speciality: z.string().trim().max(200).optional(),
+  category: z.string().trim().max(100).optional(),
   message: z.string().trim().max(10000).optional(),
 }).strict();
 export const intakeSchema = z.object({
@@ -162,5 +164,7 @@ export function facebookLead(fields: { name: string; values: string[] }[]) {
     ...(values.country ? { country: values.country } : {}),
     ...(values.course ? { course: values.course } : {}),
     ...(values.qualification ? { qualification: values.qualification } : {}),
+    ...(values.speciality || values.specialty ? { speciality: values.speciality || values.specialty } : {}),
+    ...(values.category ? { category: values.category } : {}),
   });
 }

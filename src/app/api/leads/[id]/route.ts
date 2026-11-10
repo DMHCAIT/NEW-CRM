@@ -61,25 +61,28 @@ export async function GET(request: Request, context: Context) {
 }
 
 export async function PATCH(request: Request, context: Context) {
+  const started = Date.now();
   try {
     checkOrigin(request);
     const { supabase, user } = await requireUser("leads.edit");
+    const authenticated = Date.now();
     const id = uuid((await context.params).id);
-    const current = await fetchLead(supabase, id);
-    if (!current || current.isArchived) throw new HttpError(404, "Lead not found.");
     const body = await readJson<Record<string, unknown>>(request);
-    const [extras, configuration, stages] = await Promise.all([
+    const [current, extras, configuration, stages] = await Promise.all([
+      fetchLead(supabase, id),
       supabase.from("leads").select("custom_fields,call_schedule_revision").eq("id", id).single(),
       fetchLeadConfiguration(supabase),
       Object.hasOwn(body, "stageId") ? fetchStages(supabase) : undefined,
     ]);
+    if (!current || current.isArchived) throw new HttpError(404, "Lead not found.");
     dbError(extras.error);
     const previousFields = extras.data?.custom_fields ?? {};
     const input = parseLead({
       name: current.name, phone: current.phone, countryCode: current.countryCode ?? "", altPhone: current.altPhone ?? "", email: current.email,
-      country: current.country, billingAddress: current.billingAddress ?? "", course: current.course, qualification: current.qualification, category: current.category ?? "", source: current.source,
+      country: current.country, billingAddress: current.billingAddress ?? "", course: current.course, qualification: current.qualification,
+      speciality: current.speciality ?? "", category: current.category ?? "", source: current.source,
       stageId: current.stageId ?? null, assigneeId: current.assigneeId ?? null, followUpAt: current.followUpAt ?? null,
-      closureFee: current.closureFee, customFields: previousFields, ...body,
+      closureFee: current.closureFee, expectedClosureDate: current.expectedClosureDate ?? null, customFields: previousFields, ...body,
     });
     validateCustomFields(input.custom_fields, configuration, previousFields);
     input.custom_fields = { ...previousFields, ...input.custom_fields };
@@ -88,8 +91,8 @@ export async function PATCH(request: Request, context: Context) {
     const columnInputs: Record<keyof typeof input, string[]> = {
       name: ["name"], phone: ["phone", "countryCode"], normalized_phone: ["phone", "countryCode"], country_code: ["countryCode"],
       alt_phone: ["altPhone"], email: ["email"], normalized_email: ["email"], country: ["country"], course: ["course"],
-      qualification: ["qualification"], billing_address: ["billingAddress"], category: ["category"], source: ["source"], stage_id: ["stageId"],
-      assignee_id: ["assigneeId"], next_followup_at: ["followUpAt"], closure_fee: ["closureFee"], custom_fields: ["customFields"],
+      qualification: ["qualification"], speciality: ["speciality"], billing_address: ["billingAddress"], category: ["category"], source: ["source"], stage_id: ["stageId"],
+      assignee_id: ["assigneeId"], next_followup_at: ["followUpAt"], closure_fee: ["closureFee"], expected_closure_date: ["expectedClosureDate"], custom_fields: ["customFields"],
     };
     const changes = Object.fromEntries(Object.entries(input).filter(([column]) =>
       columnInputs[column as keyof typeof input].some(key => Object.hasOwn(body, key))));
@@ -101,7 +104,7 @@ export async function PATCH(request: Request, context: Context) {
     return NextResponse.json({
       id: data.id, lead: { ...mapLead(data), customFields: data.custom_fields },
       scheduleUnlocked: Number(data.call_schedule_revision) > Number(extras.data?.call_schedule_revision),
-    });
+    }, { headers: { "Server-Timing": `auth;dur=${authenticated - started}, save;dur=${Date.now() - authenticated}` } });
   } catch (error) { return jsonError(error); }
 }
 

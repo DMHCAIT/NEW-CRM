@@ -11,6 +11,10 @@ export function NotificationBell({ userId }: { userId: string }) {
   const [unread, setUnread] = useState(0);
   const [error, setError] = useState("");
   const pathname = usePathname();
+  function prepare() {
+    void apiRequest<NotificationData>("/api/notifications", { maxAgeMs: 15000 })
+      .catch(failure => setError(errorMessage(failure, "Notifications could not be loaded.")));
+  }
   useEffect(() => {
     let active = true;
     let pending = false;
@@ -18,7 +22,7 @@ export function NotificationBell({ userId }: { userId: string }) {
       if (pending || document.visibilityState !== "visible") return;
       pending = true;
       try {
-        const data = await apiRequest<NotificationData>("/api/notifications");
+        const data = await apiRequest<NotificationData>("/api/notifications", { maxAgeMs: 15000 });
         if (active) { setUnread(data.unread); setError(""); }
       } catch (failure) {
         if (active) setError(errorMessage(failure, "Notifications could not be loaded."));
@@ -37,7 +41,9 @@ export function NotificationBell({ userId }: { userId: string }) {
     };
   }, [userId, pathname]);
   return <div className="notification-bell">
-    <Link className="icon-button topbar-icon" href="/notifications" aria-label={unread ? `Notifications (${unread} unread)` : "Notifications"}>
+    <Link className="icon-button topbar-icon" href="/notifications" prefetch={true}
+      onMouseEnter={prepare} onFocus={prepare} onTouchStart={prepare}
+      aria-label={unread ? `Notifications (${unread} unread)` : "Notifications"}>
       <Bell size={19} />
       {unread > 0 && <span className="notification-badge">{unread > 99 ? "99+" : unread}</span>}
     </Link>

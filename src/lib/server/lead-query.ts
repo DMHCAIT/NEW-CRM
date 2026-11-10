@@ -58,6 +58,7 @@ export function databaseFilter(filter: SavedLeadFilter, timezone: string, dashbo
   const part = (type: Intl.DateTimeFormatPartTypes) => key.find(p => p.type === type)!.value;
   const localNow = new Date(Number(part("year")), Number(part("month")) - 1, Number(part("day")), 12);
   return { ...filter, dashboard, criteria: filter.criteria.map(c => {
+    if (c.field === "recentVisitSource") return { ...c, field: "source" };
     if (c.field === "untouched") return c;
     const range = dateRange(c.operator, c.value, localNow);
     if (range) return { ...c, operator: "between", value: range[0], secondValue: range[1] };

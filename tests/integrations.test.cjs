@@ -118,6 +118,19 @@ test("Facebook exact-body signatures and validated real field mapping", () => {
   ]);
   assert.equal(lead.name, "Student");
   assert.equal(lead.phone, "+919876543210");
+  const additional = intake.facebookLead([
+    { name: "full_name", values: ["Student"] }, { name: "phone_number", values: ["+919876543210"] },
+    { name: "course", values: ["New Facebook course"] }, { name: "category", values: ["New category"] },
+    { name: "qualification", values: ["New qualification"] }, { name: "speciality", values: ["Cardiology"] },
+  ]);
+  assert.equal(additional.course, "New Facebook course");
+  assert.equal(additional.category, "New category");
+  assert.equal(additional.qualification, "New qualification");
+  assert.equal(additional.speciality, "Cardiology");
+  assert.equal(intake.facebookLead([
+    { name: "full_name", values: ["Student"] }, { name: "phone_number", values: ["+919876543210"] },
+    { name: "specialty", values: ["Radiology"] },
+  ]).speciality, "Radiology");
   assert.throws(() => intake.facebookLead([{ name: "full_name", values: ["Missing phone"] }]));
 });
 

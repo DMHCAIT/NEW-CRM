@@ -11,7 +11,7 @@ const session = "22000000-0000-4000-8000-000000000002";
 const source = "33000000-0000-4000-8000-000000000001";
 const hiddenLead = "44000000-0000-4000-8000-000000000001";
 before(async () => {
-  db = new PGlite();
+  db = new PGlite({ extensions: { pg_trgm: require("@electric-sql/pglite/contrib/pg_trgm").pg_trgm } });
   await db.exec(`create role anon; create role authenticated; create role service_role bypassrls;
     create schema auth; create table auth.users(id uuid primary key,email text);
     create function auth.jwt() returns jsonb language sql stable as $$ select coalesce(nullif(current_setting('request.jwt.claims',true),''),'{}')::jsonb $$;
@@ -53,6 +53,26 @@ test("signed intake RPC matches hidden duplicates without overwriting or reassig
   assert.equal(lead.name, "Hidden lead");
   assert.equal(lead.assignee_id, hidden);
   assert.equal((await db.query("select count(*)::int as count from public.chat_sessions where lead_id=$1", [hiddenLead])).rows[0].count, 1);
+});
+test("external intake persists new admission values and registers source and choices for filters", async () => {
+  const result = await intake("new-admission-values", {
+    name: "New external enquiry", phone: "7181920125", course: "New external course",
+    category: "New external category", qualification: "New external qualification", country: "New external country", speciality: "Cardiology",
+  });
+  assert.equal(result.status, "created");
+  const row = (await db.query("select course,category,qualification,country,source,speciality from public.leads where id=$1", [result.lead_id])).rows[0];
+  assert.equal(row.course, "New external course");
+  assert.equal(row.category, "New external category");
+  assert.equal(row.speciality, "Cardiology");
+  const observed = (await db.query("select value from public.crm_settings where setting_key='lead_observed_picklists'")).rows[0].value;
+  for (const key of ["course", "category", "qualification", "country", "source", "speciality"]) assert.ok(observed[key].includes(row[key]), key);
+  assert.equal((await intake("new-admission-values", { name: "Replay", phone: "7181920125", speciality: "Radiology" })).status, "replayed");
+  assert.equal((await db.query("select speciality from public.leads where id=$1", [result.lead_id])).rows[0].speciality, "Cardiology");
+});
+test("external intake rejects invalid speciality values before creating a lead", async () => {
+  for (const speciality of ["x".repeat(201), 123, ["Cardiology"]]) {
+    await assert.rejects(intake("invalid-speciality", { name: "Invalid speciality", phone: "7181920126", speciality }), /speciality/);
+  }
 });
 test("intake retries are persistent and idempotent across events, activities and transcripts", async () => {
   assert.equal((await intake("duplicate")).status, "replayed");

@@ -34,7 +34,7 @@ const savePlan = async input => (await asUser(counselorId, counselorSession, tx 
   "select public.operational_create_installment_plan($1::jsonb) as ids", [JSON.stringify(input)]))).rows[0].ids;
 
 before(async () => {
-  db = new PGlite();
+  db = new PGlite({ extensions: { pg_trgm: require("@electric-sql/pglite/contrib/pg_trgm").pg_trgm } });
   await db.exec(`
     create role anon;
     create role authenticated;

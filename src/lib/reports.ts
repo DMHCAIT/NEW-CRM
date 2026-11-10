@@ -4,13 +4,31 @@ import type { Lead } from "@/lib/types";
 export const REPORT_COLUMNS = [
   { key: "name", label: "Lead name" }, { key: "phone", label: "Phone" },
   { key: "email", label: "Email" }, { key: "country", label: "Country" },
-  { key: "qualification", label: "Qualification" }, { key: "category", label: "Category" }, { key: "course", label: "Course" },
+  { key: "qualification", label: "Qualification" }, { key: "speciality", label: "Speciality" }, { key: "category", label: "Category" }, { key: "course", label: "Course" },
   { key: "stage", label: "Stage" }, { key: "assignee", label: "Assignee" },
   { key: "followUp", label: "Next follow-up" }, { key: "source", label: "Source" },
   { key: "createdAt", label: "Created date" }, { key: "modifiedAt", label: "Modified date" },
   { key: "modifiedBy", label: "Modified by" }, { key: "lastVisitAt", label: "Most recent visit" },
+  { key: "countryCode", label: "Country code" }, { key: "altPhone", label: "Alternate phone" },
+  { key: "billingAddress", label: "Billing address" }, { key: "closureFee", label: "Expected closure fee" },
+  { key: "expectedClosureDate", label: "Expected closure date" }, { key: "createdBy", label: "Created by" },
+  { key: "id", label: "Lead ID" },
 ] as const satisfies readonly { key: keyof Lead; label: string }[];
 export type ReportColumn = (typeof REPORT_COLUMNS)[number]["key"];
+export type LeadColumn = ReportColumn | `custom:${string}`;
+export type LeadColumnDefinition = { key: LeadColumn; label: string };
+
+export function leadColumns(fields: { name: string; active: boolean }[] = []): LeadColumnDefinition[] {
+  return [...REPORT_COLUMNS, ...fields.filter(field => field.active).map((field): LeadColumnDefinition => ({
+    key: `custom:${field.name}`, label: field.name,
+  }))];
+}
+
+export function leadColumnValue(lead: Lead, key: LeadColumn): string | number | undefined {
+  if (key.startsWith("custom:")) return lead.customFields?.[key.slice(7)];
+  const column = REPORT_COLUMNS.find(column => column.key === key);
+  return column ? lead[column.key] : undefined;
+}
 export type ReportMode = "count" | "list";
 export type SavedReport = { id: string; name: string; filter: SavedLeadFilter; columns: ReportColumn[]; savedAt?: string };
 
@@ -25,12 +43,12 @@ function csvValue(value: string | number | undefined) {
   return `"${safe.replaceAll('"', '""')}"`;
 }
 
-export function reportCsv(report: SavedReport, rows: Lead[], mode: ReportMode) {
+export function reportCsv(report: SavedReport, rows: Lead[], mode: ReportMode, extraColumns: LeadColumnDefinition[] = []) {
   if (mode === "count") return `"Count"\r\n${csvValue(rows.length)}`;
-  const columns = report.columns.map((key) => REPORT_COLUMNS.find((column) => column.key === key)!);
+  const columns = [...report.columns.map((key) => REPORT_COLUMNS.find((column) => column.key === key)!), ...extraColumns];
   return [
     columns.map(({ label }) => csvValue(label)).join(","),
-    ...rows.map((lead) => columns.map(({ key }) => csvValue(lead[key])).join(",")),
+    ...rows.map((lead) => columns.map(({ key }) => csvValue(leadColumnValue(lead, key))).join(",")),
   ].join("\r\n");
 }
 

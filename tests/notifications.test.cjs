@@ -58,24 +58,25 @@ test("notification links open only validated local lead URLs, including existing
   assert.equal(notificationLeadPath({ lead_id: null, payload: null }), undefined);
 });
 
-test("notification list displays lead links and marks alerts read without discarding other records", async () => {
+test("notification list displays lead links and removes confirmed read reminders without discarding others", async () => {
   const row = { id, lead_id: id, type: "call_due", payload: { message: "Call is due" }, is_read: false, created_at: "2026-11-10T10:00:00Z" };
-  const states = [{ notifications: [row, { ...row, id: "legacy", lead_id: null, payload: null, is_read: true }], unread: 1 }, "", ""];
+  const states = [{ notifications: [row, { ...row, id: "second", lead_id: null, payload: null }], unread: 2 }, "", ""];
   const requests = [], dispatched = [];
-  let index = 0;
+  let index = 0, fail = false;
   const { NotificationsWorkspace } = load("src\\components\\notifications-workspace.tsx", {
-    react: { ...React, useEffect() {}, useState: initial => {
+    react: { ...React, useSyncExternalStore: (_, getSnapshot) => getSnapshot(), useEffect() {}, useState: initial => {
       const key = index++; return [states[key] ?? initial, value => { states[key] = typeof value === "function" ? value(states[key]) : value; }];
     } },
     "next/link": { __esModule: true, default: ({ children, prefetch, ...props }) => React.createElement("a", props, children) },
-    "@/lib/crm-data": { apiRequest: async (...args) => { requests.push(args); }, errorMessage: error => error.message, formatDateTime: value => value },
+    "@/lib/crm-data": { apiRequest: async (...args) => { requests.push(args); if (fail) throw new Error("Save failed"); }, errorMessage: error => error.message, formatDateTime: value => value },
   }, { window: { dispatchEvent: event => dispatched.push(event.type) } });
   const render = () => { index = 0; return NotificationsWorkspace(); };
   const tree = render();
   const html = renderToStaticMarkup(tree);
   assert.match(html, new RegExp(`href="/leads/${id}"`));
   assert.match(html, /Call is due/);
-  assert.match(html, /New CRM activity/);
+  assert.match(html, /Scheduled call reminder/);
+  assert.match(html, /unread scheduled-call reminders/);
   function collect(node) {
     if (Array.isArray(node)) return node.flatMap(collect);
     if (!node?.props) return [];
@@ -85,10 +86,74 @@ test("notification list displays lead links and marks alerts read without discar
   button.props.onClick();
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(requests[0], ["/api/notifications", { method: "PATCH", body: { id } }]);
-  assert.equal(states[0].unread, 0);
-  assert.equal(states[0].notifications.length, 2);
-  assert.equal(states[0].notifications[0].is_read, true);
+  assert.equal(states[0].unread, 1);
+  assert.equal(states[0].notifications.length, 1);
+  assert.equal(states[0].notifications[0].id, "second");
   assert.deepEqual(dispatched, ["crm-notifications-changed"]);
+  fail = true;
+  collect(render()).find(node => node.type === "button").props.onClick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(states[0].notifications.length, 1, "failed writes must not dismiss a reminder");
+  assert.equal(states[0].unread, 1);
+  assert.equal(states[1], "Save failed");
+  assert.deepEqual(dispatched, ["crm-notifications-changed"]);
+});
+
+test("notification page refreshes after completed writes and ignores older in-flight snapshots", async () => {
+  const states = [{ notifications: [], unread: 0 }, "", ""], effects = [], requests = [];
+  let index = 0, afterWrite, unsubscribed = false;
+  const { NotificationsWorkspace } = load("src\\components\\notifications-workspace.tsx", {
+    react: { ...React, useSyncExternalStore: (_, getSnapshot) => getSnapshot(), useEffect: effect => effects.push(effect), useState: initial => {
+      const key = index++; return [states[key] ?? initial, value => { states[key] = typeof value === "function" ? value(states[key]) : value; }];
+    } },
+    "next/link": { __esModule: true, default: ({ children, prefetch, ...props }) => React.createElement("a", props, children) },
+    "@/lib/crm-data": {
+      apiRequest: () => new Promise(resolve => requests.push(resolve)),
+      errorMessage: error => error.message,
+      subscribeApiWrites: (listener, phase) => {
+        assert.equal(phase, "completed"); afterWrite = listener; return () => { unsubscribed = true; };
+      },
+    },
+  }, {
+    window: { setInterval: () => 1, clearInterval() {} },
+    document: { visibilityState: "visible", addEventListener() {}, removeEventListener() {} },
+  });
+  NotificationsWorkspace();
+  const cleanup = effects[0]();
+  assert.equal(requests.length, 1);
+  afterWrite();
+  assert.equal(requests.length, 2, "completed modification must not wait for an old notification request");
+  requests[1]({ notifications: [], unread: 0 });
+  await new Promise(resolve => setImmediate(resolve));
+  requests[0]({ notifications: [{ id }], unread: 1 });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(states[0], { notifications: [], unread: 0 });
+  cleanup();
+  assert.equal(unsubscribed, true);
+});
+
+test("notification empty state has a clear heading, explanation and no reminder actions", () => {
+  let index = 0;
+  const { NotificationsWorkspace } = load("src\\components\\notifications-workspace.tsx", {
+    react: { ...React, useSyncExternalStore: (_, getSnapshot) => getSnapshot(), useEffect() {}, useState: () => [[{ notifications: [], unread: 0 }, "", ""][index++], () => {}] },
+    "@/lib/crm-data": {},
+  });
+  const html = renderToStaticMarkup(NotificationsWorkspace());
+  assert.match(html, /notifications-empty/);
+  assert.match(html, /You&#x27;re all caught up/);
+  assert.match(html, /No unread scheduled-call reminders/);
+  assert.match(html, /Scheduled calls only/);
+  assert.doesNotMatch(html, /Mark read|<ul/);
+});
+
+test("notification server and hydration markup stay stable even when the browser cache has a snapshot", () => {
+  const { NotificationsWorkspace } = load("src\\components\\notifications-workspace.tsx", {
+    "@/lib/crm-data": { getCachedApiRead: () => ({ notifications: [], unread: 2 }) },
+  });
+  const html = renderToStaticMarkup(React.createElement(NotificationsWorkspace));
+  assert.match(html, /Loading notifications/);
+  assert.match(html, /Checking reminders/);
+  assert.doesNotMatch(html, /2 unread|caught up/);
 });
 
 test("notification scheduler authenticates before acquiring admin access and reports failed email batches", async () => {
@@ -213,7 +278,7 @@ test("a reassigned email lease cannot send from an obsolete worker", async () =>
 test("notification API reads owner-only data without caching and marks only the owner's alert", async () => {
   const filters = [], rpcs = [];
   const admin = {
-    rpc: async name => { rpcs.push(name); return { data: 0, error: null }; },
+    rpc: async name => { rpcs.push(name); return { data: { notifications: [], unread: 3 }, error: null }; },
     from: () => {
       let head = false, write = false;
       const query = {
@@ -234,11 +299,11 @@ test("notification API reads owner-only data without caching and marks only the 
   const response = await route.GET();
   assert.equal(response.headers.get("cache-control"), "private, no-store");
   assert.deepEqual(await response.json(), { notifications: [], unread: 3 });
-  assert.deepEqual(rpcs, ["release_my_due_call_notifications"]);
-  assert.equal(filters.filter(([key, value]) => key === "user_id" && value === "owner").length, 2);
+  assert.deepEqual(rpcs, ["crm_notification_snapshot"]);
+  assert.equal(filters.length, 0, "snapshot must not issue additional REST reads");
   const patched = await route.PATCH(new Request("https://crm.test/api/notifications", { method: "PATCH", body: JSON.stringify({ id }) }));
   assert.equal(patched.status, 200);
-  assert.equal(filters.filter(([key, value]) => key === "user_id" && value === "owner").length, 3);
+  assert.equal(filters.filter(([key, value]) => key === "user_id" && value === "owner").length, 1);
   assert.equal((await route.PATCH(new Request("https://crm.test/api/notifications", { method: "PATCH", body: '{"id":"invalid"}' }))).status, 400);
 });
 

@@ -274,7 +274,7 @@ for (const [name, file, options] of cases) test(`live UI renders ${name} inside 
     assert.doesNotMatch(html, /class="avatar"/);
   }
   if (name === "settings") {
-    for (const field of ["Name", "Email", "Country code", "Phone", "Country", "Qualification", "Category", "Course", "Source", "Stage", "Assignee", "Closure Fee"])
+    for (const field of ["Name", "Email", "Country code", "Phone", "Country", "Qualification", "Category", "Course", "Source", "Stage", "Assignee", "Expected closure fee", "Expected closure date"])
       assert.ok(html.includes(field), `settings field list includes ${field}`);
     assert.match(html, /Preferred campus/);
     assert.match(html, /Delhi/);
@@ -1063,10 +1063,11 @@ test("lead overview groups contact, admissions and additional fields without rem
   });
   for (const section of ["Contact information", "Admissions &amp; ownership", "Additional information"]) assert.ok(html.includes(section), section);
   assert.equal((html.match(/class="lead-field-section"/g) ?? []).length, 3);
-  for (const name of ["Lead name", "Email", "Phone", "Alternate phone", "Country", "Course", "Qualification", "Category", "Source", "Stage", "Lead owner", "Closure fee", "Next follow-up", "Preferred campus", "Counselor note"])
+  for (const name of ["Lead name", "Email", "Phone", "Alternate phone", "Country", "Course", "Qualification", "Speciality", "Category", "Source", "Stage", "Lead owner", "Expected closure fee", "Expected closure date", "Next follow-up", "Preferred campus", "Counselor note"])
     assert.ok(html.includes(`aria-label="${name}"`), name);
   assert.doesNotMatch(html, /aria-label="Country code"/);
-  assert.equal((html.match(/class="lead-inline-field"/g) ?? []).length, 16);
+  assert.equal((html.match(/class="lead-inline-field"/g) ?? []).length, 18);
+  assert.match(html, /aria-label="Expected closure date"[^>]*type="date"/);
   assert.match(html, /type="datetime-local"/);
   assert.match(html, /Autosave enabled/);
   assert.match(html, /Last modified/);
@@ -1096,7 +1097,7 @@ test("invoice pagination bounds rendered rows while filters and totals include l
   assert.equal(allView.props.children[1].props.children, 61);
 });
 
-test("course catalog searches all records, paginates, separates company setup and preserves embedded scope", () => {
+test("course catalog searches all records, paginates, omits company setup and preserves embedded scope", () => {
   const data = { ...operations["/api/courses"], courses: Array.from({ length: 61 }, (_, index) => ({ ...operations["/api/courses"].courses[0], id: `course-${index}`, name: `Course ${String(index).padStart(3, "0")}`, is_active: index !== 60 })) };
   const states = [];
   let index = 0, invoiceOpens = 0;
@@ -1112,17 +1113,46 @@ test("course catalog searches all records, paginates, separates company setup an
   nodes().find(node => node.type === "select").props.onChange({ target: { value: "" } });
   nodes().find(node => node.props?.["aria-label"] === "Search courses").props.onChange({ target: { value: "course 060" } });
   assert.equal(nodes().find(node => node.type === "tbody").props.children.length, 1);
-  assert.equal(states[4], 0);
-  const viewButtons = nodes().find(node => node.type === "nav").props.children;
-  viewButtons[1].props.onClick();
-  assert.equal(nodes().filter(node => node.type === "form").length, 2);
-  assert.ok(!nodes().some(node => node.type === "table"));
-  viewButtons[0].props.onClick();
+  assert.equal(states[3], 0);
+  assert.ok(!nodes().some(node => node.type === "nav" || node.type === "form"));
+  const html = renderToStaticMarkup(CourseCatalog({}));
+  assert.doesNotMatch(html, /Invoice companies|Legal billing name|Save DMHCA profile/);
   const embedded = nodes({ leadCourse: "Course 060", onOpenInvoices: () => { invoiceOpens++; } });
   assert.ok(!embedded.some(node => node.type === "nav" || node.type === "form"));
   assert.ok(!embedded.some(node => node.type === "button" && node.props.children === "Edit"));
   embedded.find(node => node.type === "button" && node.props.children === "Open lead invoices").props.onClick();
   assert.equal(invoiceOpens, 1);
+});
+
+test("course editor groups details and pricing, preserves values and closes only after a confirmed save", async () => {
+  const states = [], submissions = [];
+  let index = 0, success = false, busy = false;
+  const data = operations["/api/courses"];
+  const { CourseCatalog } = load("src\\components\\course-catalog.tsx", {
+    react: { ...React, useEffect() {}, useState(initial) { const key = index++; if (!(key in states)) states[key] = initial; return [states[key], value => { states[key] = value; }]; } },
+    "@/app/integrations/operational-ui": {
+      ...op, formValues: () => ({ name: "Updated course", price_inr: "140000", price_usd: "2000", price_ibmp_usd: "", is_active: "on" }),
+      useOperationalData: () => ({ ...operational(data), busy, mutate: async (...args) => { submissions.push(args); return success; } }),
+    },
+  });
+  const nodes = () => { index = 0; return elements(CourseCatalog({})); };
+  nodes().find(node => node.type === "button" && node.props.children === "Edit").props.onClick();
+  assert.equal(nodes().find(node => node.type === "form").props.className, "course-edit-form");
+  assert.deepEqual(nodes().filter(node => node.type === "legend").map(node => node.props.children), ["Course details", "Standard pricing"]);
+  for (const key of ["name", "price_inr", "price_usd", "price_ibmp_usd"]) {
+    assert.equal(nodes().find(node => node.props?.name === key).props.defaultValue, data.courses[0][key]);
+  }
+  const submit = () => nodes().find(node => node.type === "form").props.onSubmit({ preventDefault() {}, currentTarget: {} });
+  await submit();
+  assert.ok(nodes().some(node => node.type === "form"), "a failed save keeps the form and entered values");
+  assert.deepEqual(submissions[0], ["/api/courses", "POST", { kind: "course", id: data.courses[0].id,
+    values: { name: "Updated course", price_inr: "140000", price_usd: "2000", price_ibmp_usd: "", is_active: true } }]);
+  busy = true;
+  assert.ok(nodes().filter(node => node.type === "fieldset").every(node => node.props.disabled));
+  assert.ok(nodes().find(node => node.type === "button" && node.props.children === "Cancel").props.disabled);
+  busy = false; success = true;
+  await submit();
+  assert.ok(!nodes().some(node => node.type === "form"));
 });
 
 test("lead record requests section-specific data and never renders stale section bodies during a switch", async () => {
@@ -1902,6 +1932,40 @@ test("dedicated lead creation saves, confirms duplicates and surfaces failures",
   assert.equal(routes.at(-1), "/leads/duplicate-id");
 });
 
+test("speciality is optional below qualification and uses defaults with older configurations", async () => {
+  assert.equal(actualLeads.leadDraft().speciality, "");
+  assert.equal(actualLeads.leadDraft({ ...lead, speciality: "Radiology" }).speciality, "Radiology");
+  const initial = actualLeads.leadDraft(lead);
+  const Component = load("src\\lib\\live-leads-client.tsx", { "@/lib/crm-data": crm, react: hookStates([initial, []]) }).LeadForm;
+  const nodes = elements(Component({ initial, stages, profiles: [profile], canAssign: true, onSave: async () => {}, busy: false, newLead: true, picklists: configuration.picklists }));
+  const dropdowns = nodes.filter(node => node.props?.ariaLabel);
+  const speciality = dropdowns.find(node => node.props.ariaLabel === "Speciality");
+  assert.equal(speciality.props.required, false);
+  assert.equal(speciality.props.options.length, 33);
+  assert.ok(dropdowns.findIndex(node => node === speciality) > dropdowns.findIndex(node => node.props.ariaLabel === "Qualification"));
+  assert.ok(speciality.props.options.some(option => option.value === "ENT (Otorhinolaryngology)"));
+  const options = elements(actualLeads.LiveFilterEditor({
+    filter: { ...filter, criteria: [{ id: "s", field: "speciality", operator: "is", value: "" }] },
+    leads: [{ ...lead, speciality: "Observed speciality" }], picklists: configuration.picklists, onChange() {},
+  })).find(node => node.props?.ariaLabel === "Filter value").props.options;
+  assert.ok(options.some(option => option.value === "Cardiology"));
+  assert.ok(options.some(option => option.value === "Observed speciality"));
+});
+
+test("user editor separates profile, signature and access with safe preview and busy protection", async () => {
+  const formProfile = { ...profile, emailSignatureHtml: '<p><a href="https://example.test">Signature</a></p>' };
+  const html = await renderPage("src\\app\\users\\page.tsx", {
+    states: [{ profiles: [profile], activity: [], canManage: true, currentUserId: id }, id, formProfile, "", "", true],
+  });
+  for (const label of ["Profile &amp; reporting", "Email signature", "Account access", "Signature preview"]) assert.ok(html.includes(label), label);
+  assert.match(html, /<details class="user-signature-code"><summary>Paste HTML code or upload an HTML file<\/summary>/);
+  assert.match(html, /title="Email signature preview"[^>]*sandbox=""/);
+  assert.match(html, /<fieldset disabled="" class="users-editor-fields"/);
+  assert.match(html, /disabled="">Cancel<\/button>/);
+  assert.match(html, /Saving\.\.\./);
+  assert.doesNotMatch(html, /Confirm password/);
+});
+
 test("organized Leads workspace retains permissions and selection actions", async () => {
   const readonly = { ...live, user: { ...user, profile: { ...profile, role: "counselor" }, permissions: ["leads.view"] } };
   const html = await renderPage("src\\app\\leads\\page.tsx", {
@@ -2069,8 +2133,10 @@ test("lead columns float without layout shifts and save each checkbox change aut
   const options = () => render().filter((node) => node.props?.className === "lead-column-option");
 
   toggle().props.onClick();
-  assert.equal(options().length, 15);
-  assert.ok(options().every((option) => option.props.children[1].props.children !== "Country code"));
+  assert.equal(options().length, 25);
+  for (const label of ["Country code", "Alternate phone", "Billing address", "Speciality", "Expected closure fee", "Expected closure date", "Preferred campus", "Counselor note"]) {
+    assert.ok(options().some(option => option.props.children[1].props.children === label), label);
+  }
   search("  EMAIL ");
   assert.equal(options().length, 1);
   assert.equal(options()[0].props.children[1].props.children, "Email");
@@ -2096,7 +2162,7 @@ test("lead columns float without layout shifts and save each checkbox change aut
   assert.equal(options().length, 0);
   assert.ok(render().some((node) => node.props?.role === "status" && node.props.children === "No columns match your search."));
   search("");
-  assert.equal(options().length, 15);
+  assert.equal(options().length, 25);
   assert.ok(!render().some((node) => node.type === "button" && ["Cancel", "Save columns"].includes(node.props.children)));
   search("email");
   options()[0].props.children[0].props.onChange({ target: { checked: false } });
@@ -2107,7 +2173,7 @@ test("lead columns float without layout shifts and save each checkbox change aut
   assert.equal(options()[0].props.children[0].props.disabled, false);
   toggle().props.onClick();
   toggle().props.onClick();
-  assert.equal(options().length, 15);
+  assert.equal(options().length, 25);
   assert.equal(options().find((node) => node.props.children[1].props.children === "Email").props.children[0].props.checked, true);
 
   for (const option of options()) {
@@ -2170,6 +2236,26 @@ test("every filter field and operator remains available through searchable menus
     assert.equal(nodes.find(node => node.props?.ariaLabel === "Filter field").props.options.length, filters.FILTER_FIELDS.length);
     assert.deepEqual(nodes.find(node => node.props?.ariaLabel === "Filter operator").props.options, filters.operatorsForField(field.key));
   }
+});
+
+test("Most Recent Visits shows only four source choices with no date controls or explanatory text", () => {
+  let current = { ...filter, criteria: [{ id: "recent", field: "recentVisitSource", operator: "is", value: "" }] };
+  const render = () => elements(actualLeads.LiveFilterEditor({
+    filter: current, leads: [{ ...lead, source: "Facebook" }],
+    onChange: next => { current = next; },
+  }));
+  const menu = label => render().find(node => node.props?.ariaLabel === label);
+  const expected = ["Website", "DMHCA-Chatbot", "DMHCA-Contact form", "Website-IBMP"];
+  assert.deepEqual(menu("Filter value").props.options.map(option => option.value), expected);
+  assert.ok(!render().some(node => node.type === "input" && node.props.type === "date"));
+  assert.ok(!render().some(node => typeof node.props?.children === "string" && node.props.children.includes("leads with a recorded visit")));
+  menu("Filter value").props.onChange("DMHCA-Contact form");
+  assert.equal(current.criteria[0].value, "DMHCA-Contact form");
+  menu("Filter operator").props.onChange("in");
+  assert.equal(menu("Filter values").props.multiple, true);
+  assert.deepEqual(menu("Filter values").props.options.map(option => option.value), expected);
+  menu("Filter values").props.onChange(["Website", "Website-IBMP"]);
+  assert.equal(current.criteria[0].value, "Website\nWebsite-IBMP");
 });
 
 test("lead workspace keeps notes separate from overview and email history", async () => {
@@ -2248,7 +2334,7 @@ test("lead workspace keeps notes separate from overview and email history", asyn
   assert.doesNotMatch(html, /No records yet/);
 });
 
-test("opening a lead prepares related data and chunks without waiting for a tab click", async () => {
+test("lead overview loads before related preparation, then prepares tabs without another click", async () => {
   for (const ready of [false, true]) {
     const effects = [], reads = [], chunks = [];
     const data = ready ? { ...live, lead, notes: [], activities: [], emails: [] } : null;
@@ -2268,10 +2354,10 @@ test("opening a lead prepares related data and chunks without waiting for a tab 
     Component();
     const cleanup = effects[2]();
     await new Promise(resolve => setImmediate(resolve));
-    assert.ok(reads.includes(`/api/leads/${lead.id}?section=workspace`), "preparation starts even while initial data is pending");
+    assert.equal(reads.includes(`/api/leads/${lead.id}?section=workspace`), ready, "related reads must not compete with the initial lead request");
     assert.deepEqual(reads.filter(path => path.includes("invoices") || path.includes("courses")).sort(), ready ? [`/api/invoices?leadId=${lead.id}`, "/api/courses"].sort() : []);
     assert.deepEqual(chunks.sort(), ready ? ["courses", "invoices"] : [], "invoice permission gates financial data and chunks");
-    cleanup();
+    cleanup?.();
   }
 });
 

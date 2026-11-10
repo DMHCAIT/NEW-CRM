@@ -29,9 +29,10 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
   const [navigating, startNavigation] = useTransition();
   const preparedDetails = useRef(new Map<string, number>());
   const preparedSections = useRef(new Map<string, number>());
+  const sectionPreparation = useRef<ReturnType<typeof prepareSidebarSections> | undefined>(undefined);
   function prefetchSection(href: string, prepareRoute = true, background = false) {
     const preparedAt = preparedSections.current.get(href);
-    if (prepareRoute && href !== "/admin/login-activity"
+    if (prepareRoute && (!background || href === "/") && href !== "/admin/login-activity"
       && (preparedAt === undefined || Date.now() - preparedAt >= 25000)) {
       router.prefetch(href, { kind: PrefetchKind.FULL });
       preparedSections.current.set(href, Date.now());
@@ -46,7 +47,9 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
     const dataPaths = user ? sectionReadPaths(href, user) : [];
     return Promise.all(dataPaths.map(dataPath => {
       if (background && getApiReadSnapshot(dataPath) !== undefined) return Promise.resolve();
-      const read = leadSection ? apiRequest(dataPath, { maxAgeMs: 30000 }) : prefetchApiRead(dataPath);
+      const read = leadSection || href === "/notifications"
+        ? apiRequest(dataPath, { maxAgeMs: href === "/notifications" ? 15000 : 30000 })
+        : prefetchApiRead(dataPath);
       return read.catch((error) => {
         setAccountError(errorMessage(error, "Could not prepare section data. Open the section to retry."));
       });
@@ -73,6 +76,7 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
     if (url.origin !== window.location.origin || url.pathname.startsWith("/api/")) return;
     if (url.pathname === window.location.pathname && url.search === window.location.search) return;
     event.preventDefault();
+    sectionPreparation.current?.cancel();
     setMobileOpen(false);
     setAccountError("");
     setDestination(url.pathname);
@@ -87,11 +91,19 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
   useLayoutEffect(() => {
     clearApiReadCache(); preparedSections.current.clear(); preparedDetails.current.clear();
   }, [user?.id, permissionKey]);
-  useEffect(() => subscribeApiWrites(() => {
-    preparedSections.current.clear(); preparedDetails.current.clear();
-    router.refresh();
-  }), [router]);
   useEffect(() => {
+    const unsubscribeStarted = subscribeApiWrites(() => {
+      sectionPreparation.current?.cancel();
+      preparedSections.current.clear(); preparedDetails.current.clear();
+    });
+    const unsubscribeCompleted = subscribeApiWrites(() => {
+      router.refresh();
+    }, "completed");
+    return () => { unsubscribeStarted(); unsubscribeCompleted(); };
+  }, [router]);
+  useEffect(() => {
+    // Compiling unused API routes competes with the clicked page in development.
+    if (process.env.NODE_ENV === "development") return;
     let task: ReturnType<typeof prepareSidebarSections> | undefined;
     let cancelled = false;
     const timer = window.setTimeout(() => {
@@ -101,14 +113,11 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
       const currentReads = sectionReadPaths(current.pathname, actor).map(path => getPendingApiRead(path));
       void Promise.allSettled(currentReads).then(() => {
         if (cancelled || document.visibilityState !== "visible") return;
-        if (current.pathname === "/" || sectionReadPaths(current.pathname, actor).length > 0) {
-          current.router.prefetch(current.pathname, { kind: PrefetchKind.FULL });
-          preparedSections.current.set(current.pathname, Date.now());
-        }
         task = prepareSidebarSections(actor, current.pathname, href => latestPreparation.current.prepare(href, true, true), {
           isVisible: () => document.visibilityState === "visible",
           onError: error => setAccountError(errorMessage(error, "Could not prepare section data. Open the section to retry.")),
         });
+        sectionPreparation.current = task;
       });
     }, 0);
     return () => { cancelled = true; window.clearTimeout(timer); task?.cancel(); };

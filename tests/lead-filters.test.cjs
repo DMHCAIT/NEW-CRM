@@ -13,7 +13,7 @@ vm.runInNewContext(ts.transpileModule(source, {
 const now = new Date(2026, 9, 19, 12);
 const base = {
   id: "1", name: "Aarav Mehta", phone: "+91 (98765) 43210", email: "Aarav@Example.com",
-  country: "Canada", course: "MBA", qualification: "Degree", stage: "Warm",
+  country: "Canada", course: "MBA", qualification: "Degree", speciality: "Cardiology", stage: "Warm",
   source: "Website form", assignee: "Jordan Davis", followUp: "Today",
   followUpAt: "2026-10-19", createdAt: "2026-10-01", modifiedAt: "2026-10-01",
   modifiedBy: "Jordan Davis", lastVisitAt: "2026-10-19", closureFee: 0,
@@ -24,7 +24,7 @@ const matches = (field, operator, value = "", lead = base, secondValue) =>
   api.filterLeads([lead], filter([criterion(field, operator, value, secondValue)]), now).length === 1;
 
 test("all requested fields are available and operator menus are field-specific", () => {
-  for (const label of ["Lead name", "Phone", "Email", "Country", "Course", "Follow up", "Qualification", "Lead source", "Lead stage", "Created", "Modified", "Last Modified", "Untouched", "Most Recent Visits"]) {
+  for (const label of ["Lead name", "Phone", "Email", "Country", "Course", "Follow up", "Qualification", "Speciality", "Lead source", "Lead stage", "Created", "Modified", "Last Modified", "Untouched", "Most Recent Visits"]) {
     assert.ok(api.FILTER_FIELDS.some((field) => field.label === label), label);
   }
   assert.ok(api.operatorsForField("name").some((op) => op.value === "contains"));
@@ -34,6 +34,30 @@ test("all requested fields are available and operator menus are field-specific",
   assert.ok(!api.operatorsForField("createdAt").some((op) => op.value === "overdue"));
   assert.equal(api.operatorsForField("untouched").map((op) => op.value).join(","), "is_true,is,before,after,between,custom_date");
   assert.ok(!api.FILTER_FIELDS.some((field) => field.key === "countryCode"));
+});
+
+test("speciality filters normalize choices, handle blanks and participate in search", () => {
+  for (const [operator, value] of [["is", " cardiology "], ["in", "Radiology\nCARDIOLOGY"], ["is_not", "Radiology"], ["not_in", "Radiology\nOncology"], ["contains", "cardio"]]) {
+    assert.ok(matches("speciality", operator, value), operator);
+  }
+  assert.ok(!matches("speciality", "is", "Radiology"));
+  assert.ok(matches("speciality", "is_empty", "", { ...base, speciality: undefined }));
+  assert.ok(matches("speciality", "is_empty", "", { ...base, speciality: " " }));
+  assert.ok(matches("speciality", "is_not_empty"));
+  assert.equal(api.filterLeads([base], filter([], "all", "cardiology"), now).length, 1);
+});
+
+test("Most Recent Visits selects only the requested sources without requiring visit timestamps", () => {
+  for (const source of api.RECENT_VISIT_SOURCES) {
+    assert.ok(matches("recentVisitSource", "is", source, { ...base, source, lastVisitAt: undefined }));
+    assert.ok(matches("recentVisitSource", "in", api.RECENT_VISIT_SOURCES.join("\n"), { ...base, source, lastVisitAt: undefined }));
+  }
+  for (const source of ["Facebook", "Website form", "Instagram", "Other"]) {
+    assert.ok(!matches("recentVisitSource", "in", api.RECENT_VISIT_SOURCES.join("\n"), { ...base, source }));
+  }
+  assert.ok(api.criterionError(criterion("recentVisitSource", "is", "Facebook")));
+  assert.ok(api.criterionError(criterion("recentVisitSource", "before", "2026-11-10")));
+  assert.deepEqual(Array.from(api.operatorsForField("recentVisitSource"), option => option.value), ["is", "in"]);
 });
 
 test("text, normalized phones, choices, empty values and negatives", () => {
@@ -88,9 +112,14 @@ test("website visits exclude non-website, missing and invalid visits for all ope
     for (const op of ["today", "is_not_empty", "is_empty"]) assert.ok(!matches("lastVisitAt", op, "", { ...base, source }));
     assert.ok(!matches("lastVisitAt", "is_not", "2026-10-01", { ...base, source }));
   }
-  for (const lastVisitAt of [undefined, "", "not-a-date", "2026-02-30", "2026-02-30T10:00:00Z"]) assert.ok(!matches("lastVisitAt", "is_not_empty", "", { ...base, lastVisitAt }));
-  assert.ok(matches("lastVisitAt", "today"));
-  assert.ok(matches("lastVisitAt", "today", "", { ...base, source: " WEBSITE FORM " }));
+  for (const lastVisitAt of [undefined, "", "not-a-date", "2026-02-30", "2026-02-30T10:00:00Z"]) assert.ok(!matches("lastVisitAt", "is_not_empty", "", { ...base, source: "Website", lastVisitAt }));
+  assert.ok(matches("lastVisitAt", "today", "", { ...base, source: "Website" }));
+  for (const source of [" WEBSITE ", "DMHCA-Chatbot", "DMHCA-Contact form", "Website-IBMP"]) {
+    assert.ok(matches("lastVisitAt", "today", "", { ...base, source }), source);
+  }
+  for (const source of ["Website form", "Web form", "Website lead", "Landing page", "Website-Other"]) {
+    assert.ok(!matches("lastVisitAt", "today", "", { ...base, source }), source);
+  }
 });
 
 test("untouched uses recorded edit state and does not invent unknown history", () => {

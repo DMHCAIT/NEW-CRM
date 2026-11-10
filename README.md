@@ -12,20 +12,21 @@ full details without large padded event cards.
 
 ### Lead alerts and scheduled-call reminders
 
-Apply the lead-notifications migration before starting this build. The bell shows
+Apply migrations through `202611100007_scheduled_call_notifications_only.sql` before starting this build. The bell shows
 the owner's unread count and checks every 15 seconds while visible, on navigation,
 and after CRM writes. Notifications open their associated lead through normal
 permission checks; use **Mark read** to clear an unread item.
 
-New calls notify only when due, not when first scheduled. Reschedules, completion,
-cancellation, phone-app call attempts, lead edits, notes and sent/received emails
-create owner alerts and a transactional SMTP outbox entry. A phone-app launch is
-an attempt, not proof the call connected. Unassigned, archived leads and inactive
-owners are excluded. Transfers notify the new owner; existing alerts stay with
-their original recipient. No historical modifications are backfilled. Outstanding
+Only due scheduled calls create owner alerts and a transactional SMTP outbox entry.
+The notification page and bell exclude general activity alerts and read reminders.
+Marking a reminder read removes it immediately after the save succeeds. Changing
+the lead, its notes, emails, invoices, call activity or scheduled calls dismisses its existing
+reminders transactionally; no-op lead saves do not dismiss reminders. Event keys
+are retained so dismissed overdue reminders do not reappear. Unassigned, archived
+leads and inactive owners are excluded. No historical modifications are backfilled. Outstanding
 overdue scheduled calls produce one reminder per call/time, even after downtime;
 rescheduling permits a new reminder at the new time, while closing a call prevents
-future reminders. Existing reminders remain in history.
+future reminders. Dismissed reminders remain in the database, not on the notification page.
 
 For unattended reminders **and all notification emails**, configure a trusted
 scheduler to call `GET /api/cron/notifications` every minute with
@@ -93,8 +94,15 @@ alone does not identify its cause. Never share credentials or request payloads.
 ### Performance and local preview
 
 Use `npm run build` followed by `npm start` for production-speed serving.
-`npm run dev` compiles routes on demand and is not representative of production
-loading times. Development output is isolated in `.next-dev`; production uses
+`npm run dev` uses Turbopack and compiles routes on demand; the first visit to a
+section or lead can still take seconds and is not representative of production
+loading times. Next.js disables router prefetch in development. Speculative
+sidebar API preparation is therefore disabled in development so unused sections
+do not compete with the clicked page's compilation; hover/focus/touch and clicks
+still prepare their destination data. For webpack-based development, inactive
+entries are retained for 15 minutes with an eight-page buffer instead of quickly
+evicting sections during normal CRM navigation.
+Development output is isolated in `.next-dev`; production uses
 `.next`, so building no longer overwrites the running development server's assets.
 `NEXT_DIST_DIR` can override either directory; use distinct values if running both.
 For routine local use, leave the production server running on the configured
@@ -102,14 +110,84 @@ application port; return to `npm run dev` only when editing with hot reload.
 Rebuild and restart the production server after changing code. A loading skeleton
 does not remove development compilation or database latency.
 
+#### Request latency and confirmed saves
+
+Apply `202611100006_request_round_trips.sql` before deploying the matching code.
+Every protected request verifies Supabase Auth and reads one live
+`crm_request_context` RPC concurrently. That RPC checks the exact verified login
+session, optionally touches its activity, and returns only the caller's profile
+and effective permissions. These decisions are never cached across requests;
+the application also checks that the two authenticated identities agree.
+
+Notifications release due reminders, fetch the newest 100 owner-only rows, and
+count unread records inside one RLS-protected RPC. The bell, navigation intent,
+and notification page share a browser-memory response for at most 15 seconds;
+writes, authorization failures and identity changes clear it. A fresh bell
+response can render the notification page synchronously. Lead saves read their
+current record, extra values, field configuration and required stage choices
+concurrently before validation and the persisted update.
+
+Lead list, detail, save and notification responses expose `Server-Timing` so
+handler authentication/data time can be distinguished from compilation, HTTP,
+and rendering overhead. Millisecond handler measurements are not a guarantee of
+subsecond end-to-end completion. Account creation must still wait for Supabase
+Auth provisioning, profile persistence and auditing; email-code sign-in must
+wait for SMTP acceptance. Success is shown only after the required work
+completes, not optimistically before saving or authentication.
+
+#### Database capacity check (200,000 leads)
+
+Run `node scripts/benchmark-leads.cjs` to build a disposable local PostgreSQL
+(PGlite) database, apply all migrations, and test exactly 200,000 synthetic leads.
+It does not load environment files or connect to the live database. Fixture
+loading builds search indexes after the bulk insert; production queries run with
+all indexes and authenticated session/permission checks enabled. Allow several
+minutes and sufficient memory for fixture/index creation.
+To test above that size, run `node scripts/benchmark-leads.cjs 250000`.
+The optional fixture count accepts 200,000 through 1,000,000 leads.
+
+The check asserts bounded 50-lead cursor pages, filtering, matching and missing
+searches, direct lead opening, duplicates, exact dashboard totals, and counselor
+visibility with multiple owners and stages. It also checks that a selective
+search can use its GIN index. Local database budgets are 1 second for pages and
+filters, 2 seconds for search/dashboard, 250 ms for direct lookup, and 500 ms for
+duplicates; these are not guarantees for HTTP latency or concurrent production
+traffic. Benchmark output includes the measured operation times.
+
+One local 200,000-lead run measured 75 ms for the first page, 178 ms for a
+selective search, 96 ms for a broad search page, 6 ms for direct lookup, and
+1,517 ms for the full administrator dashboard. Counselor-scoped queries returned
+only that counselor's records (66,666 leads in the fixture). These are isolated
+database measurements, not browser-load or production concurrency results.
+A separate 250,000-lead run passed the same budgets: first page 78 ms,
+selective search 206 ms, direct lookup 6 ms, and administrator dashboard 1,946 ms.
+
+Migration `202611100005_large_lead_queries.sql` adds active-lead trigram indexes,
+resolves visible reference records once per page, and aggregates dashboard
+groups before joining stage labels. The indexed page RPC explicitly checks
+verified sessions, `leads.view`, hierarchy/`users.view`, archive state, and
+reference visibility. Keep those checks aligned with the corresponding RLS
+policies if permissions change. Exact matching retains the original predicate,
+including literal wildcard characters, names, dates, and cross-field phrases;
+non-UTC/non-ISO database sessions use the original timestamp representation.
+
+This migration creates indexes transactionally: existing writes can wait during
+index creation. Use a maintenance window on an already-large database; the
+migration runner has a 15-second lock timeout and rolls back on failure. Size
+production database CPU, memory, storage, and pooled connections appropriately,
+and measure real API p95 latency under expected concurrent traffic before
+claiming a deployment capacity SLA. Indexes and bounded responses avoid loading
+the entire lead table into the browser; they cannot eliminate network latency.
+
 Lead screens reuse browser-memory responses for up to 30 seconds when revisiting
 a page; valid cached data renders immediately instead of flashing a loading screen.
-After the current section's pending read settles, the sidebar prepares permitted
-sections without a fixed startup delay in a bounded queue (at most two sections
-at a time), overlapping full route preparation with their API reads before a click.
-The current route is also
-prepared for a quick return visit. The queue stops launching work when the tab
-is hidden, the shell unmounts, or identity/permissions change. Login
+In production, after the current section's pending read settles, the sidebar
+prepares permitted section API reads without a fixed startup delay in a bounded
+queue (at most two sections at a time). Full client-section routes are prepared
+on hover/focus/touch instead of launching additional RSC requests outside that
+API queue. The already-open route is not redundantly prefetched. The queue stops
+launching work on navigation, writes, hidden tabs, unmount or identity/permission
+changes. Login
 activity is excluded from this preparation queue. Dashboard is fully route-prefetched,
 including its authenticated summary, rather than waiting for a click to start it.
 Preparation runs again after navigation so expired destinations can be warmed again.
@@ -192,7 +270,8 @@ Once Leads or Pipeline has rendered its current results, up to four leading lead
 links prepare their full routes and overviews in the background, two at a time.
 This work yields to rendering, stops launching reads in hidden tabs or on cleanup,
 and does not prepare lead records for users without lead-view permission.
-Opening a lead starts one authorized workspace preparation for Notes, Emails
+After the lead overview and authenticated identity have loaded, opening a lead
+starts one authorized workspace preparation for Notes, Emails
 and both activity timelines without waiting for a related-list click. The first
 overview is not blocked by this work. Successful sections share that bounded
 30-second response; failed sections show an explicit preparation error and retry
@@ -241,6 +320,16 @@ is usable, rather than treating a cached function call as a full-page benchmark.
 Lead records use related-list navigation for Overview, Notes, Emails, Calls,
 Invoices and Courses. Overview groups contact information, admissions and
 ownership, and additional fields; existing inline-save and permission rules apply.
+The optional Speciality dropdown appears below Qualification and includes the 33
+standard medical specialities. It is available in lead creation/editing, filters,
+selectable columns, reports, CSV import/export and signed external intake.
+CSV and Facebook mappings accept both `speciality` and `specialty`; signed website
+requests use `lead.speciality`. Newly received choices are retained in the observed
+picklist registry without scanning the lead table. Migration
+`202611100008_lead_speciality.sql` adds the column, indexed filtering/search and
+updated import/intake functions. Existing leads can leave the field blank.
+Users editing groups profile/reporting, signature and account access into separate
+sections, with a persistent sandboxed signature preview and collapsible HTML tools.
 Notes and Emails show their existing history alongside the composer (stacked on
 smaller screens). Read-only users can read history without compose controls.
 Call appointments retain local-time scheduling, rescheduling and outcome actions.
@@ -259,8 +348,10 @@ Inputs shrink within their container rather than wrapping below their icons.
 The whole control retains a visible keyboard-focus indicator.
 
 The shared course catalog provides search, availability filters and 25-row pages
-in both lead records and the standalone Courses workspace. Billing-company
-profiles have a separate view. Catalog prices are references, not enrollment
+in both lead records and the standalone Courses workspace. The course editor groups
+course details, availability and currency-specific pricing with a dedicated save footer.
+The Invoice companies tab and profile editor are no longer displayed; existing
+billing-company records and invoice snapshots are preserved. Catalog prices are references, not enrollment
 records; course selection and pricing confirmation still happen in invoice creation.
 Invoice views group all invoices, approvals, awaiting payment and paid records.
 The register renders 25 rows at a time; filtering and totals cover all fetched
@@ -651,12 +742,28 @@ The Columns dropdown floats over the page without moving the table and provides
 a searchable, scrollable list with one column per row. Each checkbox change is
 saved automatically to your account; at least one column must remain visible.
 Failed saves show an error without changing the previous selection.
+All standard lead fields, including country code, alternate phone, billing
+address, Expected closure fee and Expected closure date, plus active configured
+custom fields, are available in Columns. Custom values are included in lead CSV
+exports. Expected closure date is an optional calendar date (`YYYY-MM-DD`), not
+a timestamp, so it never shifts with the viewer's timezone. Existing fee values
+and the `closureFee` API/database mapping are preserved; CSV templates use
+`expectedClosureFee` while older `closureFee` headers remain accepted.
+Apply `202611100004_expected_closure_and_picklists.sql` before deploying these fields.
 Field, operator and choice-value menus reuse the searchable demo dropdown,
 including multi-select choices, field-specific date operators and inline
 validation. Stage and assignee choices include the active configuration even
 when there are no leads. Saved filters and columns persist to the signed-in
 account, not demo/local storage. On smaller screens the panel stacks above
 the results to keep controls usable.
+New source, course, category, qualification, country and calling-code values
+observed on database lead inserts/updates (including Facebook, website intake
+and CSV import) are retained in `crm_settings.lead_observed_picklists`. Existing
+leads and source names are backfilled by the migration. Filter menus merge these
+values with configured options across the entire database, not just the current
+page. Configuration saves do not erase observed values. Facebook's `category`
+form field is also persisted. Refresh the lead view after external intake to
+load newly discovered choices.
 
 Authenticated pages reuse the retained demo design system (Inter typography,
 navy navigation, compact cards, tables, badges and form controls). The dashboard
@@ -695,9 +802,12 @@ eligibility plus the absence of edits in the requested interval. Legacy names
 load automatically. All edit timestamps are recorded; when earlier history is
 unknown, results are conservative rather than invented.
 
-Most Recent Visits requires a website-origin source and a real recorded visit.
-Manual, Referral, Google Ads, WhatsApp and Chatbot dates do not count as website
-visits. Live visit telemetry requires your website integration to supply real
+Most Recent Visits is a source-only selector offering `Website`, `DMHCA-Chatbot`,
+`DMHCA-Contact form` and `Website-IBMP`. Choose Is or Is any of; date controls
+and explanatory text are not shown. It matches the selected lead sources
+regardless of visit telemetry. Last recorded visit remains a separate date
+filter for these four sources with real recorded visits; existing saved visit-date
+conditions retain their behavior. Live visit telemetry requires your website integration to supply real
 events; a lead's mere existence is not a website visit.
 
 ## Provider setup
@@ -842,7 +952,8 @@ Open **Courses** as an Admin/Super Admin with `settings.manage`:
    API validation and database creation functions. DMHCA permits INR and USD.
    Database catalog prices override browser-submitted amounts; existing
    enrollment prices and paid history are not rewritten when course prices change.
-2. Complete DMHCA's legal billing address, bank profile and tax details.
+2. Ensure DMHCA's configured legal billing address, bank profile and tax details are correct.
+   The former Invoice companies editor has been removed from the Courses UI.
    Both pricing-company selections now issue the DMHCA document, as requested;
    `company_code` still distinguishes DMHCA/IBMP prices and enrollment grouping,
    while new issuer snapshots come from the DMHCA company profile.
@@ -927,10 +1038,11 @@ payment details also describe the configured secure provider or finance arrangem
 The invoice-document migration (`202611090001_invoice_document_details.sql`)
 adds optional invoice metadata and company invoice profiles. Apply it with
 `npm run db:migrate` before running this application version (or use the normal
-`build:live` deployment). In **Courses > Invoice companies**, administrators can
-privately enter up to four bank accounts (holder, bank, account number, branch
+`build:live` deployment). Company profiles support
+up to four bank accounts (holder, bank, account number, branch
 and IFSC or SWIFT/BIC), billing email, company phone, website and refund-policy
-URL. These are invoice-printable details, not passwords or payment credentials.
+URL. The Invoice companies UI has been removed; existing configured profiles are retained.
+These are invoice-printable details, not passwords or payment credentials.
 They are copied to new invoice snapshots; editing the company does not change
 old invoices or existing enrollment snapshots.
 When bank accounts are configured, their bank-details section replaces the

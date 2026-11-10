@@ -5,6 +5,7 @@ import { useState } from "react";
 import { Download, FileSpreadsheet, UploadCloud } from "lucide-react";
 import { apiRequest } from "@/lib/crm-data";
 import { IMPORT_HEADERS, parseLeadCsv } from "@/lib/live-leads-csv";
+import { isDateKey } from "@/lib/lead-filters";
 import { useLiveLeadData } from "@/lib/live-leads-client";
 
 export default function LeadImportPage() {
@@ -33,8 +34,9 @@ export default function LeadImportPage() {
         const assigneeId = matches[0]?.id ?? data.user.id;
         if (assigneeId !== data.user.id && !data.user.permissions.includes("leads.assign")) fail("Assignment permission is required.");
         if (row.followUpAt && (!/^\d{4}-\d\d-\d\dT.*(?:Z|[+-]\d\d:\d\d)$/.test(row.followUpAt) || !Number.isFinite(Date.parse(row.followUpAt)))) fail("Follow-up must be an ISO timestamp with timezone.");
+        if (row.expectedClosureDate && !isDateKey(row.expectedClosureDate)) fail("Expected closure date must be a valid YYYY-MM-DD date.");
         const closureFee = Number(row.closureFee || 0);
-        if (!Number.isFinite(closureFee) || closureFee < 0) fail("Closure fee must be a nonnegative number.");
+        if (!Number.isFinite(closureFee) || closureFee < 0) fail("Expected closure fee must be a nonnegative number.");
         const customFields = Object.fromEntries(Object.entries(row).filter(([key]) => key.startsWith("custom:")).map(([key, value]) => [key.slice(7), value]));
         const builtIn = Object.fromEntries(Object.entries(row).filter(([key]) => !key.startsWith("custom:")));
         return { ...builtIn, customFields, source: row.source || "import", stageId: stageRow?.id ?? null, assigneeId, followUpAt: row.followUpAt || null, closureFee };

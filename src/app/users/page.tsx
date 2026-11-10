@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { apiRequest, errorMessage, formatDateTime, getApiReadSnapshot, getPreparedApiRead } from "@/lib/crm-data";
 import type { Profile } from "@/lib/types";
 import { createCredentialPdf, downloadCredentialPdf } from "@/lib/credential-pdf";
-import { KeyRound, Plus, Search, Trash2, Users } from "lucide-react";
+import { Check, KeyRound, Mail, Plus, Search, ShieldCheck, Trash2, UserRound, Users } from "lucide-react";
 import { SectionLoading } from "@/components/section-loading";
 import { EmailSignaturePreview } from "@/components/email-signature-preview";
 import { SignatureImageInput } from "@/components/signature-image-input";
@@ -39,10 +39,10 @@ export default function UsersPage() {
     finally { setBusy(false); }
   }
   if (!data && !error) return <SectionLoading title="Users" />;
-  return <>
-    <div className="page-heading"><div><h1>Users & hierarchy</h1><p>Manage your admissions team, reporting relationships and account access.</p></div>{data?.canManage && <button disabled={busy} className="button button-primary" onClick={() => { setForm(blank); setPasswordTarget(null); setDeleteTarget(null); setDownloadCredentials(true); clearPassword(); setError(""); setMessage(""); setEditing("new"); }}><Plus size={16} />Add user</button>}</div>
+  return <div className="users-workspace">
+    <header className="page-heading users-page-heading"><span className="users-heading-icon" aria-hidden="true"><Users size={24} /></span><div><h1>Users & hierarchy</h1><p>Manage your admissions team, reporting relationships and account access.</p></div>{data?.canManage && <button disabled={busy} className="button button-primary" onClick={() => { setForm(blank); setPasswordTarget(null); setDeleteTarget(null); setDownloadCredentials(true); clearPassword(); setError(""); setMessage(""); setEditing("new"); }}><Plus size={16} />Add user</button>}</header>
     {error && <p className="form-error" role="alert">{error}</p>}{message && <p className="form-success" role="status">{message}</p>}
-    {editing && <section className="panel settings-content users-form"><h2>{editing === "new" ? "Add user" : "Edit user"}</h2><p>{editing === "new" ? "Create an account and set its initial password. Email verification remains required at login." : "Update profile details and reporting access. Use Change password to manage credentials."}</p><form onSubmit={(event) => {
+    {editing && <section className="panel users-form" aria-labelledby="user-editor-title"><div className="panel-heading"><div className="users-editor-heading"><span className="users-editor-icon" aria-hidden="true"><UserRound size={20} /></span><div><h2 id="user-editor-title">{editing === "new" ? "Add user" : "Edit user"}</h2><p>{editing === "new" ? "Create an account and set its initial password. Email verification remains required at login." : "Update profile details and reporting access. Use Change password to manage credentials."}</p></div></div><span className="users-editor-tag">{editing === "new" ? "New team member" : form.fullName}</span></div><form onSubmit={(event) => {
       event.preventDefault();
       if (busy) return;
       if (editing === "new" && password !== confirmPassword) { setError("Passwords do not match."); return; }
@@ -57,14 +57,16 @@ export default function UsersPage() {
           catch (error) { setError(`User was created, but the credential PDF could not be downloaded. Do not create the user again. ${errorMessage(error, "Check browser download permissions.")}`); }
         }
       }, editing === "new" ? "User created. Share the password through a secure channel; email verification is required at login." : "User saved.");
-    }}><fieldset disabled={busy} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}><div className="form-grid">
+    }}><fieldset disabled={busy} className="users-editor-fields"><section className="user-editor-section" aria-labelledby="user-profile-title"><div className="user-section-heading"><UserRound size={17} aria-hidden="true" /><div><h3 id="user-profile-title">Profile & reporting</h3><p>Contact details and your team&apos;s reporting structure.</p></div></div><div className="form-grid">
       <label className="form-field">Name<input required value={form.fullName} onChange={(event) => setForm({ ...form, fullName: event.target.value })} /></label>
       <label className="form-field">Email<input type="email" required disabled={editing !== "new"} value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} /></label>
       <label className="form-field">Role<select value={form.role} onChange={(event) => setForm({ ...form, role: event.target.value as Profile["role"] })}>{["counselor", "team_lead", "manager", "admin", "super_admin"].map((role) => <option key={role} value={role}>{role.replace(/_/g, " ")}</option>)}</select></label>
       <label className="form-field">Reports to<select value={form.reportingTo ?? ""} onChange={(event) => setForm({ ...form, reportingTo: event.target.value || null })}><option value="">No manager</option>{data?.profiles.filter((profile) => profile.id !== editing && profile.status === "active").map((profile) => <option key={profile.id} value={profile.id}>{profile.fullName}</option>)}</select></label>
       <label className="form-field">Phone<input value={form.phone} onChange={(event) => setForm({ ...form, phone: event.target.value })} /></label>
       <label className="form-field">IVR extension<input value={form.ivrExtension} onChange={(event) => setForm({ ...form, ivrExtension: event.target.value })} /></label>
-      <div className="form-field user-email-signature"><label htmlFor="user-email-signature">Gmail signature (HTML)</label><textarea id="user-email-signature" rows={5} maxLength={MAX_SIGNATURE_LENGTH} value={form.emailSignatureHtml ?? ""} placeholder="<p>Your name<br>Admission Counsellor | DMHCA</p>" onChange={event => setForm({ ...form, emailSignatureHtml: event.target.value })} />
+      </div></section>
+      <section className="user-editor-section user-signature-section" aria-labelledby="user-signature-title"><div className="user-section-heading"><Mail size={17} aria-hidden="true" /><div><h3 id="user-signature-title">Email signature</h3><p>A personal sign-off, automatically added to this user&apos;s lead emails.</p></div></div>
+      <div className="user-signature-layout"><div className="form-field user-email-signature"><details className="user-signature-code"><summary>Paste HTML code or upload an HTML file</summary><label htmlFor="user-email-signature">Gmail signature (HTML)</label><textarea id="user-email-signature" rows={5} maxLength={MAX_SIGNATURE_LENGTH} value={form.emailSignatureHtml ?? ""} placeholder="<p>Your name<br>Admission Counsellor | DMHCA</p>" onChange={event => setForm({ ...form, emailSignatureHtml: event.target.value })} />
         <label>Upload an HTML signature<input type="file" accept=".html,.htm,text/html" onChange={async event => {
           const file = event.target.files?.[0]; event.target.value = "";
           if (!file) return;
@@ -77,17 +79,17 @@ export default function UsersPage() {
             setForm(previous => ({ ...previous, emailSignatureHtml: signature })); setError("");
           } catch (failure) { setError(errorMessage(failure, "Could not read the signature file.")); }
           finally { setBusy(false); }
-        }} /></label><small>Paste HTML or upload an HTML file (up to 1,000,000 characters). Formatting, links and HTTPS logo images are supported. Scripts and unsafe styling are removed when saved. This signature appears in the user&apos;s lead emails.</small>
+        }} /></label><small>Paste HTML or upload an HTML file (up to 1,000,000 characters). Formatting, links and HTTPS logo images are supported. Scripts and unsafe styling are removed when saved. This signature appears in the user&apos;s lead emails.</small></details>
         <SignatureImageInput key={editing} disabled={busy} onBusyChange={setBusy} onInsert={html => {
           const signature = `${form.emailSignatureHtml ?? ""}\n${html}`;
           if (signature.length > MAX_SIGNATURE_LENGTH) throw new Error(SIGNATURE_LENGTH_ERROR);
           setForm(previous => ({ ...previous, emailSignatureHtml: signature }));
         }} />
-        {form.emailSignatureHtml && <EmailSignaturePreview html={form.emailSignatureHtml} />}
-      </div>
+      </div><aside className="user-signature-preview"><div className="user-signature-preview-heading"><Mail size={15} aria-hidden="true" /><strong>Signature preview</strong><span>Live preview</span></div>{form.emailSignatureHtml ? <EmailSignaturePreview html={form.emailSignatureHtml} /> : <div className="user-signature-empty"><Mail size={28} aria-hidden="true" /><strong>Your signature appears here</strong><p>Paste a formatted signature or upload a file to preview it before saving.</p></div>}<p className="user-signature-preview-note">Existing links and formatting are preserved. Save the user to apply changes.</p></aside></div></section>
+      <section className="user-editor-section" aria-labelledby="user-access-title"><div className="user-section-heading"><ShieldCheck size={17} aria-hidden="true" /><div><h3 id="user-access-title">Account access</h3><p>{editing === "new" ? "Set a secure password and choose account availability." : "Manage whether this team member can sign in."}</p></div></div><div className="form-grid">
       {editing === "new" && <><label className="form-field">Password<input type="password" autoComplete="new-password" required minLength={12} maxLength={128} value={password} onChange={(event) => setPassword(event.target.value)} /></label><label className="form-field">Confirm password<input type="password" autoComplete="new-password" required minLength={12} maxLength={128} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} /></label></>}
       <label className="checkbox-field"><input type="checkbox" checked={form.status === "active"} onChange={(event) => setForm({ ...form, status: event.target.checked ? "active" : "inactive" })} /> Active account</label>
-    </div>{editing === "new" && <><label className="checkbox-field"><input type="checkbox" checked={downloadCredentials} onChange={(event) => setDownloadCredentials(event.target.checked)} /> Download email and password as a PDF when saved</label><p className="form-hint">The PDF contains a plaintext password. Store it securely and delete it after securely sharing the credentials.</p></>}<div className="form-actions"><button className="button button-primary" disabled={busy}>{busy ? "Saving..." : "Save user"}</button><button type="button" className="button button-secondary" onClick={() => { setEditing(null); clearPassword(); }}>Cancel</button></div></fieldset></form></section>}
+    </div>{editing === "new" && <><label className="checkbox-field"><input type="checkbox" checked={downloadCredentials} onChange={(event) => setDownloadCredentials(event.target.checked)} /> Download email and password as a PDF when saved</label><p className="form-hint">The PDF contains a plaintext password. Store it securely and delete it after securely sharing the credentials.</p></>}</section><div className="users-editor-footer"><span><ShieldCheck size={14} aria-hidden="true" />Profile and access changes are audited</span><div><button type="button" className="button button-secondary" disabled={busy} onClick={() => { setEditing(null); clearPassword(); }}>Cancel</button><button className="button button-primary" disabled={busy}><Check size={15} aria-hidden="true" />{busy ? "Saving..." : "Save user"}</button></div></div></fieldset></form></section>}
     {passwordTarget && <section className="panel settings-content" aria-labelledby="change-password-heading"><h2 id="change-password-heading">Change password</h2><p>Set a new password for {passwordTarget.fullName} ({passwordTarget.email}). Existing sessions will be signed out. No reset email is sent.</p>
       <form onSubmit={async (event) => {
         event.preventDefault();
@@ -129,5 +131,5 @@ export default function UsersPage() {
         </tr>)}
       </tbody></table>{!data && !error && <p className="empty-state" role="status">Loading users...</p>}{data && !data.profiles.some((profile) => `${profile.fullName} ${profile.email}`.toLowerCase().includes(query.toLowerCase())) && <p className="empty-state">No team members match your search.</p>}</div>
     </section>
-  </>;
+  </div>;
 }

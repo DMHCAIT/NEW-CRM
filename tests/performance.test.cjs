@@ -660,7 +660,14 @@ test("all dashboard chart targets use Next navigation and preserve their filter 
   assert.match(html, /<rect/);
 });
 
-function middlewareHarness({ authenticated = true, verified = true, allowed = true, sessionError = null, permissionError = null, rpc } = {}) {
+function requestActor(id, permissions, profile = {}) {
+  return { id, email: `${id}@example.test`, profile: {
+    id, fullName: "User", email: `${id}@example.test`, phone: "", role: "admin",
+    reportingTo: null, status: "active", ivrExtension: "", deletedAt: null, ...profile,
+  }, permissions };
+}
+
+function middlewareHarness({ authenticated = true, verified = true, allowed = true, sessionError = null, permissionError = null, rpc, getUser } = {}) {
   const { NextRequest, NextResponse } = require("next/server");
   const events = [];
   const errors = [];
@@ -689,7 +696,7 @@ function middlewareHarness({ authenticated = true, verified = true, allowed = tr
       "@supabase/ssr": { createServerClient: () => {
         events.push("client");
         return {
-          auth: { getUser: async () => { events.push("getUser"); return { data: { user: authenticated ? { id: "user" } : null }, error: null }; } },
+          auth: { getUser: async () => { events.push("getUser"); return getUser ? getUser() : { data: { user: authenticated ? { id: "user" } : null }, error: null }; } },
           from: table => {
             assert.equal(table, "profiles");
             return { select: () => ({ eq: () => ({ maybeSingle: async () => {
@@ -701,8 +708,10 @@ function middlewareHarness({ authenticated = true, verified = true, allowed = tr
           rpc: async (name, args) => {
             events.push({ name, args });
             if (rpc) return rpc(name, args);
-            return name === "touch_login_session" ? { data: verified, error: sessionError }
-              : { data: allowed ? permissions.DEFAULT_ROLE_PERMISSIONS.admin : [], error: permissionError };
+            assert.equal(name, "crm_request_context");
+            assert.equal(args.touch_session, true);
+            return { data: verified ? requestActor("user", allowed ? permissions.DEFAULT_ROLE_PERMISSIONS.admin : []) : null,
+              error: sessionError ?? permissionError };
           },
         };
       } },
@@ -722,24 +731,23 @@ test("public handlers perform no middleware auth requests; login redirects are p
   assert.equal(login.headers.get("location"), "https://crm.example/");
 });
 
-test("protected pages load session, profile and permissions concurrently in one authentication pass", async () => {
-  let releaseSession;
-  let releasePermission;
-  const harness = middlewareHarness({ rpc: name => new Promise(resolve => {
-    if (name === "touch_login_session") releaseSession = resolve;
-    else releasePermission = resolve;
-  }) });
+test("protected pages verify Auth and fetch one live context concurrently without trusting either alone", async () => {
+  let releaseAuth, releaseContext;
+  const harness = middlewareHarness({
+    getUser: () => new Promise(resolve => { releaseAuth = resolve; }),
+    rpc: () => new Promise(resolve => { releaseContext = resolve; }),
+  });
   let completed = false;
   const pending = harness.run("/leads/import").then(response => { completed = true; return response; });
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(typeof releaseSession, "function");
-  assert.equal(typeof releasePermission, "function");
+  assert.equal(typeof releaseAuth, "function");
+  assert.equal(typeof releaseContext, "function");
   assert.deepEqual(harness.events.map(event => typeof event === "string" ? event : event.name),
-    ["client", "getUser", "touch_login_session", "profile", "my_permissions"]);
-  releasePermission({ data: ["leads.import"], error: null });
+    ["client", "getUser", "crm_request_context"]);
+  releaseContext({ data: requestActor("user", ["leads.import"]), error: null });
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(completed, false, "permission alone never grants access");
-  releaseSession({ data: true, error: null });
+  assert.equal(completed, false, "database context alone never grants access");
+  releaseAuth({ data: { user: { id: "user" } }, error: null });
   assert.equal((await pending).status, 200);
 });
 
@@ -755,11 +763,52 @@ test("parallel middleware checks still deny unverified sessions, missing permiss
     const response = await harness.run("/settings/access/users?tab=active");
     assert.equal(response.status, status);
     if (status === 307) assert.equal(new URL(response.headers.get("location")).searchParams.get("next"), "/settings/access/users?tab=active");
-    if (!options.authenticated && options.authenticated !== undefined) assert.deepEqual(harness.events, ["client", "getUser"]);
+    if (options.authenticated === false) assert.deepEqual(harness.events.map(event => typeof event === "string" ? event : event.name),
+      ["client", "getUser", "crm_request_context"]);
     if (options.sessionError) assert.equal(harness.errors.length, 1);
   }
   assert.equal((await middlewareHarness().run("/login-secrets")).status, 200);
   assert.equal((await middlewareHarness({ authenticated: false }).run("/login-secrets")).status, 307);
+});
+
+test("request context cannot replace the verified Auth identity or invent permissions", async () => {
+  for (const context of [
+    requestActor("other", ["leads.view"]),
+    { ...requestActor("user", ["leads.view"]), profile: requestActor("other", []).profile },
+    requestActor("user", ["unknown.permission"]),
+  ]) {
+    const harness = middlewareHarness({ rpc: async () => ({ data: context, error: null }) });
+    assert.equal((await harness.run("/leads")).status, 503);
+    assert.equal(harness.errors.length, 1);
+  }
+  const harness = middlewareHarness({ getUser: async () => ({ data: { user: null }, error: { message: "Auth rejected" } }) });
+  assert.equal((await harness.run("/leads")).status, 307, "a live database context cannot replace Auth verification");
+});
+
+test("notification page reuses the bell's fresh snapshot immediately, expires it and invalidates on writes", async () => {
+  const React = require("react");
+  let time = 1000, requests = 0;
+  const saved = { notifications: [], unread: 2 };
+  const api = client(async () => { requests++; return ok(saved); }, { now: () => time });
+  const { NotificationsWorkspace } = loadModule("src\\components\\notifications-workspace.tsx", {
+    react: { ...React, useSyncExternalStore: (_, getSnapshot) => getSnapshot(), useEffect() {}, useState: initial => [typeof initial === "function" ? initial() : initial, () => {}] },
+    "next/link": { default: () => null }, "@/lib/crm-data": api,
+    "@/lib/notifications": loadModule("src\\lib\\notifications.ts", {}),
+  });
+  const { renderToStaticMarkup } = require("react-dom/server");
+  await api.apiRequest("/api/notifications", { maxAgeMs: 15000 });
+  assert.match(renderToStaticMarkup(NotificationsWorkspace()), /Recent notifications \(2 unread\)/);
+  assert.doesNotMatch(renderToStaticMarkup(NotificationsWorkspace()), /Loading notifications/);
+  await api.apiRequest("/api/notifications", { maxAgeMs: 15000 });
+  assert.equal(requests, 1, "bell, intent and workspace share one fresh response");
+  time += 15000;
+  assert.match(renderToStaticMarkup(NotificationsWorkspace()), /Loading notifications/);
+  await api.apiRequest("/api/notifications", { maxAgeMs: 15000 });
+  assert.equal(requests, 2);
+  await api.apiRequest("/api/notifications", { method: "PATCH", body: { id: "notification" } });
+  assert.match(renderToStaticMarkup(NotificationsWorkspace()), /Loading notifications/);
+  api.clearApiReadCache();
+  assert.equal(api.getCachedApiRead("/api/notifications"), undefined);
 });
 
 test("private API requests reach their handler without a duplicate middleware auth round trip", async () => {
@@ -776,7 +825,7 @@ function loadModule(relative, dependencies, globals = {}) {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021, jsx: ts.JsxEmit.ReactJSX },
   }).outputText;
   vm.runInNewContext(source, {
-    exports, console, URL, URLSearchParams, ...globals,
+    exports, console, URL, URLSearchParams, process, ...globals,
     require: name => name in dependencies ? dependencies[name]
       : name === "@/components/notification-bell" ? { NotificationBell: () => null }
       : name === "@/lib/section-preparation" ? loadModule("src\\lib\\section-preparation.ts", { "@/lib/navigation": dependencies["@/lib/navigation"] ?? { navigationItems: [] } }, globals)
@@ -791,13 +840,16 @@ test("API handlers still reject missing, revoked, inactive and unauthorized sess
     [{ status: "inactive" }, 401], [{ deleted: true }, 401], [{ permissions: [] }, 403],
   ]) {
     let leadReads = 0;
-    const profile = { id: "actor", status: options.status ?? "active", deleted_at: options.deleted ? "2026-10-01" : null };
     const supabase = {
       auth: { getUser: async () => ({ data: { user: options.signedIn === false ? null : { id: "actor" } } }) },
-      rpc: async name => ({ data: name === "is_verified_session" ? options.verified !== false : options.permissions ?? ["leads.view"], error: null }),
+      rpc: async name => {
+        assert.equal(name, "crm_request_context");
+        return { data: options.verified === false ? null : requestActor("actor", options.permissions ?? ["leads.view"], {
+          status: options.status ?? "active", deletedAt: options.deleted ? "2026-10-01" : null,
+        }), error: null };
+      },
       from: table => {
-        if (table !== "profiles") { leadReads++; throw new Error("Unauthorized data access"); }
-        return { select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: profile, error: null }) }) }) };
+        leadReads++; throw new Error("Unauthorized data access");
       },
     };
     const auth = loadModule("src\\lib\\server\\auth.ts", {
@@ -1179,7 +1231,7 @@ test("short-lived route reuse is paired with router invalidation after successfu
   await api.apiRequest("/api/leads/record", { method: "PATCH", body: { name: "Saved" } });
   assert.equal(notifications, 2, "unmounted shells no longer receive notifications");
   const source = readFileSync(join(__dirname, "..", "src", "components", "app-shell.tsx"), "utf8");
-  assert.match(source, /useEffect\(\(\) => subscribeApiWrites\(/);
+  assert.match(source, /subscribeApiWrites\([\s\S]*?"completed"/);
   assert.match(source, /router\.refresh\(\)/);
 });
 
@@ -1193,6 +1245,76 @@ test("middleware replaces forged page identities and only forwards them as reque
   assert.equal(api.headers.has("x-middleware-request-x-crm-page-user"), false);
   const publicPage = await harness.run("/reset-password", { "x-crm-page-user": "forged" });
   assert.equal(publicPage.headers.has("x-middleware-request-x-crm-page-user"), false);
+});
+
+test("development opens only intended sections and shell refresh waits for persisted writes", async () => {
+  const React = require("react");
+  const effects = [], routes = [];
+  let release, refreshes = 0;
+  const api = client(async () => new Promise(resolve => { release = resolve; }));
+  const { AppShell } = loadModule("src\\components\\app-shell.tsx", {
+    react: { ...React, useEffect: effect => effects.push(effect), useLayoutEffect() {},
+      useRef: value => ({ current: value }), useState: value => [value, () => {}],
+      useTransition: () => [false, callback => callback()] },
+    "next/link": { default: () => null },
+    "next/navigation": { usePathname: () => "/leads", useRouter: () => ({
+      prefetch: href => routes.push(href), refresh: () => { refreshes++; },
+    }) },
+    "@/lib/navigation": { navigationItems: [{ href: "/", permission: "dashboard.view", group: "workspace", icon: () => null }] },
+    "@/components/role-preview-context": { RolePreviewContext: React.createContext(null) },
+    "@/lib/crm-data": api, "@/lib/live-leads-client": {},
+    "@/components/section-loading": {}, "@/components/global-lead-search": {},
+  }, { process: { env: { NODE_ENV: "development" } },
+    window: { setTimeout: () => assert.fail("development must not compile speculative sections") } });
+  AppShell({ children: null, user: { id: "actor", permissions: ["dashboard.view"], profile: { role: "admin", fullName: "Actor" } } });
+  const unsubscribe = effects[0]();
+  assert.equal(effects[1](), undefined);
+  assert.deepEqual(routes, []);
+  const save = api.apiRequest("/api/leads/record", { method: "PATCH", body: { name: "Saved" } });
+  assert.equal(refreshes, 0, "route refresh must not race the database write");
+  release(ok({ ok: true })); await save;
+  assert.equal(refreshes, 1);
+  const failure = api.apiRequest("/api/leads/record", { method: "PATCH", body: {} });
+  assert.equal(refreshes, 1);
+  release(Response.json({ error: "Save failed" }, { status: 500 }));
+  await assert.rejects(failure, /Save failed/);
+  assert.equal(refreshes, 2, "a potentially partial write still invalidates rendered routes");
+  unsubscribe();
+  const afterUnmount = api.apiRequest("/api/leads/record", { method: "PATCH", body: {} });
+  release(ok({ ok: true })); await afterUnmount;
+  assert.equal(refreshes, 2);
+});
+
+test("production background reads do not also launch unbounded route preparations", async () => {
+  const React = require("react");
+  const effects = [], timers = [], routes = [], reads = [];
+  const items = [
+    { href: "/", permission: "dashboard.view" }, { href: "/leads", permission: "leads.view" },
+    { href: "/pipeline", permission: "pipeline.view" }, { href: "/meetings", permission: "meetings.view" },
+  ].map(item => ({ ...item, group: "workspace", icon: () => null }));
+  const api = client(async path => { reads.push(path); return ok({}); });
+  const { AppShell } = loadModule("src\\components\\app-shell.tsx", {
+    react: { ...React, useEffect: effect => effects.push(effect), useLayoutEffect() {},
+      useRef: value => ({ current: value }), useState: value => [value, () => {}],
+      useTransition: () => [false, callback => callback()] },
+    "next/link": { default: () => null },
+    "next/navigation": { usePathname: () => "/leads", useRouter: () => ({ prefetch: href => routes.push(href) }) },
+    "@/lib/navigation": { navigationItems: items },
+    "@/components/role-preview-context": { RolePreviewContext: React.createContext(null) },
+    "@/lib/crm-data": api, "@/lib/live-leads-client": {},
+    "@/components/section-loading": {}, "@/components/global-lead-search": {},
+  }, { process: { env: { NODE_ENV: "production" } }, Intl,
+    document: { visibilityState: "visible" },
+    window: { setTimeout: callback => { timers.push(callback); return 1; }, clearTimeout() {} } });
+  AppShell({ children: null, user: { id: "actor", permissions: items.map(item => item.permission), profile: { role: "admin", fullName: "Actor" } } });
+  const cleanup = effects[1]();
+  timers[0]();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(routes, ["/"], "only the server-rendered Dashboard needs a speculative RSC request");
+  assert.equal(reads.length, 2);
+  assert.ok(reads.some(path => path.includes("view=pipeline")));
+  assert.ok(reads.includes("/api/meetings"));
+  cleanup();
 });
 
 test("a section click immediately replaces the old page with its destination, while native links keep their behavior", async () => {

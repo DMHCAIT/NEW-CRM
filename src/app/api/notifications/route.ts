@@ -5,17 +5,16 @@ import { HttpError, jsonError, readJson, requireUser } from "@/lib/server/auth";
 import { checkOrigin } from "@/lib/server/login";
 
 export async function GET() {
+  const started = Date.now();
   try {
-    const { supabase, user } = await requireUser();
-    const due = await supabase.rpc("release_my_due_call_notifications");
-    dbError(due.error);
-    const [rows, count] = await Promise.all([
-      supabase.from("notifications").select("id,type,payload,lead_id,is_read,created_at").eq("user_id", user.id)
-        .order("created_at", { ascending: false }).limit(100),
-      supabase.from("notifications").select("id", { count: "exact", head: true }).eq("user_id", user.id).eq("is_read", false),
-    ]);
-    dbError(rows.error); dbError(count.error);
-    return NextResponse.json({ notifications: rows.data, unread: count.count ?? 0 }, { headers: { "Cache-Control": "private, no-store" } });
+    const { supabase } = await requireUser();
+    const authenticated = Date.now();
+    const { data, error } = await supabase.rpc("crm_notification_snapshot");
+    dbError(error);
+    return NextResponse.json(data, { headers: {
+      "Cache-Control": "private, no-store",
+      "Server-Timing": `auth;dur=${authenticated - started}, data;dur=${Date.now() - authenticated}`,
+    } });
   } catch (error) { return jsonError(error); }
 }
 

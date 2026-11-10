@@ -12,6 +12,7 @@ import type { CurrentUser, Lead, Profile } from "@/lib/types";
 import { getCachedLeadDetail, loadLeadDetailData, useLiveLeadData, type LeadDraft } from "@/lib/live-leads-client";
 import type { LeadConfiguration } from "@/lib/live-leads";
 import { leadCallNumber } from "@/lib/lead-phone";
+import { DEFAULT_LEAD_PICKLISTS } from "@/lib/lead-picklists";
 import { SectionLoading } from "@/components/section-loading";
 import { LeadEmailComposer } from "@/components/lead-email-composer";
 
@@ -80,6 +81,7 @@ export default function LeadDetailPage() {
     if (!scheduleOpen && dialog.open) dialog.close();
   }, [scheduleOpen]);
   useEffect(() => {
+    if (!modifiedAt || !userId) return;
     let active = true;
     setPreparationError("");
     const preparations: Promise<unknown>[] = [
@@ -172,15 +174,15 @@ export default function LeadDetailPage() {
   function selectTab(value: string) { setTab(value); setOverviewTab("overview"); setHistoryLimit(25); }
   const sectionLabel = tabs.find(item => item.id === tab)?.label ?? "Overview";
   const overviewHistory = data.activities.filter(row => !["note", "email", "email_sent", "call"].includes(row.type ?? ""));
-  const field = (key: keyof Omit<LeadDraft, "customFields">, label: string, value: string, options?: { value: string; label: string }[], type: "text" | "email" | "tel" | "number" | "datetime-local" = "text") =>
+  const field = (key: keyof Omit<LeadDraft, "customFields">, label: string, value: string, options?: { value: string; label: string }[], type: "text" | "email" | "tel" | "number" | "datetime-local" | "date" = "text") =>
     <LeadInlineField key={key} label={label} value={value} type={type} options={options} readOnly={!can("leads.edit") || (key === "assigneeId" && (!can("leads.assign") || !["team_lead", "manager", "admin", "super_admin"].includes(data.user.profile.role)))}
       required={key === "name" || key === "phone"} maxLength={key === "email" ? 254 : key === "phone" || key === "altPhone" ? 30 : 200}
       onSave={async next => {
         if (key === "assigneeId" && next !== value && !confirm("Transfer this lead? You may lose access if it leaves your reporting scope.")) throw new Error("Transfer cancelled. Select the current owner to discard this change.");
         await save({ [key]: key === "closureFee" ? Number(next) : key === "followUpAt" ? next ? new Date(next).toISOString() : null : ["stageId", "assigneeId"].includes(key) ? next || null : next });
       }} />;
-  const picklist = (key: "countryCode" | "country" | "course" | "qualification" | "category" | "source", label: string) =>
-    field(key, label, lead[key] ?? "", [...new Set(["", ...data.configuration.picklists[key], lead[key] ?? ""])].map(value => ({ value, label: value || "Not provided" })));
+  const picklist = (key: "countryCode" | "country" | "course" | "qualification" | "speciality" | "category" | "source", label: string) =>
+    field(key, label, lead[key] ?? "", [...new Set(["", ...(data.configuration.picklists[key] ?? DEFAULT_LEAD_PICKLISTS[key]), lead[key] ?? ""])].map(value => ({ value, label: value || "Not provided" })));
   const history = (rows: Timeline[], empty: string) => <div className="timeline-list">
     {!rows.length && <p className="empty-notes">{empty}</p>}
     {rows.slice(0, historyLimit).map((row, index) => <div className="lead-timeline-entry" key={row.id}>
@@ -261,17 +263,18 @@ export default function LeadDetailPage() {
     {tab === "overview" && <>
       {overviewTab === "overview" ?
       <section className="detail-overview"><div className="detail-section-heading">{sectionIntro("Lead information", can("leads.edit") ? "Edit any field below. Text saves when you leave the field; selections save immediately." : "Contact information and admissions details", UserRound)}<span className="lead-autosave-badge" role="status">{saving ? "Saving changes..." : can("leads.edit") ? "Autosave enabled" : "Read only"}</span></div>
-        <section className="lead-field-section" aria-label="Contact information"><h3>Contact information</h3><div className="lead-inline-grid">
+        <section className="lead-field-section" aria-label="Contact information"><h3><UserRound size={15} aria-hidden="true" />Contact information<span>Personal &amp; contact details</span></h3><div className="lead-inline-grid">
           {field("name", "Lead name", lead.name)}{field("email", "Email", lead.email, undefined, "email")}
           {field("phone", "Phone", lead.phone, undefined, "tel")}
           {field("altPhone", "Alternate phone", lead.altPhone ?? "", undefined, "tel")}{picklist("country", "Country")}
           {field("billingAddress", "Billing address", lead.billingAddress ?? "")}
         </div></section>
-        <section className="lead-field-section" aria-label="Admissions and ownership"><h3>Admissions &amp; ownership</h3><div className="lead-inline-grid">
-          {picklist("course", "Course")}{picklist("qualification", "Qualification")}{picklist("category", "Category")}{picklist("source", "Source")}
+        <section className="lead-field-section" aria-label="Admissions and ownership"><h3><BookOpen size={15} aria-hidden="true" />Admissions &amp; ownership<span>Course, speciality &amp; follow-up</span></h3><div className="lead-inline-grid">
+          {picklist("course", "Course")}{picklist("qualification", "Qualification")}{picklist("category", "Category")}{picklist("speciality", "Speciality")}{picklist("source", "Source")}
           {field("stageId", "Stage", lead.stageId ?? "", data.stages.map(stage => ({ value: stage.id, label: stage.name })))}
           {field("assigneeId", "Lead owner", lead.assigneeId ?? "", [{ value: "", label: "Unassigned" }, ...data.profiles.map(profile => ({ value: profile.id, label: profile.fullName }))])}
-          {field("closureFee", "Closure fee", String(lead.closureFee), undefined, "number")}
+          {field("closureFee", "Expected closure fee", String(lead.closureFee), undefined, "number")}
+          {field("expectedClosureDate", "Expected closure date", lead.expectedClosureDate ?? "", undefined, "date")}
           {field("followUpAt", "Next follow-up", lead.followUpAt ? localDate(lead.followUpAt) : "", undefined, "datetime-local")}
         </div></section>
         {data.configuration.fields.some(item => item.active) && <section className="lead-field-section" aria-label="Additional information"><h3>Additional information</h3><div className="lead-inline-grid">
@@ -343,7 +346,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function fieldLabel(key: string) {
-  const labels: Record<string, string> = { assignee_id: "Lead owner", stage_id: "Stage", next_followup_at: "Next follow-up", scheduled_at: "Call date and time", alt_phone: "Alternate phone", closure_fee: "Closure fee" };
+  const labels: Record<string, string> = { assignee_id: "Lead owner", stage_id: "Stage", next_followup_at: "Next follow-up", scheduled_at: "Call date and time", alt_phone: "Alternate phone", closure_fee: "Expected closure fee", expected_closure_date: "Expected closure date" };
   return labels[key] ?? key.replaceAll("_", " ").replace(/^./, char => char.toUpperCase());
 }
 function localDate(iso: string) {

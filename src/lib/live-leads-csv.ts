@@ -1,4 +1,4 @@
-export const IMPORT_HEADERS = ["name", "countryCode", "phone", "email", "country", "qualification", "category", "course", "source", "stage", "assignee", "closureFee", "altPhone", "followUpAt"] as const;
+export const IMPORT_HEADERS = ["name", "countryCode", "phone", "email", "country", "qualification", "speciality", "category", "course", "source", "stage", "assignee", "expectedClosureFee", "expectedClosureDate", "altPhone", "followUpAt", "billingAddress"] as const;
 
 /** RFC 4180-style CSV reader; preserves quoted commas, line breaks and escaped quotes. */
 export function parseLeadCsv(text: string, customFields: string[] = []): Record<string, string>[] {
@@ -28,8 +28,9 @@ export function parseLeadCsv(text: string, customFields: string[] = []): Record<
   if (records.length > 1001) throw new Error("Import at most 1000 leads at a time.");
   const aliases: Record<string, string> = {
     name: "name", leadname: "name", phone: "phone", mobile: "phone", countrycode: "countryCode", alternatephone: "altPhone", altphone: "altPhone",
-    email: "email", country: "country", course: "course", qualification: "qualification", category: "category", source: "source",
+    email: "email", country: "country", course: "course", qualification: "qualification", speciality: "speciality", specialty: "speciality", category: "category", source: "source",
     stage: "stage", assignee: "assignee", followupat: "followUpAt", nextfollowup: "followUpAt", closurefee: "closureFee",
+    expectedclosurefee: "closureFee", expectedclosuredate: "expectedClosureDate", billingaddress: "billingAddress",
   };
   const headers = records[0].map((value) => {
     if (value.startsWith("custom:") && customFields.includes(value.slice(7))) return value;

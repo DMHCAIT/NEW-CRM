@@ -21,7 +21,7 @@ const target = "31000000-0000-4000-8000-000000000002";
 const hidden = "31000000-0000-4000-8000-000000000003";
 
 before(async () => {
-  db = new PGlite();
+  db = new PGlite({ extensions: { pg_trgm: require("@electric-sql/pglite/contrib/pg_trgm").pg_trgm } });
   await db.exec(`
     create role anon; create role authenticated; create role service_role bypassrls;
     create schema auth; create table auth.users(id uuid primary key,email text);
@@ -163,6 +163,176 @@ test("database lead filters match existing text, choice, date and untouched sema
   }
 });
 
+test("indexed search preserves literal, phrase, reference and timestamp matches under caller visibility", async () => {
+  const stage = (await db.query("select id,name from public.lead_stages order by sort_order limit 1")).rows[0];
+  await db.query(`insert into public.leads(name,phone,created_by,assignee_id,modified_by,stage_id,source,
+    created_at,modified_at,next_followup_at,last_visit_at,expected_closure_date,billing_address,custom_fields)
+    values($1,'+91 7891234567',$2,$2,$3,$4,'PhraseBoundary',
+      '2026-03-04 12:34:56.1234+00','2026-03-04 12:34:56.1234+00',
+      '2027-04-05 00:00:00+00','2026-05-06 07:08:09.199999+00','2027-12-01',
+      'Literal_% back\\slash','{"test":"SearchCustomValue"}')`,
+  ["Search O'Brien_% back\\slash", owner, outsider, stage.id]);
+  const searches = [
+    "Search O'Brien_%", "O'Brien_%", "back\\slash", "Literal_%", "SearchCustomValue",
+    `PhraseBoundary ${stage.name} team_lead`, "team_lead", "counselor",
+    "2026", "03-04", "12:34:56.1234+00", "56.1234+00", "199999", "00+00",
+    "2027-12-01", "Search O'Brien_% back\\slash +917891234567",
+    "789-123-4567", "'; select pg_sleep(10); --", "NoSuchSearchValue",
+  ];
+  for (const actor of [owner, outsider, admin]) {
+    for (const search of searches) {
+      await asUser(actor, async tx => {
+        const predicate = (await tx.query("select public.crm_lead_predicate($1,'UTC') as predicate",
+          [JSON.stringify({ ...queryFilter([]), query: search })])).rows[0].predicate;
+        const expected = (await tx.query(`select l.id from public.leads l
+          left join public.lead_stages s on s.id=l.stage_id left join public.profiles a on a.id=l.assignee_id
+          left join public.profiles m on m.id=l.modified_by where ${predicate} order by l.id`)).rows.map(row => row.id);
+        const actual = (await tx.query("select public.crm_lead_page($1) as result",
+          [JSON.stringify({ ...queryFilter([]), query: search })])).rows[0].result.ids.sort();
+        assert.deepEqual(actual, expected, `${actor}: ${search}`);
+        const result = (await tx.query("select public.crm_lead_page($1,'UTC',50,null,null,true) as result",
+          [JSON.stringify({ ...queryFilter([]), query: search })])).rows[0].result;
+        assert.equal(result.total, expected.length, `count: ${search}`);
+      });
+    }
+  }
+  await asUser(owner, async tx => {
+    await tx.exec("set local timezone='Asia/Kolkata'; set local datestyle='SQL, DMY'");
+    const search = "04/03/2026";
+    const predicate = (await tx.query("select public.crm_lead_predicate($1,'UTC') as predicate",
+      [JSON.stringify({ ...queryFilter([]), query: search })])).rows[0].predicate;
+    const expected = (await tx.query(`select l.id from public.leads l
+      left join public.lead_stages s on s.id=l.stage_id left join public.profiles a on a.id=l.assignee_id
+      left join public.profiles m on m.id=l.modified_by where ${predicate} order by l.id`)).rows.map(row => row.id);
+    assert.ok(expected.length > 0);
+    assert.deepEqual((await tx.query("select public.crm_lead_page($1) as result",
+      [JSON.stringify({ ...queryFilter([]), query: search })])).rows[0].result.ids.sort(), expected);
+  });
+});
+
+test("indexed search rejects unverified, denied and anonymous callers and excludes archived or hidden leads", async () => {
+  assert.deepEqual((await leadPage(owner, { ...queryFilter([]), query: "Hidden" })).ids, []);
+  await assert.rejects(() => leadPage(owner, { ...queryFilter([]), query: "Source" }, { verified: false }), /Lead access required/);
+  await db.transaction(async tx => {
+    await tx.query("insert into public.user_permission_overrides(user_id,permission_key,allowed) values($1,'leads.view',false)", [owner]);
+    await tx.exec("set local role authenticated");
+    await tx.query("select set_config('request.jwt.claims',$1,true)", [JSON.stringify({ sub: owner, session_id: sessions[owner] })]);
+    await assert.rejects(() => tx.query("select public.crm_lead_page('{}')"), /Lead access required/);
+  });
+  await db.transaction(async tx => {
+    await tx.exec("set local role anon");
+    await assert.rejects(() => tx.query("select public.crm_lead_page('{}')"), /permission denied/);
+  });
+  await asUser(owner, tx => assert.rejects(() => tx.query("select public.crm_lead_search_candidate('Source')"), /permission denied/));
+  await db.query("insert into public.leads(name,phone,created_by,assignee_id,is_archived) values('ArchivedSearchMarker','7891234568',$1,$1,true)", [owner]);
+  assert.deepEqual((await leadPage(admin, { ...queryFilter([]), query: "ArchivedSearchMarker" })).ids, []);
+});
+
+test("expected closure date persists through import and edits, filters as a date in every timezone", async () => {
+  const imported = await asUser(owner, tx => tx.query("select public.import_live_leads($1::jsonb) as count", [JSON.stringify([{
+    name: "Expected closure fixture", phone: "7181920123", normalized_phone: "7181920123",
+    closure_fee: 1250, expected_closure_date: "2026-12-01", billing_address: "Saved address",
+  }])]));
+  assert.equal(imported.rows[0].count, 1);
+  const { rows: [row] } = await db.query("select id,expected_closure_date::text as date,closure_fee,billing_address from public.leads where name='Expected closure fixture'");
+  assert.equal(row.date, "2026-12-01");
+  assert.equal(Number(row.closure_fee), 1250);
+  assert.equal(row.billing_address, "Saved address");
+  for (const timezone of ["UTC", "Asia/Kolkata", "America/Los_Angeles"]) {
+    for (const operator of ["is", "on_or_before", "on_or_after", "between", "custom_date"]) {
+      const filter = queryFilter([{ id: "closure", field: "expectedClosureDate", operator, value: "2026-12-01", secondValue: "2026-12-01" }]);
+      assert.ok((await leadPage(owner, filter, { timezone })).ids.includes(row.id), `${timezone} ${operator}`);
+    }
+    assert.ok(!(await leadPage(owner, queryFilter([{ id: "closure", field: "expectedClosureDate", operator: "before", value: "2026-12-01" }]), { timezone })).ids.includes(row.id));
+  }
+  await asUser(owner, tx => tx.query("update public.leads set expected_closure_date=null where id=$1", [row.id]));
+  assert.ok((await leadPage(owner, queryFilter([{ id: "closure", field: "expectedClosureDate", operator: "is_empty", value: "" }]))).ids.includes(row.id));
+});
+
+test("lead inserts and edits retain new picklist values independently of configuration saves", async () => {
+  const { rows: [row] } = await db.query(`insert into public.leads(name,phone,normalized_phone,created_by,assignee_id,course,source,category,qualification)
+    values('New choice fixture','7181920124','7181920124',$1,$1,'New Facebook course','Additional Facebook form','New category','New qualification') returning id`, [owner]);
+  await asUser(owner, tx => tx.query("update public.leads set course='Later imported course' where id=$1", [row.id]));
+  await db.query("insert into public.crm_settings(setting_key,value) values('lead_configuration','{}') on conflict(setting_key) do update set value=excluded.value");
+  const observed = (await db.query("select value from public.crm_settings where setting_key='lead_observed_picklists'")).rows[0].value;
+  assert.ok(observed.course.includes("New Facebook course"));
+  assert.ok(observed.course.includes("Later imported course"));
+  assert.ok(observed.source.includes("Additional Facebook form"));
+  assert.ok(observed.category.includes("New category"));
+  assert.ok(observed.qualification.includes("New qualification"));
+  await asUser(owner, tx => tx.query("update public.leads set course=' later imported course ' where id=$1", [row.id]));
+  const updated = (await db.query("select value from public.crm_settings where setting_key='lead_observed_picklists'")).rows[0].value;
+  assert.equal(updated.course.filter(value => value.trim().toLowerCase() === "later imported course").length, 1);
+});
+
+test("speciality survives import and updates with indexed filters, search and scoped counts", async () => {
+  const imported = await asUser(owner, tx => tx.query("select public.import_live_leads($1::jsonb) as count", [JSON.stringify([{
+    name: "Speciality fixture", phone: "7181920181", normalized_phone: "7181920181", speciality: " Cardiology ",
+  }])]));
+  assert.equal(imported.rows[0].count, 1);
+  const row = (await db.query("select id,speciality from public.leads where name='Speciality fixture'")).rows[0];
+  assert.equal(row.speciality, "Cardiology");
+  for (const [operator, value] of [["is", " cardiology "], ["in", "Radiology\nCARDIOLOGY"], ["is_not", "Radiology"], ["not_in", "Radiology\nOncology"], ["contains", "cardio"], ["is_not_empty", ""]]) {
+    const filter = queryFilter([{ id: "s", field: "speciality", operator, value }]);
+    const page = await leadPage(owner, filter);
+    assert.ok(page.ids.includes(row.id), operator);
+    const count = await leadPage(owner, filter, { countOnly: true });
+    assert.equal(count.total, page.ids.length, operator);
+  }
+  assert.ok(!(await leadPage(outsider, queryFilter([{ id: "s", field: "speciality", operator: "is", value: "Cardiology" }]))).ids.includes(row.id));
+  await asUser(owner, tx => tx.query("update public.leads set speciality='Speciality Search_% marker' where id=$1", [row.id]));
+  const observed = (await db.query("select value from public.crm_settings where setting_key='lead_observed_picklists'")).rows[0].value;
+  assert.ok(observed.speciality.includes("Cardiology"));
+  assert.ok(observed.speciality.includes("Speciality Search_% marker"));
+  for (const query of ["Speciality Search_%", "Search_%", "marker", "Speciality Search_% marker"]) {
+    assert.deepEqual((await leadPage(owner, { ...queryFilter([]), query })).ids, [row.id], query);
+    assert.equal((await leadPage(owner, { ...queryFilter([]), query }, { countOnly: true })).total, 1);
+    assert.deepEqual((await leadPage(outsider, { ...queryFilter([]), query })).ids, []);
+  }
+  await assert.rejects(asUser(owner, tx => tx.query("update public.leads set speciality=$1 where id=$2", ["x".repeat(201), row.id])), /check constraint/);
+  await asUser(owner, tx => tx.query("update public.leads set speciality=null where id=$1", [row.id]));
+  assert.ok((await leadPage(owner, queryFilter([{ id: "s", field: "speciality", operator: "is_empty", value: "" }]))).ids.includes(row.id));
+  const indexes = (await db.query("select indexname,indexdef from pg_indexes where tablename='leads'")).rows;
+  assert.ok(indexes.some(index => index.indexname === "leads_speciality_active_idx" && index.indexdef.includes("WHERE (NOT is_archived)")));
+  assert.ok(indexes.some(index => index.indexname === "leads_speciality_search_idx" && index.indexdef.includes("gin")));
+});
+
+test("migration backfills previously unknown lead and source choices without editing lead history", async () => {
+  await db.transaction(async tx => {
+    await tx.exec("savepoint observed_backfill; drop trigger record_lead_picklists on public.leads; drop trigger record_source_picklists on public.lead_sources");
+    const { rows: [original] } = await tx.query(`insert into public.leads(name,phone,normalized_phone,created_by,course,source)
+      values('Legacy choice fixture','7181920126','7181920126',$1,'Previously unknown course','Previously unknown source') returning *`, [owner]);
+    await tx.query("insert into public.lead_sources(name,api_key_hash) values('Previously configured source','test-hash')");
+    const migration = readFileSync(join(__dirname, "..", "supabase", "migrations", "202611100004_expected_closure_and_picklists.sql"), "utf8");
+    const backfill = migration.slice(migration.indexOf("with choices as ("), migration.indexOf("create or replace function public.import_live_leads"));
+    await tx.exec(backfill);
+    const observed = (await tx.query("select value from public.crm_settings where setting_key='lead_observed_picklists'")).rows[0].value;
+    assert.ok(observed.course.includes("Previously unknown course"));
+    assert.ok(observed.source.includes("Previously unknown source"));
+    assert.ok(observed.source.includes("Previously configured source"));
+    assert.deepEqual((await tx.query("select * from public.leads where id=$1", [original.id])).rows[0], original);
+    await tx.exec("rollback to savepoint observed_backfill");
+  });
+});
+
+test("Most Recent Visits uses exactly the four requested sources in database pages and counts", async () => {
+  const included = ["Website", "DMHCA-Chatbot", "DMHCA-Contact form", "Website-IBMP"];
+  const excluded = ["Website form", "Landing page", "Facebook", "Instagram", "Chatbot", "Website-Other"];
+  for (const [index, sourceName] of [...included, ...excluded].entries()) {
+    await db.query(`insert into public.leads(name,phone,normalized_phone,created_by,assignee_id,source,last_visit_at)
+      values('Recent visits fixture',$1,$1,$2,$2,$3,'2026-11-10T09:00:00Z')`, [`71819202${String(index).padStart(2, "0")}`, owner, sourceName]);
+  }
+  const filter = queryFilter([
+    { id: "name", field: "name", operator: "is", value: "Recent visits fixture" },
+    { id: "visit", field: "lastVisitAt", operator: "is_not_empty", value: "" },
+  ]);
+  const page = await leadPage(owner, filter);
+  assert.equal(page.ids.length, 4);
+  assert.equal((await leadPage(owner, filter, { countOnly: true })).total, 4);
+  const names = (await db.query("select source from public.leads where id=any($1::uuid[])", [page.ids])).rows.map(row => row.source).sort();
+  assert.deepEqual(names, [...included].sort());
+});
+
 test("cursor pages have stable tie-breaking, bounded size and no duplicates after a new lead arrives", async () => {
   const ids = [];
   for (let index = 0; index < 61; index++) {
@@ -237,12 +407,15 @@ test("large lead volumes keep cursor results bounded and use the composite index
   const volume = Number(process.env.CRM_SCALE_LEADS || 100000);
   assert.ok(Number.isSafeInteger(volume) && volume >= 100000 && volume <= 1000000);
   // Synthetic rows only, inside this disposable PGlite database; avoid per-row audit fixture overhead.
+  const searchIndexes = (await db.query("select indexdef from pg_indexes where schemaname='public' and indexname in ('leads_active_search_idx','leads_active_phone_search_idx')")).rows;
+  await db.exec("drop index public.leads_active_search_idx; drop index public.leads_active_phone_search_idx");
   await db.exec("set session_replication_role = replica");
   try {
     await db.query(`insert into public.leads(id,name,phone,normalized_phone,created_by,assignee_id,created_at)
       select md5('scale-'||g)::uuid,'Scale fixture','5678901234','5678901234',$1,$1,
         '2026-01-01T00:00:00Z'::timestamptz + g * interval '1 second' from generate_series(1,$2) g`,[owner,volume]);
   } finally { await db.exec("set session_replication_role = origin"); }
+  for (const index of searchIndexes) await db.exec(index.indexdef);
   await db.exec("analyze public.leads");
   const start = performance.now();
   const page = await leadPage(owner);
@@ -391,6 +564,12 @@ test("duplicate discovery exposes only assignees across buckets and rejects unre
     await db.query("insert into public.leads(id,name,phone,normalized_phone,email,normalized_email,created_by,assignee_id) values($1,'PRIVATE LEAD','7777777777','7777777777','private@example.test','private@example.test',$2,$2)", [id,assignee]);
   }
   await db.query("update public.leads set email=null, normalized_email=null where id=$1", [owned[1]]);
+  for (const actor of [child, owner, manager, admin, superAdmin]) {
+    const expected = actor === admin || actor === superAdmin ? owned : owned.slice(0, 2);
+    const filter = { ...queryFilter([]), query: "PRIVATE LEAD" };
+    assert.deepEqual((await leadPage(actor, filter)).ids.sort(), [...expected].sort(), `search scope: ${actor}`);
+    assert.equal((await leadPage(actor, filter, { countOnly: true })).total, expected.length, `search count: ${actor}`);
+  }
   await asUser(child, async tx => {
     const rows = (await tx.query("select * from public.lead_duplicate_owners($1)", [owned[0]])).rows;
     assert.equal(rows.length,3);

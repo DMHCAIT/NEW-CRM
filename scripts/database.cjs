@@ -5,7 +5,7 @@ const { Client } = require("pg");
 
 const root = resolve(__dirname, "..");
 const requiredColumns = [
-  "leads.billing_address", "gmail_connections.auth_mode",
+  "leads.billing_address", "leads.expected_closure_date", "gmail_connections.auth_mode",
   "courses.price_inr", "courses.price_usd", "courses.price_ibmp_usd", "invoice_companies.code",
   "invoices.course_id", "invoices.company_code", "invoices.company_snapshot",
   "invoices.billing_address", "invoices.status_token_encrypted",

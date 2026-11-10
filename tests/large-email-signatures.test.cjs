@@ -24,7 +24,7 @@ const { MAX_SIGNATURE_LENGTH } = load("src\\lib\\email-signature-policy.ts");
 const signature = length => `<a href="https://dmhca.in"><img src="https://example.test/signature.png" alt="Signature"></a><p>${"x".repeat(length - 97)}</p>`;
 
 test("increasing the database limit preserves signatures and stores one million characters without truncation", async () => {
-  const db = new PGlite();
+  const db = new PGlite({ extensions: { pg_trgm: require("@electric-sql/pglite/contrib/pg_trgm").pg_trgm } });
   try {
     await db.exec("create table profiles(id int primary key); create table emails(id int primary key);");
     for (const file of ["202611100002_email_signatures.sql", "202611100003_large_email_signatures.sql"])

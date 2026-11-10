@@ -69,6 +69,7 @@ export interface Lead {
   country: string;
   course: string;
   qualification: string;
+  speciality?: string;
   category?: string;
   /** Stage name; stages are configurable in the lead_stages table. */
   stage: string;
@@ -79,6 +80,7 @@ export interface Lead {
   followUp: string;
   followUpAt?: string;
   createdAt?: string;
+  createdBy?: string;
   modifiedAt?: string;
   modifiedBy?: string;
   lastVisitAt?: string;
@@ -88,6 +90,8 @@ export interface Lead {
   mergedIntoId?: string;
   isArchived?: boolean;
   closureFee: number;
+  expectedClosureDate?: string;
+  customFields?: Record<string, string>;
   billingAddress?: string;
 }
 

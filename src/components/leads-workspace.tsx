@@ -9,7 +9,7 @@ import { StageBadge } from "@/components/lead-helpers";
 import { LeadNavigationPreparation } from "@/components/lead-navigation-preparation";
 import { apiRequest, formatDateTime } from "@/lib/crm-data";
 import { criterionError, type SavedLeadFilter } from "@/lib/lead-filters";
-import { REPORT_COLUMNS, type ReportColumn } from "@/lib/reports";
+import { leadColumns, leadColumnValue, type LeadColumn } from "@/lib/reports";
 import { LiveFilterEditor, downloadLiveCsv, emptyFilter, getCachedLeadListData, leadQueryPath, loadLeadListData, useDebouncedValue, useLiveLeadData } from "@/lib/live-leads-client";
 import type { LeadCursor } from "@/lib/server/lead-query";
 
@@ -22,7 +22,7 @@ export default function LeadsWorkspace({ initialFilter, dashboard = false }: { i
   const [assigneeId, setAssigneeId] = useState("");
   const [stageId, setStageId] = useState("");
   const [page, setPage] = useState(0);
-  const [savedColumns, setSavedColumns] = useState<ReportColumn[] | null>(null);
+  const [savedColumns, setSavedColumns] = useState<LeadColumn[] | null>(null);
   const [showColumns, setShowColumns] = useState(false);
   const [columnSearch, setColumnSearch] = useState("");
   const [columnPosition, setColumnPosition] = useState<{ top: number; left: number; width: number; maxHeight: number } | null>(null);
@@ -50,9 +50,12 @@ export default function LeadsWorkspace({ initialFilter, dashboard = false }: { i
   const columnTriggerRef = useRef<HTMLButtonElement>(null);
   const columnPanelRef = useRef<HTMLElement>(null);
   const columnSaveRef = useRef(false);
-  const matchingColumns = REPORT_COLUMNS.filter((column) => column.label.toLocaleLowerCase().includes(columnSearch.trim().toLocaleLowerCase()));
+  const availableColumns = leadColumns(data?.configuration.fields);
+  const matchingColumns = availableColumns.filter((column) => column.label.toLocaleLowerCase().includes(columnSearch.trim().toLocaleLowerCase()));
   const rows = data && !validation ? data.leads : [];
-  const columns = savedColumns ?? (data?.columns?.filter((key): key is ReportColumn => REPORT_COLUMNS.some((c) => c.key === key)) ?? ["name", "phone", "country", "course", "stage", "assignee", "followUp"]) as ReportColumn[];
+  const selectedColumns = savedColumns ?? data?.columns;
+  const validColumns = selectedColumns?.filter((key): key is LeadColumn => availableColumns.some(column => column.key === key));
+  const columns: LeadColumn[] = validColumns?.length ? validColumns : ["name", "phone", "country", "course", "stage", "assignee", "followUp"];
   const can = (permission: string) => data?.user.permissions.some((p) => p === permission) ?? false;
   const canDelete = can("leads.delete") && ["admin", "super_admin"].includes(data?.user.profile.role ?? "");
   const canTransfer = can("leads.edit") && can("leads.assign") && ["team_lead", "manager", "admin", "super_admin"].includes(data?.user.profile.role ?? "");
@@ -95,7 +98,7 @@ export default function LeadsWorkspace({ initialFilter, dashboard = false }: { i
       document.removeEventListener("keydown", closeOnEscape);
     };
   }, [showColumns]);
-  async function saveColumns(key: ReportColumn, checked: boolean) {
+  async function saveColumns(key: LeadColumn, checked: boolean) {
     if (columnSaveRef.current) return;
     const next = checked ? [...columns, key] : columns.filter((column) => column !== key);
     if (!next.length) {
@@ -188,9 +191,10 @@ export default function LeadsWorkspace({ initialFilter, dashboard = false }: { i
       {columnError && <p className="lead-column-error" role="alert">{columnError}</p>}
     </section>, document.body)}
     {filter.criteria.length > 0 && <div className="active-filters"><button className="filter-chip active-filter-clear" aria-label="Clear filter conditions" onClick={() => { setFilter({ ...filter, criteria: [] }); setPage(0); setSelected([]); }}>{filter.criteria.length} conditions <X size={12} /></button></div>}
-    <div className="table-wrap"><table className="data-table leads-table" aria-label="Leads"><thead><tr><th><input type="checkbox" aria-label="Select page" checked={visible.length > 0 && visible.every((lead) => selected.includes(lead.id))} onChange={(e) => setSelected(e.target.checked ? [...new Set([...selected, ...visible.map((r) => r.id)])] : selected.filter((id) => !visible.some((r) => r.id === id)))} /></th>{columns.map((key) => <th key={key}>{REPORT_COLUMNS.find((c) => c.key === key)?.label}</th>)}</tr></thead><tbody>
+    <div className="table-wrap"><table className="data-table leads-table" aria-label="Leads"><thead><tr><th><input type="checkbox" aria-label="Select page" checked={visible.length > 0 && visible.every((lead) => selected.includes(lead.id))} onChange={(e) => setSelected(e.target.checked ? [...new Set([...selected, ...visible.map((r) => r.id)])] : selected.filter((id) => !visible.some((r) => r.id === id)))} /></th>{columns.map((key) => <th key={key}>{availableColumns.find((c) => c.key === key)?.label}</th>)}</tr></thead><tbody>
       {visible.map((lead) => <tr key={lead.id}><td><input type="checkbox" aria-label={`Select ${lead.name}`} checked={selected.includes(lead.id)} onChange={(e) => setSelected(e.target.checked ? [...selected, lead.id] : selected.filter((id) => id !== lead.id))} /></td>{columns.map((key, index) => {
-        const value = ["createdAt", "modifiedAt", "lastVisitAt"].includes(key) ? formatDateTime(String(lead[key] ?? "")) || "—" : lead[key] || "—";
+        const raw = leadColumnValue(lead, key);
+        const value = ["createdAt", "modifiedAt", "lastVisitAt"].includes(key) ? formatDateTime(String(raw ?? "")) || "—" : raw === "" || raw === undefined ? "—" : raw;
         return <td key={key}>{key === "name" ? <Link className="lead-cell" href={`/leads/${lead.id}`} prefetch={false}>{lead.name}</Link> : key === "stage" ? <StageBadge stage={lead.stage || "No stage"} /> : index === 0 ? <Link href={`/leads/${lead.id}`} prefetch={false}>{value}</Link> : value}</td>;
       })}</tr>)}
       {!rows.length && <tr><td className="leads-empty-cell" colSpan={columns.length + 1}><div className="leads-empty-state"><span className="leads-empty-icon"><Users size={26} aria-hidden="true" /></span><strong>No leads match.</strong><p>Create a lead or change filters.</p></div></td></tr>}

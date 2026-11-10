@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { apiRequest, errorMessage, getPreparedApiRead } from "@/lib/crm-data";
 import { SettingsNav } from "@/components/settings-nav";
-import { LEAD_PICKLIST_KEYS, type LeadPicklistKey } from "@/lib/lead-picklists";
+import { DEFAULT_LEAD_PICKLISTS, LEAD_PICKLIST_KEYS, type LeadPicklistKey } from "@/lib/lead-picklists";
 import { STANDARD_LEAD_FIELDS } from "@/lib/lead-fields";
 
 type Configuration = {
@@ -20,6 +20,7 @@ const PICKLIST_LABELS: Record<LeadPicklistKey, string> = {
   countryCode: "Country codes",
   country: "Countries",
   qualification: "Qualifications",
+  speciality: "Specialities",
   category: "Categories",
   course: "Courses",
   source: "Lead sources",
@@ -34,7 +35,7 @@ export default function SettingsPage() {
   const [fieldType, setFieldType] = useState<"text" | "dropdown">("text");
   const [optionDrafts, setOptionDrafts] = useState<Record<string, string>>({});
   const [picklistDrafts, setPicklistDrafts] = useState<Record<LeadPicklistKey, string>>({
-    countryCode: "", country: "", qualification: "", category: "", course: "", source: "",
+    countryCode: "", country: "", qualification: "", speciality: "", category: "", course: "", source: "",
   });
   useEffect(() => { apiRequest<Configuration>("/api/settings", { usePrefetched: true }).then(setConfig).catch((error) => setError(errorMessage(error, "Could not load settings."))); }, []);
   async function save() {
@@ -96,19 +97,21 @@ export default function SettingsPage() {
       <div className="settings-divider" /><h2>Dropdown values</h2>
       <p className="form-hint">These alphabetically sorted options are shared across lead forms and filters. Removing an option does not change existing leads.</p>
       <div className="lead-picklist-settings">
-        {LEAD_PICKLIST_KEYS.map((key) => <section className="lead-picklist-editor" key={key} aria-labelledby={`picklist-${key}`}>
+        {LEAD_PICKLIST_KEYS.map((key) => {
+          const options = config.settings.picklists[key] ?? DEFAULT_LEAD_PICKLISTS[key];
+          return <section className="lead-picklist-editor" key={key} aria-labelledby={`picklist-${key}`}>
           <h3 id={`picklist-${key}`}>{PICKLIST_LABELS[key]}</h3>
-          <div className="lead-picklist-values">{[...config.settings.picklists[key]].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" })).map((value) => <div className="lead-picklist-value" key={value}>
+          <div className="lead-picklist-values">{[...options].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" })).map((value) => <div className="lead-picklist-value" key={value}>
             <span>{value}</span>
-            {config.canManagePicklists && <button type="button" className="button button-quiet button-small" aria-label={`Remove ${value} from ${PICKLIST_LABELS[key]}`} disabled={config.settings.picklists[key].length <= 1} onClick={() => setConfig({ ...config, settings: { ...config.settings, picklists: { ...config.settings.picklists, [key]: config.settings.picklists[key].filter((item) => item !== value) } } })}>Remove</button>}
+            {config.canManagePicklists && <button type="button" className="button button-quiet button-small" aria-label={`Remove ${value} from ${PICKLIST_LABELS[key]}`} disabled={options.length <= 1} onClick={() => setConfig({ ...config, settings: { ...config.settings, picklists: { ...config.settings.picklists, [key]: options.filter((item) => item !== value) } } })}>Remove</button>}
           </div>)}</div>
           {config.canManagePicklists && <div className="add-custom-field"><input aria-label={`New ${PICKLIST_LABELS[key]} value`} value={picklistDrafts[key]} onChange={(event) => setPicklistDrafts({ ...picklistDrafts, [key]: event.target.value })} /><button type="button" className="button button-secondary" onClick={() => {
             const value = picklistDrafts[key].trim();
-            if (!value || config.settings.picklists[key].some((item) => item.toLocaleLowerCase() === value.toLocaleLowerCase())) { setError(`Enter a new unique value for ${PICKLIST_LABELS[key].toLocaleLowerCase()}.`); return; }
-            setConfig({ ...config, settings: { ...config.settings, picklists: { ...config.settings.picklists, [key]: [...config.settings.picklists[key], value].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" })) } } });
+            if (!value || options.some((item) => item.toLocaleLowerCase() === value.toLocaleLowerCase())) { setError(`Enter a new unique value for ${PICKLIST_LABELS[key].toLocaleLowerCase()}.`); return; }
+            setConfig({ ...config, settings: { ...config.settings, picklists: { ...config.settings.picklists, [key]: [...options, value].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" })) } } });
             setPicklistDrafts({ ...picklistDrafts, [key]: "" }); setError("");
           }}>Add value</button></div>}
-        </section>)}
+        </section>})}
       </div>
       <div className="settings-divider" /><h2>Duplicate handling</h2>
       <div className="form-grid settings-form-grid"><label className="form-field">Match fields<select value={config.settings.duplicateFields} onChange={(event) => setConfig({ ...config, settings: { ...config.settings, duplicateFields: event.target.value } })}><option value="phone_email">Phone or email</option><option value="phone">Phone only</option><option value="email">Email only</option></select></label>

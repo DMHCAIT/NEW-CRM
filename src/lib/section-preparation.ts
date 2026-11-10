@@ -6,6 +6,7 @@ export function sectionReadPaths(href: string, user: CurrentUser) {
   if (href === "/pipeline") params.set("view", "pipeline");
   if (href === "/leads" || href === "/pipeline") return [`/api/leads?${params}`];
   const paths: Record<string, string[]> = {
+    "/notifications": ["/api/notifications"],
     "/meetings": ["/api/meetings"], "/invoices": ["/api/invoices"],
     "/courses": ["/api/courses"], "/automations": ["/api/automations"],
     "/reports": ["/api/reports"], "/users": ["/api/users"], "/settings": ["/api/settings"],

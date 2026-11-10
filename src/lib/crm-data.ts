@@ -3,11 +3,12 @@ import { isCrmRole } from "@/lib/permissions";
 import type { Lead, Profile } from "@/lib/types";
 
 export const LEAD_SELECT = [
-  "id,name,phone,country_code,alt_phone,email,country,billing_address,course,qualification,category,stage_id,source,assignee_id,created_by,modified_by",
-  "closure_fee,next_followup_at,last_visit_at,merged_into_id,is_archived,created_at,modified_at,has_been_edited,edited_at",
+  "id,name,phone,country_code,alt_phone,email,country,billing_address,course,qualification,speciality,category,stage_id,source,assignee_id,created_by,modified_by",
+  "closure_fee,expected_closure_date,custom_fields,next_followup_at,last_visit_at,merged_into_id,is_archived,created_at,modified_at,has_been_edited,edited_at",
   "stage:lead_stages(name)",
   "assignee:profiles!leads_assignee_id_fkey(full_name)",
   "modifier:profiles!leads_modified_by_fkey(full_name)",
+  "creator:profiles!leads_created_by_fkey(full_name)",
 ].join(",");
 const LEGACY_LEAD_SELECT = [
   "id,name,phone,alt_phone,email,country,course,qualification,stage_id,source,assignee_id,created_by,modified_by",
@@ -30,6 +31,7 @@ export type LeadRow = {
   billing_address?: string | null;
   course: string | null;
   qualification: string | null;
+  speciality?: string | null;
   category?: string | null;
   stage_id: string | null;
   source: string;
@@ -37,6 +39,8 @@ export type LeadRow = {
   created_by: string;
   modified_by: string | null;
   closure_fee: number | string;
+  expected_closure_date?: string | null;
+  custom_fields?: Record<string, string> | null;
   next_followup_at: string | null;
   last_visit_at: string | null;
   merged_into_id: string | null;
@@ -48,6 +52,7 @@ export type LeadRow = {
   stage?: NameRef;
   assignee?: NameRef;
   modifier?: NameRef;
+  creator?: NameRef;
 };
 
 export type ProfileRow = {
@@ -98,6 +103,7 @@ export function mapLead(row: LeadRow): Lead {
     country: row.country ?? "",
     course: row.course ?? "",
     qualification: row.qualification ?? "",
+    speciality: row.speciality ?? "",
     category: row.category ?? "",
     stage: refName(row.stage),
     stageId: row.stage_id ?? undefined,
@@ -107,6 +113,7 @@ export function mapLead(row: LeadRow): Lead {
     followUp: formatDateTime(row.next_followup_at) || "—",
     followUpAt: row.next_followup_at ?? undefined,
     createdAt: row.created_at,
+    createdBy: refName(row.creator),
     modifiedAt: row.modified_at,
     modifiedBy: refName(row.modifier),
     lastVisitAt: row.last_visit_at ?? undefined,
@@ -115,6 +122,8 @@ export function mapLead(row: LeadRow): Lead {
     mergedIntoId: row.merged_into_id ?? undefined,
     isArchived: row.is_archived,
     closureFee: Number(row.closure_fee),
+    expectedClosureDate: row.expected_closure_date ?? undefined,
+    customFields: row.custom_fields ?? {},
     billingAddress: row.billing_address ?? "",
   };
 }

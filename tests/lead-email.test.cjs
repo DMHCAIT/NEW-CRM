@@ -253,7 +253,7 @@ test("user creation and editing sanitize signature HTML without clearing signatu
 
 test("signature migration keeps existing profile/email data and enforces the signature size limit", async () => {
   const { PGlite } = require("@electric-sql/pglite");
-  const db = new PGlite();
+  const db = new PGlite({ extensions: { pg_trgm: require("@electric-sql/pglite/contrib/pg_trgm").pg_trgm } });
   try {
     await db.exec("create table profiles(id int primary key, full_name text); create table emails(id int primary key, body text); insert into profiles values(1,'Existing'); insert into emails values(1,'Existing message');");
     await db.exec(readFileSync(path.join(root, "supabase", "migrations", "202611100002_email_signatures.sql"), "utf8"));

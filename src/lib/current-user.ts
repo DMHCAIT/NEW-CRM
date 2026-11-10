@@ -1,6 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
-import { mapProfile, PROFILE_SELECT, type ProfileRow } from "@/lib/crm-data";
 import { DEFAULT_ROLE_PERMISSIONS } from "@/lib/permissions";
 import type { CurrentUser, Permission } from "@/lib/types";
 
@@ -29,22 +28,15 @@ export function decodePageUser(value: string): CurrentUser | null {
 }
 
 export async function loadCurrentUser(supabase: SupabaseClient, touchSession = false): Promise<CurrentUser | null> {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return null;
-  const [{ data: verified, error: verificationError }, { data: profile, error: profileError }, { data: granted, error: permissionError }] = await Promise.all([
-    supabase.rpc(touchSession ? "touch_login_session" : "is_verified_session"),
-    supabase.from("profiles").select(PROFILE_SELECT).eq("id", user.id).maybeSingle<ProfileRow>(),
-    supabase.rpc("my_permissions"),
+  const [{ data: { user } }, context] = await Promise.all([
+    supabase.auth.getUser(),
+    supabase.rpc("crm_request_context", { touch_session: touchSession }),
   ]);
-  if (verificationError) throw new Error(verificationError.message);
-  if (verified !== true) return null;
-  if (profileError) throw new Error(profileError.message);
-  if (permissionError) throw new Error(permissionError.message);
-  if (!profile || profile.status !== "active" || profile.deleted_at) return null;
-  return {
-    id: user.id,
-    email: user.email ?? "",
-    profile: mapProfile(profile, user.email ?? ""),
-    permissions: z.array(permission).parse(granted),
-  };
+  if (!user) return null;
+  if (context.error) throw new Error(context.error.message);
+  if (context.data === null) return null;
+  const actor = currentUserSchema.parse(context.data);
+  if (actor.id !== user.id || actor.profile.id !== user.id) throw new Error("Session identity mismatch.");
+  if (actor.profile.status !== "active" || actor.profile.deletedAt) return null;
+  return { ...actor, email: user.email ?? "", profile: { ...actor.profile, email: actor.profile.email || user.email || "" } };
 }

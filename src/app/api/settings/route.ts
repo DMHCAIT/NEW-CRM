@@ -4,7 +4,7 @@ import { fetchStages } from "@/lib/crm-data";
 import { HttpError, jsonError, readJson, requireUser } from "@/lib/server/auth";
 import { checkOrigin } from "@/lib/server/login";
 import { fetchLeadConfiguration } from "@/lib/live-leads";
-import { LEAD_PICKLIST_KEYS } from "@/lib/lead-picklists";
+import { DEFAULT_LEAD_PICKLISTS, LEAD_PICKLIST_KEYS } from "@/lib/lead-picklists";
 
 const picklistSchema = (max: number, maxLength: number) => z.array(z.string().trim().min(1).max(maxLength))
   .min(1).max(max).transform((values) => values.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" })));
@@ -31,6 +31,7 @@ const settingsSchema = z.object({
       countryCode: picklistSchema(400, 160),
       country: picklistSchema(400, 100),
       qualification: picklistSchema(100, 100),
+      speciality: picklistSchema(400, 200).default(DEFAULT_LEAD_PICKLISTS.speciality),
       category: picklistSchema(100, 100),
       course: picklistSchema(400, 200),
       source: picklistSchema(200, 100),

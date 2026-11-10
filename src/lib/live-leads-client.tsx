@@ -6,7 +6,7 @@ import { Plus, RotateCcw, SlidersHorizontal, X } from "lucide-react";
 import { SearchableDropdown } from "@/components/searchable-dropdown";
 import { apiRequest, getCachedApiRead, getPendingApiRead, type StageRow } from "@/lib/crm-data";
 import type { CurrentUser, Lead, Profile } from "@/lib/types";
-import { FILTER_FIELDS, criterionError, defaultOperator, operatorNeedsValue, operatorsForField, type FilterField, type SavedLeadFilter } from "@/lib/lead-filters";
+import { FILTER_FIELDS, RECENT_VISIT_SOURCES, criterionError, defaultOperator, operatorNeedsValue, operatorsForField, type FilterField, type SavedLeadFilter } from "@/lib/lead-filters";
 import type { LeadConfiguration } from "@/lib/live-leads";
 import { DEFAULT_LEAD_PICKLISTS, type LeadPicklistKey } from "@/lib/lead-picklists";
 import type { LeadCursor, LeadPage } from "@/lib/server/lead-query";
@@ -196,14 +196,14 @@ export function LiveFilterEditor({ filter, onChange, leads, stages = [], profile
       const selectedValues = ["in", "not_in"].includes(c.operator) ? c.value.split("\n").filter(Boolean) : c.value ? [c.value] : [];
       const fieldKey = c.field;
       const picklistKey: Partial<Record<FilterField, LeadPicklistKey>> = {
-        country: "country", qualification: "qualification",
+        country: "country", qualification: "qualification", speciality: "speciality",
         category: "category", course: "course", source: "source",
       };
-      const configured = fieldKey === "stage" ? stages.map(stage => stage.name)
+      const configured = fieldKey === "recentVisitSource" ? [...RECENT_VISIT_SOURCES] : fieldKey === "stage" ? stages.map(stage => stage.name)
         : fieldKey === "assignee" ? profiles.map(profile => profile.fullName)
-          : picklistKey[fieldKey] ? picklists[picklistKey[fieldKey]!] : [];
-      const values = fieldKey === "untouched" || configured.length ? [] : leads.map(lead => String(lead[fieldKey] ?? ""));
-      const options = [...new Set([...configured, ...values, ...selectedValues].filter(Boolean))].sort().map(value => ({ value, label: value }));
+          : picklistKey[fieldKey] ? picklists[picklistKey[fieldKey]!] ?? DEFAULT_LEAD_PICKLISTS[picklistKey[fieldKey]!] : [];
+      const values = fieldKey === "untouched" || fieldKey === "recentVisitSource" ? [] : leads.map(lead => String(lead[fieldKey] ?? ""));
+      const options = (fieldKey === "recentVisitSource" ? [...RECENT_VISIT_SOURCES] : [...new Set([...configured, ...values, ...selectedValues].filter(Boolean))].sort()).map(value => ({ value, label: value }));
       const operators = operatorsForField(c.field);
       if (!operators.some(operator => operator.value === c.operator)) operators.push({ value: c.operator, label: c.operator.replaceAll("_", " ") });
       const patch = (value: Partial<typeof c>) => onChange({ ...filter, criteria: filter.criteria.map((item) => item.id === c.id ? { ...item, ...value } : item) });
@@ -237,17 +237,18 @@ export function LiveFilterEditor({ filter, onChange, leads, stages = [], profile
 }
 
 export type LeadDraft = {
-  name: string; phone: string; countryCode: string; altPhone: string; email: string; country: string; course: string; qualification: string; category: string;
+  name: string; phone: string; countryCode: string; altPhone: string; email: string; country: string; course: string; qualification: string; speciality: string; category: string;
   source: string; stageId: string | null; assigneeId: string | null; followUpAt: string | null; closureFee: number;
+  expectedClosureDate: string | null;
   customFields: Record<string, string>;
   billingAddress?: string;
 };
 export function leadDraft(lead?: Lead & { customFields?: Record<string, string> }): LeadDraft {
   return {
     name: lead?.name ?? "", phone: lead?.phone ?? "", countryCode: lead?.countryCode ?? "", altPhone: lead?.altPhone ?? "", email: lead?.email ?? "",
-    country: lead?.country ?? "", course: lead?.course ?? "", qualification: lead?.qualification ?? "", category: lead?.category ?? "",
+    country: lead?.country ?? "", course: lead?.course ?? "", qualification: lead?.qualification ?? "", speciality: lead?.speciality ?? "", category: lead?.category ?? "",
     source: lead?.source ?? "", stageId: lead?.stageId ?? null, assigneeId: lead?.assigneeId ?? null,
-    followUpAt: lead?.followUpAt ?? null, closureFee: lead?.closureFee ?? 0,
+    followUpAt: lead?.followUpAt ?? null, closureFee: lead?.closureFee ?? 0, expectedClosureDate: lead?.expectedClosureDate ?? null,
     customFields: lead?.customFields ?? {},
     billingAddress: lead?.billingAddress ?? "",
   };
@@ -286,11 +287,11 @@ export function LeadForm({ initial, stages, profiles, canAssign, onSave, busy, s
   const createRequired = ["name", "email", "countryCode", "phone", "country", "qualification", "category", "course", "source", "stage"] as const;
   const labels: Record<string, string> = {
     name: "Name", email: "Email", countryCode: "Country code", phone: "Phone", country: "Country",
-    qualification: "Qualification", category: "Category", course: "Course", source: "Source", stage: "Stage",
-    assignee: "Assignee", closureFee: "Closure Fee", altPhone: "Alternate phone", followUpAt: "Next follow-up",
+    qualification: "Qualification", speciality: "Speciality", category: "Category", course: "Course", source: "Source", stage: "Stage",
+    assignee: "Assignee", closureFee: "Expected closure fee", altPhone: "Alternate phone", followUpAt: "Next follow-up",
   };
   const legacyChoice = (key: LeadPicklistKey, current: string) => {
-    const values = picklists[key];
+    const values = picklists[key] ?? DEFAULT_LEAD_PICKLISTS[key];
     return current && !values.includes(current) ? [...values, current] : values;
   };
   const renderTextField = (field: "name" | "email" | "phone" | "altPhone") => {
@@ -300,7 +301,7 @@ export function LeadForm({ initial, stages, profiles, canAssign, onSave, busy, s
             {(field === "phone" || field === "email") && renderDuplicates(field)}
           </label>;
   };
-  const renderPicklist = (field: "countryCode" | "country" | "qualification" | "category" | "course" | "source", required = false) => {
+  const renderPicklist = (field: LeadPicklistKey, required = false) => {
     const options = legacyChoice(field, draft[field]).map((value) => ({ value, label: value }));
     return <div className="form-field" key={field}><label htmlFor={`lead-${field}`}>{labels[field]}{required && <span className="live-lead-required" aria-hidden="true"> *</span>}</label>
       <SearchableDropdown id={`lead-${field}`} ariaLabel={labels[field]} placeholder={`Choose ${labels[field].toLocaleLowerCase()}`} value={draft[field]} options={options} required={required} openDirection="down" optionsMaxHeight={136} onChange={(value) => setDraft({ ...draft, [field]: value })} />
@@ -327,11 +328,13 @@ export function LeadForm({ initial, stages, profiles, canAssign, onSave, busy, s
     {renderPicklist("country", newLead)}
     {renderPicklist("qualification", newLead)}
     {renderPicklist("category", newLead)}
+    {renderPicklist("speciality")}
     {renderPicklist("course", newLead)}
     {renderPicklist("source", newLead)}
     {renderStageField()}
     {renderAssigneeField()}
     {renderClosureFeeField()}
+    <label className="form-field"><span>Expected closure date</span><input type="date" value={draft.expectedClosureDate ?? ""} onChange={event => setDraft({ ...draft, expectedClosureDate: event.target.value || null })} /></label>
     {!newLead && <>{renderTextField("altPhone")}{renderFollowUpField()}</>}
     {activeFields.map((field, index) => <div className="form-field" key={field.name}>
       <label htmlFor={`lead-custom-${index}`}>{field.name}</label>

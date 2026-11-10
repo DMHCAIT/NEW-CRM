@@ -48,7 +48,7 @@ test("live migrations do not load a developer's local database configuration", (
 });
 
 test("schema inspection detects billing and mailbox columns missing from an older database", async t => {
-  const db = new PGlite();
+  const db = new PGlite({ extensions: { pg_trgm: require("@electric-sql/pglite/contrib/pg_trgm").pg_trgm } });
   t.after(() => db.close());
   await db.exec("create table public.leads(id uuid); create table public.gmail_connections(user_id uuid);");
   let missing = await missingSchemaColumns(db);

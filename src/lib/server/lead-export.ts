@@ -1,8 +1,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { reportCsv, type SavedReport } from "@/lib/reports";
+import { reportCsv, type LeadColumnDefinition, type SavedReport } from "@/lib/reports";
 import { fetchLeadPage, type LeadQuery } from "@/lib/server/lead-query";
 
-export async function leadCsvResponse(client: SupabaseClient, query: LeadQuery, report: SavedReport, filename: string, signal: AbortSignal) {
+export async function leadCsvResponse(client: SupabaseClient, query: LeadQuery, report: SavedReport, filename: string, signal: AbortSignal, extraColumns: LeadColumnDefinition[] = []) {
   let page = await fetchLeadPage(client, query, 100);
   const encoder = new TextEncoder();
   let first = true;
@@ -17,7 +17,7 @@ export async function leadCsvResponse(client: SupabaseClient, query: LeadQuery, 
           if (cancelled || signal.aborted) { controller.error(new Error("Export cancelled.")); return; }
         }
         if (!first && !page.leads.length) { controller.close(); return; }
-        const csv = reportCsv(report, page.leads, "list");
+        const csv = reportCsv(report, page.leads, "list", extraColumns);
         controller.enqueue(encoder.encode(first ? `\uFEFF${csv}` : `\r\n${csv.slice(csv.indexOf("\r\n") + 2)}`));
         first = false;
         if (!page.hasMore) { controller.close(); return; }

@@ -6,7 +6,7 @@ import { SearchableDropdown } from "@/components/searchable-dropdown";
 export function LeadInlineField({ label, value, onSave, options, type = "text", readOnly = false, required = false, maxLength = 200 }: {
   label: string; value: string; onSave: (value: string) => Promise<void>;
   options?: { value: string; label: string }[];
-  type?: "text" | "email" | "tel" | "number" | "datetime-local";
+  type?: "text" | "email" | "tel" | "number" | "datetime-local" | "date";
   readOnly?: boolean; required?: boolean; maxLength?: number;
 }) {
   const [draft, setDraft] = useState(value);

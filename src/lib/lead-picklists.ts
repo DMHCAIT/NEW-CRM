@@ -1,4 +1,4 @@
-export const LEAD_PICKLIST_KEYS = ["countryCode", "country", "qualification", "category", "course", "source"] as const;
+export const LEAD_PICKLIST_KEYS = ["countryCode", "country", "qualification", "speciality", "category", "course", "source"] as const;
 export type LeadPicklistKey = (typeof LEAD_PICKLIST_KEYS)[number];
 
 const COUNTRY_CALLING_CODE_ROWS = `
@@ -251,6 +251,14 @@ export const DEFAULT_LEAD_PICKLISTS: Record<LeadPicklistKey, string[]> = {
   countryCode: countryCallingCodes.map(({ country, code }) => `${country} (${code})`),
   country: countryCallingCodes.map(({ country }) => country),
   qualification: ["MBBS", "MD/MS/DNB", "AYUSH"],
+  speciality: [
+    "Cardiology", "Radiology", "General Medicine", "Internal Medicine", "Critical Care",
+    "Emergency Medicine", "Orthopedics", "Dermatology", "General Surgery", "Obstetrics & Gynecology",
+    "Reproductive Medicine", "Infertility Management", "Pediatrics", "Neurology", "Oncology",
+    "Endocrinology", "Pulmonology", "Gastroenterology", "Urology", "Nephrology", "Psychiatry",
+    "Ophthalmology", "Dentistry", "Pathology", "Microbiology", "Anesthesiology", "Anatomy",
+    "Physiology", "Family Medicine", "Nutrition", "ENT (Otorhinolaryngology)", "Medical Management", "Others",
+  ],
   category: ["Fellowship", "PG Diploma", "Certificate", "PG Certificate"],
   course: [
     "Clinical Cardiology",

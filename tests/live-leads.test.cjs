@@ -261,6 +261,14 @@ test("single-field lead PATCH preserves unrelated columns and merges custom fiel
   assert.deepEqual(Object.keys(updated).sort(), ["modified_by", "name"]);
   assert.equal((await patch({ email: "new@example.com" })).status, 200);
   assert.deepEqual(Object.keys(updated).sort(), ["email", "modified_by", "normalized_email"]);
+  assert.equal((await patch({ expectedClosureDate: "2026-12-01" })).status, 200);
+  assert.deepEqual(JSON.parse(JSON.stringify(updated)), { expected_closure_date: "2026-12-01", modified_by: "editor" });
+  assert.equal((await patch({ expectedClosureDate: "" })).status, 200);
+  assert.equal(updated.expected_closure_date, null);
+  assert.equal((await patch({ speciality: " Cardiology " })).status, 200);
+  assert.deepEqual(JSON.parse(JSON.stringify(updated)), { speciality: "Cardiology", modified_by: "editor" });
+  assert.equal((await patch({ speciality: "" })).status, 200);
+  assert.equal(updated.speciality, null);
   assert.equal((await patch({ customFields: { "New field": "value" } })).status, 200);
   assert.equal(updated.custom_fields.Existing, "kept");
   assert.equal(updated.custom_fields["New field"], "value");
@@ -280,6 +288,105 @@ test("lead validation normalizes phone and email and excludes client-owned metad
   assert.throws(() => validation.parseLead({ ...validLead, email: "not-an-email" }), /email/);
   assert.throws(() => validation.parseLead({ ...validLead, assigneeId: "fake" }), /assigneeId/);
   assert.throws(() => validation.parseLead({ ...validLead, followUpAt: "tomorrow" }), /followUpAt/);
+});
+
+test("expected closure date validates real calendar days without timezone conversion", () => {
+  for (const date of ["2026-12-01", "2028-02-29", "", null]) {
+    assert.equal(validation.parseLead({ ...validLead, expectedClosureDate: date }).expected_closure_date, date || null);
+  }
+  for (const date of ["2026-02-29", "2026-02-30", "tomorrow", "2026-12-01T00:00:00Z", "01-12-2026"]) {
+    assert.throws(() => validation.parseLead({ ...validLead, expectedClosureDate: date }), /expectedClosureDate/);
+  }
+  assert.equal(validation.parseLead(validLead).expected_closure_date, null);
+  const parsed = csv.parseLeadCsv("name,phone,Expected closure fee,Expected closure date\nNew lead,9876543210,1250,2026-12-01")[0];
+  assert.equal(parsed.closureFee, "1250");
+  assert.equal(parsed.expectedClosureDate, "2026-12-01");
+  assert.equal(csv.parseLeadCsv("name,phone,closureFee\nNew lead,9876543210,1250")[0].closureFee, "1250");
+});
+
+test("speciality supplies all requested choices and is optional, validated and importable", () => {
+  const expected = [
+    "Cardiology", "Radiology", "General Medicine", "Internal Medicine", "Critical Care",
+    "Emergency Medicine", "Orthopedics", "Dermatology", "General Surgery", "Obstetrics & Gynecology",
+    "Reproductive Medicine", "Infertility Management", "Pediatrics", "Neurology", "Oncology",
+    "Endocrinology", "Pulmonology", "Gastroenterology", "Urology", "Nephrology", "Psychiatry",
+    "Ophthalmology", "Dentistry", "Pathology", "Microbiology", "Anesthesiology", "Anatomy",
+    "Physiology", "Family Medicine", "Nutrition", "ENT (Otorhinolaryngology)", "Medical Management", "Others",
+  ];
+  assert.deepEqual([...picklists.DEFAULT_LEAD_PICKLISTS.speciality], expected);
+  assert.equal(validation.parseLead(validLead).speciality, null);
+  assert.equal(validation.parseLead({ ...validLead, speciality: "  " }).speciality, null);
+  assert.equal(validation.parseLead({ ...validLead, speciality: " Cardiology " }).speciality, "Cardiology");
+  assert.throws(() => validation.parseLead({ ...validLead, speciality: "x".repeat(201) }), /speciality/);
+  assert.ok(csv.IMPORT_HEADERS.includes("speciality"));
+  for (const header of ["Speciality", "Specialty"]) {
+    assert.equal(csv.parseLeadCsv(`name,phone,${header}\nNew lead,9876543210,Cardiology`)[0].speciality, "Cardiology");
+  }
+  const mapped = load("src\\lib\\crm-data.ts", { "@/lib/permissions": { isCrmRole: () => true } });
+  assert.equal(mapped.mapLead({ id: "lead", speciality: "Cardiology" }).speciality, "Cardiology");
+  assert.equal(mapped.mapLead({ id: "lead" }).speciality, "");
+});
+
+test("lead columns expose standard and active custom fields, preserve zero fees and export their data", () => {
+  const fields = [{ name: "Custom intake detail", active: true }, { name: "Disabled", active: false }];
+  const columns = reports.leadColumns(fields);
+  for (const key of ["countryCode", "altPhone", "billingAddress", "speciality", "closureFee", "expectedClosureDate", "createdBy", "custom:Custom intake detail"]) {
+    assert.ok(columns.some(column => column.key === key), key);
+  }
+  assert.ok(!columns.some(column => column.key === "custom:Disabled"));
+  const row = { ...validLead, speciality: "Cardiology", closureFee: 0, expectedClosureDate: "2026-12-01", customFields: { "Custom intake detail": "New answer" } };
+  assert.equal(reports.leadColumnValue(row, "closureFee"), 0);
+  assert.equal(reports.leadColumnValue(row, "custom:Custom intake detail"), "New answer");
+  const output = reports.reportCsv({ columns: ["closureFee", "expectedClosureDate"] }, [row], "list", columns.filter(column => column.key.startsWith("custom:")));
+  assert.match(output, /"Expected closure fee","Expected closure date","Custom intake detail"/);
+  assert.match(output, /"0","2026-12-01","New answer"/);
+  assert.match(reports.reportCsv({ columns: ["speciality"] }, [row], "list"), /"Speciality"[\s\S]*"Cardiology"/);
+});
+
+test("configuration combines saved options with database-wide observed choices, including empty pages", async () => {
+  const configuration = { fields: [], picklists: { course: ["Configured course"], source: ["Website"] } };
+  const observed = { speciality: ["New external speciality"], course: ["New Facebook course", "Configured course"], source: ["DMHCA-Contact form", " website "], category: ["New category"] };
+  let failure = false;
+  const client = { from(table) {
+    assert.equal(table, "crm_settings");
+    let key;
+    const chain = { select: () => chain, eq: (_column, value) => { key = value; return chain; },
+      maybeSingle: async () => ({ data: { value: key === "lead_configuration" ? configuration : observed }, error: failure ? { message: "Read failed" } : null }) };
+    return chain;
+  } };
+  const result = await validation.fetchLeadConfiguration(client);
+  assert.deepEqual([...result.picklists.course], ["Configured course", "New Facebook course"]);
+  assert.deepEqual([...result.picklists.source], ["Website", "DMHCA-Contact form"]);
+  assert.ok(result.picklists.category.includes("New category"));
+  assert.ok(result.picklists.speciality.includes("Cardiology"));
+  assert.ok(result.picklists.speciality.includes("New external speciality"));
+  failure = true;
+  await assert.rejects(validation.fetchLeadConfiguration(client), /Read failed/);
+});
+
+test("column preferences persist expected closure and active custom fields but reject arbitrary or disabled keys", async () => {
+  const writes = [];
+  const route = load("src\\app\\api\\leads\\preferences\\route.ts", {
+    "@/lib/server/auth": { ...auth, requireUser: async () => ({
+      user: { id: "viewer" }, supabase: { from: table => {
+        assert.equal(table, "user_columns");
+        return { upsert: async value => { writes.push(value); return { error: null }; } };
+      } },
+    }) },
+    "@/lib/live-leads": { ...validation, fetchLeadConfiguration: async () => ({ fields: [
+      { name: "External detail", active: true }, { name: "Disabled", active: false },
+    ] }) },
+    "@/lib/reports": reports,
+    "@/lib/lead-filters": filters,
+  });
+  const save = columns => route.POST(new Request("https://crm.example/api/leads/preferences", { method: "POST", body: JSON.stringify({ action: "columns", columns }) }));
+  const columns = ["name", "closureFee", "expectedClosureDate", "countryCode", "custom:External detail"];
+  assert.equal((await save(columns)).status, 200);
+  assert.deepEqual(JSON.parse(JSON.stringify(writes[0])), { user_id: "viewer", view_name: "leads", columns_json: columns });
+  for (const invalid of [[], ["name", "name"], ["custom:Disabled"], ["custom:Unknown"], ["normalized_phone"]]) {
+    assert.equal((await save(invalid)).status, 400);
+  }
+  assert.equal(writes.length, 1);
 });
 
 test("lead deletion rejects non-admin roles before writes even with delete permission", async () => {
@@ -394,6 +501,7 @@ test("lead exports reject lower roles before accessing database", async () => {
       } },
       "@/lib/crm-data": { fetchLeads: async () => { reads++; return []; } },
       "@/lib/lead-filters": filters, "@/lib/reports": reports,
+      "@/lib/live-leads": validation,
       "@/lib/server/lead-query": {}, "@/lib/server/lead-export": {},
     });
     const response = await route.POST(new Request("http://localhost/api/leads/export", { method: "POST", body: "{}" }));
