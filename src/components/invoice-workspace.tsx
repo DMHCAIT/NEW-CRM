@@ -61,6 +61,9 @@ export function InvoiceWorkspace({ leadId, timelineOnly = false }: { leadId?: st
   const [downloadError, setDownloadError] = useState("");
   const [downloadingId, setDownloadingId] = useState("");
   const [paymentStatusError, setPaymentStatusError] = useState("");
+  const [invoiceMonth, setInvoiceMonth] = useState("");
+  const [invoiceDateFrom, setInvoiceDateFrom] = useState("");
+  const [invoiceDateTo, setInvoiceDateTo] = useState("");
   const detailRef = useRef<HTMLElement>(null);
   const { data, busy, refresh } = state;
   async function downloadInvoice(invoice: Invoice) {
@@ -140,7 +143,14 @@ export function InvoiceWorkspace({ leadId, timelineOnly = false }: { leadId?: st
       - records.filter(row => (row.id === root.id || row.parent_invoice_id === root.id) && !["cancelled", "rejected"].includes(row.status))
         .reduce((sum, row) => sum + Number(row.total), 0)));
   };
-  const invoices = records.filter(invoice => (!status || invoice.status === status) && `${invoice.invoice_no} ${courseName(invoice)} ${invoice.billing_name ?? ""} ${leadNames.get(invoice.lead_id) ?? ""}`.toLowerCase().includes(search.trim().toLowerCase()));
+  const invoices = records.filter(invoice => {
+    const invoiceDate = (invoice.invoice_date ?? invoice.created_at).slice(0, 10);
+    return (!status || invoice.status === status)
+      && (!invoiceMonth || invoiceDate.startsWith(`${invoiceMonth}-`))
+      && (!invoiceDateFrom || invoiceDate >= invoiceDateFrom)
+      && (!invoiceDateTo || invoiceDate <= invoiceDateTo)
+      && `${invoice.invoice_no} ${courseName(invoice)} ${invoice.billing_name ?? ""} ${leadNames.get(invoice.lead_id) ?? ""}`.toLowerCase().includes(search.trim().toLowerCase());
+  });
   const pageIndex = Math.min(page, Math.max(0, Math.ceil(invoices.length / 25) - 1));
   const visibleInvoices = invoices.slice(pageIndex * 25, (pageIndex + 1) * 25);
   const selected = recordsById.get(selectedId);
@@ -264,7 +274,14 @@ export function InvoiceWorkspace({ leadId, timelineOnly = false }: { leadId?: st
         </div>}
       <div className="invoice-detail-footer">{invoiceActions(selected)}</div></section>}
     <section className="panel invoice-register"><div className="panel-heading"><div><h2>{leadId ? "Invoices for this lead" : "Invoice register"}</h2><p>{invoices.length} matching records</p></div></div>
-      <div className="table-toolbar"><label className="toolbar-search"><Search size={15} /><input type="search" aria-label="Search invoices" placeholder={leadId ? "Search invoice number" : "Search invoice or lead"} value={search} onChange={event => { setSearch(event.target.value); setPage(0); }} /></label><SearchableDropdown className="invoice-status-filter" ariaLabel="Invoice status" placeholder="All statuses" value={status} onChange={value => { setStatus(value); setPage(0); }} options={[{ value: "", label: "All statuses" }, ...["pending_approval","scheduled","sent","paid","rejected","cancelled","expired"].map(value => ({value,label:statusLabel(value)}))]} /></div>
+      <div className="table-toolbar invoice-toolbar"><label className="toolbar-search"><Search size={15} /><input type="search" aria-label="Search invoices" placeholder={leadId ? "Search invoice number" : "Search invoice or lead"} value={search} onChange={event => { setSearch(event.target.value); setPage(0); }} /></label><SearchableDropdown className="invoice-status-filter" ariaLabel="Invoice status" placeholder="All statuses" value={status} onChange={value => { setStatus(value); setPage(0); }} options={[{ value: "", label: "All statuses" }, ...["pending_approval","scheduled","sent","paid","rejected","cancelled","expired"].map(value => ({value,label:statusLabel(value)}))]} />
+        <div className="invoice-date-filters" aria-label="Filter invoices by date">
+          <label>Month<input type="month" aria-label="Invoice month" value={invoiceMonth} onChange={event => { setInvoiceMonth(event.target.value); setPage(0); }} /></label>
+          <label>From<input type="date" aria-label="Invoice date from" value={invoiceDateFrom} onChange={event => { setInvoiceDateFrom(event.target.value); setPage(0); }} /></label>
+          <label>To<input type="date" aria-label="Invoice date to" value={invoiceDateTo} onChange={event => { setInvoiceDateTo(event.target.value); setPage(0); }} /></label>
+          {(search || status || invoiceMonth || invoiceDateFrom || invoiceDateTo) && <button type="button" className="button button-secondary invoice-clear-filters" onClick={() => { setSearch(""); setStatus(""); setInvoiceMonth(""); setInvoiceDateFrom(""); setInvoiceDateTo(""); setPage(0); }}>Clear filters</button>}
+        </div>
+      </div>
       <div className="table-wrap"><table className="data-table invoice-table"><thead><tr><th>Invoice / Date</th>{!leadId && <th>Bill to</th>}<th>Current due / Balance</th><th>Status</th><th>Due date</th><th>Actions</th></tr></thead><tbody>{visibleInvoices.map(invoice => <tr key={invoice.id}>
         <td><button className="invoice-number-button" onClick={() => { setSelectedId(invoice.id); setShowForm(false); }}><FileText size={16} /><span>{invoice.invoice_no}<small>{courseName(invoice)}</small><small>{dateLabel(invoice.invoice_date ?? invoice.created_at.slice(0,10))}{invoice.installment_number ? ` · ${installmentLabel(invoice.installment_number)}` : ""}</small></span></button></td>
         {!leadId && <td>{invoice.billing_name || leadNames.get(invoice.lead_id) || "Linked lead"}</td>}
@@ -279,7 +296,7 @@ export function InvoiceWorkspace({ leadId, timelineOnly = false }: { leadId?: st
           <button className="button button-secondary" onClick={() => { setSelectedId(invoice.id); setShowForm(false); }}>Details</button><button className="button button-secondary" disabled={Boolean(downloadingId)} onClick={() => void downloadInvoice(invoice)}>{downloadingId === invoice.id ? "Downloading…" : "PDF"}</button>
         </div></td>
       </tr>)}</tbody></table></div>
-      {!state.loading && !invoices.length && !state.error && <div className="invoice-empty"><FileText size={30} /><h3>{search || status ? "No matching invoices" : "No invoices yet"}</h3><p>{search || status ? "Try a different search or status filter." : data?.canCreate ? "Create an invoice to start the approval and collection workflow." : "Invoices issued for accessible leads will appear here."}</p></div>}
+      {!state.loading && !invoices.length && !state.error && <div className="invoice-empty"><FileText size={30} /><h3>{search || status || invoiceMonth || invoiceDateFrom || invoiceDateTo ? "No matching invoices" : "No invoices yet"}</h3><p>{search || status || invoiceMonth || invoiceDateFrom || invoiceDateTo ? "Try a different search or date filter." : data?.canCreate ? "Create an invoice to start the approval and collection workflow." : "Invoices issued for accessible leads will appear here."}</p></div>}
       <div className="table-footer workspace-pagination"><span>{invoices.length ? pageIndex * 25 + 1 : 0}&ndash;{Math.min((pageIndex + 1) * 25, invoices.length)} of {invoices.length} invoices</span><div><button className="button button-secondary" disabled={pageIndex === 0} onClick={() => setPage(pageIndex - 1)}>Previous</button><button className="button button-secondary" disabled={(pageIndex + 1) * 25 >= invoices.length} onClick={() => setPage(pageIndex + 1)}>Next</button></div></div>
       <div className="table-footer">All {leadId ? "lead" : "accessible"} invoices · Payment status refreshes every 15 seconds. Interrupted provider actions remain locked for reconciliation.</div>
     </section>

@@ -26,7 +26,7 @@ export async function GET(request: Request, context: Context) {
     const leadLoaded = Date.now();
     const [stages, profiles, notes, activities, emails, configuration, extras, mailbox, scheduledCalls, duplicates, noteCount, emailCount] = await Promise.all([
       includeMetadata ? fetchStages(supabase) : undefined, includeMetadata ? fetchProfiles(supabase) : undefined,
-      all || section === "note" ? supabase.from("notes").select("id,content,created_at,user_id").eq("lead_id", id).order("created_at", { ascending: false }) : { data: [], error: null },
+      all || section === "note" ? supabase.from("notes").select("id,content,created_at,user_id,images:note_images(id,filename)").eq("lead_id", id).order("created_at", { ascending: false }) : { data: [], error: null },
       withActivities ? supabase.from("activities").select("id,type,description,meta,created_at,user_id").eq("lead_id", id).order("created_at", { ascending: false }) : { data: [], error: null },
       all || section === "email" ? supabase.from("emails").select("id,subject,body,status,from_email,to_email,direction,created_at,user_id").eq("lead_id", id).order("created_at", { ascending: false }) : { data: [], error: null },
       includeMetadata ? fetchLeadConfiguration(supabase) : undefined,

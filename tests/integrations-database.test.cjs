@@ -60,7 +60,9 @@ test("external intake persists new admission values and registers source and cho
     category: "New external category", qualification: "New external qualification", country: "New external country", speciality: "Cardiology",
   });
   assert.equal(result.status, "created");
-  const row = (await db.query("select course,category,qualification,country,source,speciality from public.leads where id=$1", [result.lead_id])).rows[0];
+  const row = (await db.query("select course,category,qualification,country,source,speciality,phone,normalized_phone from public.leads where id=$1", [result.lead_id])).rows[0];
+  assert.equal(row.phone, "+7181920125");
+  assert.equal(row.normalized_phone, "7181920125");
   assert.equal(row.course, "New external course");
   assert.equal(row.category, "New external category");
   assert.equal(row.speciality, "Cardiology");

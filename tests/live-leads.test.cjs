@@ -15,7 +15,10 @@ function load(path, dependencies = {}) {
       name === "@/lib/server/login" ? { checkOrigin: () => {} } :
       name === "@/lib/server/operational-gmail" ? { currentGmailMailbox: async () => null } :
       name === "@/lib/email-signature-policy" ? load("src\\lib\\email-signature-policy.ts", dependencies) :
-      name === "@/lib/server/email-signature" ? load("src\\lib\\server\\email-signature.ts", dependencies) : require(name),
+      name === "@/lib/note-images" ? load("src\\lib\\note-images.ts") :
+      name === "@/lib/server/note-images" ? load("src\\lib\\server\\note-images.ts", { "@/lib/server/auth": auth }) :
+      name === "@/lib/server/email-signature" ? load("src\\lib\\server\\email-signature.ts", dependencies) :
+      name === "@/lib/lead-phone" ? load("src\\lib\\lead-phone.ts") : require(name),
     Date, Set, URL, Response, Buffer, console,
   });
   return exports;
@@ -25,6 +28,10 @@ const auth = {
   HttpError,
   readJson: (request) => request.json(),
   jsonError: (error) => Response.json({ error: error.message }, { status: error.status ?? 500 }),
+  requireString: (value, label, max = 500) => {
+    if (typeof value !== "string" || !value.trim() || value.length > max) throw new HttpError(400, `Invalid ${label}.`);
+    return value.trim();
+  },
 };
 const picklists = load("src\\lib\\lead-picklists.ts");
 const validation = load("src\\lib\\live-leads.ts", { "@/lib/server/auth": auth, "@/lib/lead-picklists": picklists, "@/lib/lead-phone": load("src\\lib\\lead-phone.ts") });
@@ -39,6 +46,9 @@ test("click-to-call safely formats lead phones with their selected calling code"
   assert.equal(leadCallNumber("919876543210", "India (+91)"), "+919876543210");
   assert.equal(leadCallNumber("+44 (20) 1234-5678", "India (+91)"), "+442012345678");
   assert.equal(leadCallNumber("5551234567", "United States (+1)"), "+15551234567");
+  assert.equal(leadCallNumber("2345678924", "+91"), "+912345678924");
+  assert.equal(leadCallNumber("2345678924", "91"), "+912345678924");
+  assert.equal(leadCallNumber("912345678924"), "+912345678924");
   assert.equal(leadCallNumber("9876543210"), "9876543210");
   for (const value of ["", "123", "abc1234567", "1234567;ext=1", "+1234567890123456", "++1234567"]) {
     assert.equal(leadCallNumber(value, "India (+91)"), null);
@@ -54,6 +64,16 @@ test("lead storage combines calling code and phone without duplicating explicit 
     ["+63 4567893834", "India (+91)", "+634567893834"],
     ["+44 (20) 1234-5678", "", "+442012345678"],
     ["5551234567", "United States (+1)", "+15551234567"],
+    ["+912345678982", "India (+91)", "+912345678982"],
+    ["912345678982", "India (+91)", "+912345678982"],
+    ["2345678982", "India (+91)", "+912345678982"],
+    ["912345678924", "+91", "+912345678924"],
+    ["2345678924", "+91", "+912345678924"],
+    ["912345678925", "91", "+912345678925"],
+    ["2345678925", "91", "+912345678925"],
+    ["912345678924", "", "+912345678924"],
+    ["880987650001", "", "+880987650001"],
+    ["9876543210", "", "+9876543210"],
   ]) {
     const parsed = validation.parseLead({ ...validLead, phone, countryCode });
     assert.equal(parsed.phone, expected);
@@ -304,6 +324,59 @@ test("expected closure date validates real calendar days without timezone conver
   assert.equal(csv.parseLeadCsv("name,phone,closureFee\nNew lead,9876543210,1250")[0].closureFee, "1250");
 });
 
+test("sample lead CSV marks required columns and includes two parseable examples for every field", () => {
+  const sample = csv.createLeadCsvSample({
+    picklists: { countryCode: ["India (+91)"], country: ["India", "UAE"], qualification: ["MBBS"], category: ["Fellowship"], course: ["Cardiology"], source: ["Website"] },
+    stages: ["New enquiry", "Application review"],
+    assignees: ["admin@example.test"],
+    customFields: [{ name: "Campus", options: ["Delhi", "Dubai"] }, { name: "Comment", options: [] }],
+  });
+  const [headerLine, ...sampleLines] = sample.trim().split("\r\n");
+  assert.match(headerLine, /^"name \(required\)".*"countryCode".*"phone \(required\)".*"email \(required\)"/);
+  const customHeaders = ["Campus", "Comment"];
+  const rows = csv.parseLeadCsv(sample, customHeaders);
+  assert.equal(rows.length, 2);
+  assert.equal(sampleLines.length, 2);
+  assert.ok(rows.every(row => row.name.startsWith("Sample Lead") && row.phone.length >= 7));
+  assert.equal(Array.from(rows, row => row.note).join("|"), [
+    "Initial enquiry from website; asked about course details.",
+    "Follow-up requested; prefers an afternoon call.",
+  ].join("|"));
+  for (const header of [...csv.IMPORT_HEADERS, ...customHeaders.map(name => `custom:${name}`)]) {
+    const key = header === "expectedClosureFee" ? "closureFee" : header;
+    assert.ok(rows.every(row => typeof row[key] === "string" && row[key].length > 0), `${header} has a sample value`);
+  }
+});
+
+test("Excel workbook rows use the same CSV header mapping and validation", async () => {
+  let sheetIndex = -1;
+  const workbookCsv = load("src\\lib\\live-leads-csv.ts", {
+    "read-excel-file/browser": {
+      readSheet: async (input, index) => {
+        assert.ok(input instanceof ArrayBuffer);
+        sheetIndex = index;
+        return [
+          ["name (required)", "countryCode", "phone (required)", "email (required)", "note"],
+          ["Sample Student", "India (+91)", "2345678982", "student@example.test", "Asked about admissions"],
+        ];
+      },
+    },
+  });
+  const rows = await workbookCsv.parseLeadSpreadsheet({
+    name: "leads.xlsx",
+    text: async () => "",
+    arrayBuffer: async () => new ArrayBuffer(8),
+  });
+  assert.equal(sheetIndex, 0);
+  assert.equal(rows[0].email, "student@example.test");
+  assert.equal(rows[0].note, "Asked about admissions");
+  await assert.rejects(() => workbookCsv.parseLeadSpreadsheet({
+    name: "leads.xls",
+    text: async () => "",
+    arrayBuffer: async () => new ArrayBuffer(0),
+  }), /CSV or Excel/);
+});
+
 test("speciality supplies all requested choices and is optional, validated and importable", () => {
   const expected = [
     "Cardiology", "Radiology", "General Medicine", "Internal Medicine", "Critical Care",
@@ -472,8 +545,15 @@ test("CSV rejects malformed headers, field counts, quotes and oversized imports"
     'name,phone\n"A,9876543210',
     'name,phone\n"A"x,9876543210',
     "name,phone\n",
-    `name,phone\n${"A,9876543210\n".repeat(1001)}`,
+    `name,phone\n${"A,9876543210\n".repeat(200001)}`,
   ]) assert.throws(() => csv.parseLeadCsv(source));
+});
+
+test("lead import limits support 200,000 rows and 50 MB files", () => {
+  assert.equal(csv.MAX_LEAD_IMPORT_ROWS, 200000);
+  assert.equal(csv.MAX_LEAD_IMPORT_FILE_BYTES, 50000000);
+  const rows = csv.parseLeadCsv(`name,phone,email\n${"Lead,9876543210,lead@example.test\n".repeat(1001)}`);
+  assert.equal(rows.length, 1001);
 });
 
 test("report CSV prevents formula injection and supports count exports", () => {
@@ -525,21 +605,29 @@ test("report export denies explicit role overrides and missing report view", asy
   }
 });
 
-test("import refuses create bypass, duplicate file rows and assignment bypass", async () => {
-  for (const [permissions, rows, status] of [
-    [[], [validLead], 403],
-    [["leads.create"], [validLead, validLead], 409],
-    [["leads.create"], [{ ...validLead, assigneeId: "00000000-0000-4000-8000-000000000002" }], 400],
+test("import requires create permission, email and an authorized assignee; country code is optional", async () => {
+  const self = "00000000-0000-4000-8000-000000000001";
+  for (const [permissions, rows, status, expectedWrites] of [
+    [[], [{ ...validLead, countryCode: "India (+91)", assigneeId: self }], 403, 0],
+    [["leads.create"], [{ ...validLead, countryCode: "India (+91)", assigneeId: self }], 403, 0],
+    [["leads.create", "leads.import"], [{ ...validLead, countryCode: "India (+91)", assigneeId: self, email: "" }], 400, 0],
+    [["leads.create", "leads.import"], [{ ...validLead, countryCode: "", assigneeId: self }], 201, 1],
+    [["leads.create", "leads.import"], [{ ...validLead, countryCode: "+91", assigneeId: self }], 201, 1],
+    [["leads.create", "leads.import"], [{ ...validLead, countryCode: "91", assigneeId: self }], 201, 1],
+    [["leads.create", "leads.import"], [{ ...validLead, countryCode: "India (+91)" }], 400, 0],
+    [["leads.create", "leads.import"], [{ ...validLead, countryCode: "Invalid (+999)", assigneeId: self }], 400, 0],
+    [["leads.create", "leads.import"], [{ ...validLead, countryCode: "India (+91)", assigneeId: "00000000-0000-4000-8000-000000000002" }], 400, 0],
   ]) {
     let writes = 0;
     const route = load("src\\app\\api\\leads\\import\\route.ts", {
-      "next/server": { NextResponse: Response }, "@/lib/live-leads": validation,
+      "next/server": { NextResponse: Response }, "@/lib/live-leads": validation, "@/lib/lead-phone": load("src\\lib\\lead-phone.ts"),
       "@/lib/server/auth": { ...auth, requireUser: async (permission) => {
         assert.equal(permission, "leads.import");
-        return { user: { id: "00000000-0000-4000-8000-000000000001", permissions }, supabase: {
+        return { user: { id: self, permissions }, supabase: {
           rpc: async (name) => {
-            if (name === "check_live_lead_duplicates") return { data: "block", error: null };
             writes++;
+            if (name === "import_live_leads") return { data: { imported: 1, skipped: 0 }, error: null };
+            return { data: "block", error: null };
           },
           from: () => ({ select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { value: {} }, error: null }) }) }) }),
         } };
@@ -548,8 +636,225 @@ test("import refuses create bypass, duplicate file rows and assignment bypass", 
 
     const response = await route.POST(new Request("http://localhost/api/leads/import", { method: "POST", body: JSON.stringify({ rows }) }));
     assert.equal(response.status, status);
-    assert.equal(writes, 0);
+    assert.equal(writes, expectedWrites);
   }
+});
+
+test("lead import attaches optional notes in the atomic import RPC", async () => {
+  let rpcRows;
+  const route = load("src\\app\\api\\leads\\import\\route.ts", {
+    "next/server": { NextResponse: Response },
+    "@/lib/live-leads": {
+      ...validation,
+      fetchLeadConfiguration: async () => ({ fields: [], picklists: picklists.DEFAULT_LEAD_PICKLISTS }),
+      validateCustomFields() {},
+      enforceDuplicatePolicy: async () => {},
+    },
+    "@/lib/server/auth": { ...auth, requireUser: async () => ({
+      user: { id: "00000000-0000-4000-8000-000000000001", permissions: ["leads.import", "leads.create"] },
+      supabase: { rpc: async (name, args) => {
+        assert.equal(name, "import_live_leads");
+        rpcRows = args.rows_json;
+        return { data: { imported: rpcRows.length, skipped: 0 }, error: null };
+      } },
+    }) },
+    "@/lib/server/login": { checkOrigin() {} },
+  });
+  const response = await route.POST(new Request("http://localhost/api/leads/import", {
+    method: "POST",
+    body: JSON.stringify({ rows: [{ ...validLead, countryCode: "India (+91)", assigneeId: "00000000-0000-4000-8000-000000000001", note: " Initial enquiry " }] }),
+  }));
+  assert.equal(response.status, 201);
+  assert.equal(rpcRows[0].note, "Initial enquiry");
+  assert.equal(rpcRows[0].name, validLead.name);
+
+  const invalid = await route.POST(new Request("http://localhost/api/leads/import", {
+    method: "POST",
+    body: JSON.stringify({ rows: [{ ...validLead, countryCode: "India (+91)", assigneeId: "00000000-0000-4000-8000-000000000001", note: "x".repeat(10001) }] }),
+  }));
+  assert.equal(invalid.status, 400);
+});
+
+test("import duplicate precheck allows unresolved owners and returns only duplicate row indexes", async () => {
+  const route = load("src\\app\\api\\leads\\import\\route.ts", {
+    "next/server": { NextResponse: Response },
+    "@/lib/live-leads": {
+      ...validation,
+      fetchLeadConfiguration: async () => ({ fields: [], picklists: picklists.DEFAULT_LEAD_PICKLISTS }),
+      validateCustomFields() {},
+    },
+    "@/lib/server/auth": { ...auth, requireUser: async () => ({
+      user: { id: "00000000-0000-4000-8000-000000000001", permissions: ["leads.import", "leads.create"] },
+      supabase: { rpc: async (name, args) => {
+        assert.equal(name, "find_live_lead_import_duplicates");
+        assert.equal(args.rows_json.length, 2);
+        assert.equal(args.rows_json[0].assignee_id ?? null, null);
+        return { data: [1], error: null };
+      } },
+    }) },
+    "@/lib/server/login": { checkOrigin() {} },
+  });
+  const response = await route.POST(new Request("http://localhost/api/leads/import", {
+    method: "POST",
+    body: JSON.stringify({ checkOnly: true, rows: [
+      { ...validLead, countryCode: "India (+91)" },
+      { ...validLead, name: "Second student", phone: "9876543211", email: "second@example.test", countryCode: "India (+91)" },
+    ] }),
+  }));
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { duplicates: [1] });
+});
+
+test("tracked import API validates sheet identifiers and forwards batch identity with normalized phones", async () => {
+  const self = "00000000-0000-4000-8000-000000000001";
+  const importId = "00000000-0000-4000-8000-000000000002";
+  const writes = [];
+  const route = load("src\\app\\api\\leads\\import\\route.ts", {
+    "next/server": { NextResponse: Response },
+    "@/lib/live-leads": { ...validation, fetchLeadConfiguration: async () => ({ fields: [], picklists: picklists.DEFAULT_LEAD_PICKLISTS }) },
+    "@/lib/server/auth": { ...auth, requireUser: async () => ({
+      user: { id: self, permissions: ["leads.import", "leads.create"] },
+      supabase: { rpc: async (name, args) => { writes.push({ name, args }); return { data: { imported: 1, skipped: 0 }, error: null }; } },
+    }) },
+  });
+  const send = body => route.POST(new Request("http://localhost/api/leads/import", { method: "POST", body: JSON.stringify({ rows: [{ ...validLead, phone: "880987650001", assigneeId: self }], ...body }) }));
+  for (const body of [{ importId: 123, batchIndex: 0 }, { importId: "invalid", batchIndex: 0 }, { importId }, { importId, batchIndex: -1 }, { importId, batchIndex: 0.1 }]) {
+    assert.equal((await send(body)).status, 400);
+  }
+  assert.equal(writes.length, 0);
+  assert.equal((await send({ importId, batchIndex: 0 })).status, 201);
+  assert.equal(writes[0].name, "import_live_lead_sheet_batch");
+  assert.equal(writes[0].args.sheet_id, importId);
+  assert.equal(writes[0].args.batch_index, 0);
+  assert.equal(writes[0].args.rows_json[0].phone, "+880987650001");
+});
+
+test("import history API bounds pagination and persists validated file metadata through the authorized RPC", async () => {
+  const calls = [];
+  let canCreate = true;
+  const route = load("src\\app\\api\\leads\\imports\\route.ts", {
+    "next/server": { NextResponse: Response }, "@/lib/live-leads": validation,
+    "@/lib/server/auth": { ...auth, requireUser: async permission => {
+      assert.equal(permission, "leads.import");
+      const builder = {
+        select() { return builder; }, neq(column, value) { assert.equal(column, "status"); assert.equal(value, "deleted"); return builder; },
+        order() { return builder; }, range(start, end) { calls.push({ start, end }); return { data: [], count: 40, error: null }; },
+      };
+      return { user: { permissions: canCreate ? ["leads.create"] : [] }, supabase: {
+        from(table) { assert.equal(table, "lead_import_sheets"); return builder; },
+        rpc: async (name, args) => { calls.push({ name, args }); return { data: { id: "saved-sheet" }, error: null }; },
+      } };
+    } },
+  });
+  assert.equal((await route.GET(new Request("http://localhost/api/leads/imports?offset=-1"))).status, 400);
+  assert.equal((await route.GET(new Request("http://localhost/api/leads/imports?offset=20"))).status, 200);
+  assert.deepEqual(calls.shift(), { start: 20, end: 39 });
+  const send = body => route.POST(new Request("http://localhost/api/leads/imports", { method: "POST", body: JSON.stringify(body) }));
+  for (const body of [{ filename: "", totalRows: 2, duplicates: 0 }, { filename: "leads.csv", totalRows: 200001, duplicates: 0 }, { filename: "leads.csv", totalRows: 2, duplicates: 3 }]) {
+    assert.equal((await send(body)).status, 400);
+  }
+  assert.equal((await send({ filename: " leads.csv ", totalRows: 100, duplicates: 25, created_by: "forged" })).status, 201);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.shift())), { name: "start_live_lead_import", args: { sheet_filename: "leads.csv", row_count: 100, duplicates: 25 } });
+  canCreate = false;
+  assert.equal((await send({ filename: "leads.csv", totalRows: 100, duplicates: 25 })).status, 403);
+  assert.equal(calls.length, 0);
+});
+
+test("sheet deletion API requires administrator, import and delete permissions and surfaces failures", async () => {
+  const id = "00000000-0000-4000-8000-000000000001";
+  for (const [role, permissions, failure, expected] of [
+    ["counselor", ["leads.import"], false, 403],
+    ["admin", [], false, 403],
+    ["admin", ["leads.import"], true, 400],
+    ["super_admin", ["leads.import"], false, 200],
+  ]) {
+    let writes = 0;
+    const route = load("src\\app\\api\\leads\\imports\\[id]\\route.ts", {
+      "next/server": { NextResponse: Response }, "@/lib/live-leads": validation,
+      "@/lib/server/auth": { ...auth, requireUser: async permission => {
+        assert.equal(permission, "leads.delete");
+        return { user: { permissions, profile: { role } }, supabase: { rpc: async (name, args) => {
+          writes++; assert.equal(name, "delete_live_lead_import"); assert.equal(args.sheet_id, id);
+          return failure ? { error: { message: "Delete failed" } } : { data: 17, error: null };
+        } } };
+      } },
+    });
+    const response = await route.DELETE(new Request("http://localhost/api/leads/imports/id", { method: "DELETE" }), { params: Promise.resolve({ id }) });
+    assert.equal(response.status, expected);
+    assert.equal(writes, expected === 403 ? 0 : 1);
+    if (expected === 200) assert.deepEqual(await response.json(), { deleted: 17 });
+  }
+});
+
+test("import PDF contains the sheet name and exact total, duplicate, imported and unprocessed counts", async () => {
+  const pdfLib = require("pdf-lib");
+  const report = {};
+  const source = readFileSync(join(__dirname, "..", "src", "lib", "lead-import-report.ts"), "utf8");
+  new Function("exports", "require", ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021 },
+  }).outputText)(report, require);
+  const bytes = await report.createLeadImportPdf({
+    id: "00000000-0000-4000-8000-000000000001", filename: "November admissions.xlsx",
+    total_rows: 200000, imported_rows: 170000, duplicate_rows: 25000,
+    status: "importing", created_at: "2026-11-11T09:00:00Z",
+  });
+  assert.equal(Buffer.from(bytes).subarray(0, 4).toString(), "%PDF");
+  const pdf = await pdfLib.PDFDocument.load(bytes);
+  assert.equal(pdf.getPageCount(), 1);
+  assert.equal(pdf.getPage(0).getWidth(), 595);
+  assert.equal(pdf.getPage(0).getHeight(), 596);
+  assert.equal(pdf.getTitle(), "Lead import summary - November admissions.xlsx");
+  const streams = pdf.getPage(0).node.Contents();
+  const content = Array.from({ length: streams.size() }, (_, index) =>
+    Buffer.from(pdfLib.decodePDFRawStream(pdf.context.lookup(streams.get(index))).decode()).toString()).join("\n");
+  for (const text of ["November admissions.xlsx", "200,000", "170,000", "25,000", "5,000", "Incomplete", "IMPORT RESULT", "ABOUT THIS IMPORT"]) {
+    assert.match(content, new RegExp(Buffer.from(text).toString("hex"), "i"), text);
+  }
+  for (const [status, label] of [["completed", "Completed"], ["deleted", "Deleted"]]) {
+    const longName = "W".repeat(250) + ".xlsx";
+    const result = await report.createLeadImportPdf({
+      id: "00000000-0000-4000-8000-000000000001", filename: longName,
+      total_rows: 6, imported_rows: 3, duplicate_rows: 3, status, created_at: "2026-11-11T09:00:00Z",
+    });
+    const document = await pdfLib.PDFDocument.load(result);
+    assert.equal(document.getPageCount(), 1);
+    assert.ok(document.getPage(0).getHeight() > 596, "Long filenames get additional space without overlapping the totals");
+    const contents = document.getPage(0).node.Contents();
+    const commands = Array.from({ length: contents.size() }, (_, index) =>
+      Buffer.from(pdfLib.decodePDFRawStream(document.context.lookup(contents.get(index))).decode()).toString()).join("\n");
+    assert.match(commands, new RegExp(Buffer.from(label).toString("hex"), "i"));
+    assert.equal(document.getTitle(), `Lead import summary - ${longName}`);
+  }
+});
+
+test("duplicate lookup includes country code when normalizing phone numbers", async () => {
+  let rpcArgs;
+  const route = load("src\\app\\api\\leads\\duplicates\\route.ts", {
+    "next/server": { NextResponse: { json: (body, options) => Response.json(body, options) } },
+    "@/lib/server/auth": {
+      jsonError: auth.jsonError,
+      requireUser: async permission => {
+        assert.equal(permission, "leads.create");
+        return { supabase: { rpc: async (name, args) => {
+          assert.equal(name, "find_live_lead_duplicates");
+          rpcArgs = args;
+          return { data: [], error: null };
+        } } };
+      },
+    },
+    "@/lib/live-leads": {
+      dbError: validation.dbError,
+      normalizePhone: load("src\\lib\\lead-phone.ts").normalizePhone,
+    },
+  });
+  const request = new Request("https://crm.example/api/leads/duplicates?phone=2345678982&countryCode=India%20%28%2B91%29");
+  const response = await route.GET(request);
+  assert.equal(response.status, 200);
+  assert.deepEqual(JSON.parse(JSON.stringify(rpcArgs)), {
+    check_phone: "912345678982",
+    check_email: "",
+    check_country_code: "India (+91)",
+  });
 });
 
 test("duplicate rules honor phone/email selection, block/warn/allow and admin confirmation", async () => {

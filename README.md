@@ -10,6 +10,48 @@ Related-list timelines use compact date-grouped rows, right-aligned timestamps,
 and wrapping field changes. Notes, emails, calls and invoice events retain their
 full details without large padded event cards.
 
+### Images in lead notes
+
+The Notes editor supports image uploads and clipboard paste (Ctrl+V / Cmd+V),
+with previews and removal before saving. Attach up to three PNG, JPEG, GIF or
+WebP images, each at most 5 MB. Notes can contain text, images, or both.
+Apply migrations through `202611110008_note_images_5mb.sql` before using this feature. Notes and image
+bytes are saved atomically in the database; no public storage URL is created.
+Saved images appear as compact filename attachments, not full previews, in the
+Notes timeline. Clicking an attachment opens the complete image in a same-page
+dialog, with Close, Escape and backdrop dismissal. The compact dialog stays centered,
+capped at 640px wide and the smaller of 520px or 70% of the viewport height.
+It fits the complete image without cropping, distortion or enlarging small images
+on desktop, tablet and mobile screens. Images load only when opened
+through an authenticated, lead-scoped endpoint. Access follows the lead's current scope;
+archived leads' images are not served. Image bytes are fetched separately from
+the normal lead-detail response.
+
+### Lead spreadsheet imports
+
+Apply migrations through `202611110006_lead_import_history.sql`. CSV and XLSX uploads
+support up to 200,000 leads and 50 MB, with 5,000-row API batches. Email, name and
+phone are required; country code remains optional. Phone values from every source
+are stored with a leading `+`; an omitted country code is not guessed. The migration
+also adds `+` to existing unprefixed phone values without marking them as user edits.
+
+New imports save the sheet name, total rows, imported count and skipped duplicates
+in database-backed **Import history**. Successful imports automatically download a
+PDF summary; history offers another download, including incomplete-import counts.
+The compact PDF groups totals into color-coded tiles, shows import status and
+processed-row distribution, and wraps long sheet names without overlapping counts.
+Batches are retry-safe within the same import. A failed import can be retried while
+its selected sheet remains open; selecting another file starts a separate import.
+Previously imported sheets cannot be reconstructed from leads and are not backfilled.
+Only metadata is retained, not the original uploaded file.
+
+Administrators with lead import/delete permissions can delete an accessible sheet
+after confirmation. This archives only leads actually created by that sheet,
+including reassigned leads still within the administrator's scope; duplicates and
+unrelated leads remain unchanged. This follows normal CRM deletion semantics and
+preserves audit history. Other users see only their own imports; users with the
+existing user-view permission can view imports across users.
+
 ### Lead alerts and scheduled-call reminders
 
 Apply migrations through `202611100007_scheduled_call_notifications_only.sql` before starting this build. The bell shows

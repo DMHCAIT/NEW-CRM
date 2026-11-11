@@ -1,17 +1,18 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ArrowRightLeft, CheckCircle2, Columns3, Download, ListFilter, Plus, Save, Search, Trash2, Users, X } from "lucide-react";
 import { SearchableDropdown } from "@/components/searchable-dropdown";
 import { StageBadge } from "@/components/lead-helpers";
 import { LeadNavigationPreparation } from "@/components/lead-navigation-preparation";
 import { apiRequest, formatDateTime } from "@/lib/crm-data";
-import { criterionError, type SavedLeadFilter } from "@/lib/lead-filters";
+import { criterionError, criterionIsActive, type SavedLeadFilter } from "@/lib/lead-filters";
 import { leadColumns, leadColumnValue, type LeadColumn } from "@/lib/reports";
-import { LiveFilterEditor, downloadLiveCsv, emptyFilter, getCachedLeadListData, leadQueryPath, loadLeadListData, useDebouncedValue, useLiveLeadData } from "@/lib/live-leads-client";
+import { LiveFilterEditor, downloadLiveCsv, emptyFilter, getCachedLeadListData, leadQueryPath, loadAllLeadRows, loadLeadListData, useDebouncedValue, useLiveLeadData } from "@/lib/live-leads-client";
 import type { LeadCursor } from "@/lib/server/lead-query";
+import type { Lead } from "@/lib/types";
 
 export default function LeadsWorkspace({ initialFilter, dashboard = false }: { initialFilter?: SavedLeadFilter; dashboard?: boolean } = {}) {
   const [filter, setFilter] = useState<SavedLeadFilter>(() => initialFilter ?? emptyFilter());
@@ -22,6 +23,10 @@ export default function LeadsWorkspace({ initialFilter, dashboard = false }: { i
   const [assigneeId, setAssigneeId] = useState("");
   const [stageId, setStageId] = useState("");
   const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState<number | "all">(50);
+  const [allRows, setAllRows] = useState<Lead[]>([]);
+  const [allRowsKey, setAllRowsKey] = useState("");
+  const [allRowsLoading, setAllRowsLoading] = useState(false);
   const [savedColumns, setSavedColumns] = useState<LeadColumn[] | null>(null);
   const [showColumns, setShowColumns] = useState(false);
   const [columnSearch, setColumnSearch] = useState("");
@@ -30,15 +35,33 @@ export default function LeadsWorkspace({ initialFilter, dashboard = false }: { i
   const [columnError, setColumnError] = useState("");
   const dashboardView = dashboard;
   const [cursors, setCursors] = useState<(LeadCursor | null)[]>([null]);
-  const validation = filter.criteria.map(criterionError).find(Boolean);
-  const queryFilter = useDebouncedValue(filter, 120, !validation);
-  const path = leadQueryPath(queryFilter, { cursor: cursors[page], dashboard });
+  const activeCriteria = filter.criteria.filter(criterionIsActive);
+  const validation = activeCriteria.map(criterionError).find(Boolean);
+  const queryFilterKey = JSON.stringify({ ...filter, criteria: activeCriteria });
+  const settledQueryFilterKey = useDebouncedValue(queryFilterKey, 120, !validation);
+  const queryUpdating = settledQueryFilterKey !== queryFilterKey;
+  const queryFilter = useMemo(() => JSON.parse(settledQueryFilterKey) as SavedLeadFilter, [settledQueryFilterKey]);
+  const path = leadQueryPath(queryFilter, { cursor: cursors[page], dashboard, pageSize: pageSize === "all" ? 100 : pageSize });
   const { data, loading, error, reload, setError } = useLiveLeadData(path, loadLeadListData, getCachedLeadListData);
   useEffect(() => {
-    if (!data?.nextCursor || !data.hasMore || loading || queryFilter !== filter) return;
+    if (pageSize !== "all" || validation || queryUpdating) {
+      setAllRowsLoading(false);
+      return;
+    }
+    let active = true;
+    setAllRowsLoading(true);
+    setAllRowsKey("");
+    void loadAllLeadRows(queryFilter, dashboard)
+      .then(rows => { if (active) { setAllRows(rows); setAllRowsKey(settledQueryFilterKey); } })
+      .catch(error => { if (active) setError(error instanceof Error ? error.message : "Could not load all matching leads."); })
+      .finally(() => { if (active) setAllRowsLoading(false); });
+    return () => { active = false; };
+  }, [pageSize, settledQueryFilterKey, dashboard, validation, queryUpdating, queryFilter, setError]);
+  useEffect(() => {
+    if (!data?.nextCursor || !data.hasMore || loading || queryUpdating) return;
     const nextPath = leadQueryPath(queryFilter, { cursor: data.nextCursor, dashboard });
     void loadLeadListData(nextPath, { maxAgeMs: 30000 }).catch((e: unknown) => setError(e instanceof Error ? e.message : "Could not prefetch the next page."));
-  }, [data, loading, queryFilter, filter, dashboard, setError]);
+  }, [data, loading, queryFilter, queryUpdating, dashboard, setError]);
   const [bulkAction, setBulkAction] = useState<"transfer" | "stage" | "delete" | null>(null);
   const bulkDialogRef = useRef<HTMLDialogElement>(null);
   useEffect(() => {
@@ -52,7 +75,17 @@ export default function LeadsWorkspace({ initialFilter, dashboard = false }: { i
   const columnSaveRef = useRef(false);
   const availableColumns = leadColumns(data?.configuration.fields);
   const matchingColumns = availableColumns.filter((column) => column.label.toLocaleLowerCase().includes(columnSearch.trim().toLocaleLowerCase()));
-  const rows = data && !validation ? data.leads : [];
+  const rows = data && !validation && !queryUpdating
+    ? pageSize === "all" ? allRowsKey === settledQueryFilterKey && !allRowsLoading ? allRows : [] : data.leads
+    : [];
+  const resultsLoading = loading || queryUpdating || (pageSize === "all" && allRowsLoading);
+  function changePageSize(value: string) {
+    setPageSize(value === "all" ? "all" : Number(value));
+    setPage(0);
+    setCursors([null]);
+    setSelected([]);
+    setAllRowsKey("");
+  }
   const selectedColumns = savedColumns ?? data?.columns;
   const validColumns = selectedColumns?.filter((key): key is LeadColumn => availableColumns.some(column => column.key === key));
   const columns: LeadColumn[] = validColumns?.length ? validColumns : ["name", "phone", "country", "course", "stage", "assignee", "followUp"];
@@ -123,7 +156,7 @@ export default function LeadsWorkspace({ initialFilter, dashboard = false }: { i
     try { await action(); } catch (e) { setError(e instanceof Error ? e.message : "Action failed."); } finally { setBusy(false); }
   }
   async function bulk(action: "transfer" | "stage" | "delete") {
-    if (loading || queryFilter !== filter) { setError("Wait for the current results before changing leads."); return; }
+    if (loading || queryUpdating) { setError("Wait for the current results before changing leads."); return; }
     const ids = selected.filter((id) => rows.some((r) => r.id === id));
     if (!ids.length) { setError("Select at least one lead."); return; }
     if (action === "transfer" && !assigneeId) { setError("Choose an assignee."); return; }
@@ -138,7 +171,15 @@ export default function LeadsWorkspace({ initialFilter, dashboard = false }: { i
         setBulkAction(null);
         setNotice(`${completed.length} leads ${action === "delete" ? "deleted from active views" : action === "transfer" ? "transferred" : "updated"}.`);
       } catch (e) { throw new Error(`${completed.length} of ${ids.length} leads updated. ${e instanceof Error ? e.message : "Update failed."}`); }
-      finally { setSelected(current => current.filter(id => !completed.includes(id))); await reload(); }
+      finally {
+        setSelected(current => current.filter(id => !completed.includes(id)));
+        await reload();
+        if (pageSize === "all") {
+          const refreshed = await loadAllLeadRows(queryFilter, dashboard);
+          setAllRows(refreshed);
+          setAllRowsKey(settledQueryFilterKey);
+        }
+      }
     });
   }
   function openBulk(action: "transfer" | "stage" | "delete") {
@@ -146,14 +187,13 @@ export default function LeadsWorkspace({ initialFilter, dashboard = false }: { i
   }
   if (!data) return <section className="panel"><h1>Leads</h1>{loading ? <p role="status">Loading leads…</p> : <><p role="alert">{error}</p><button className="button button-secondary" onClick={() => void reload().catch(() => {})}>Retry</button></>}</section>;
   return <div className="leads-workspace">
-    <header className="page-heading leads-heading"><div className="leads-heading-copy"><span className="leads-module-icon"><Users size={21} aria-hidden="true" /></span><div><h1>Leads</h1><p>{rows.length} leads on this page{data.hasMore ? " · More results available" : ""}</p></div></div><div className="leads-heading-actions">
+    <header className="page-heading leads-heading"><div className="leads-heading-copy"><span className="leads-module-icon"><Users size={21} aria-hidden="true" /></span><div><h1>Leads</h1></div></div><div className="leads-heading-actions">
       {["admin", "super_admin"].includes(data.user.profile.role) && <button className="button button-secondary" disabled={busy || Boolean(validation)} onClick={() => void act(() => downloadLiveCsv("/api/leads/export", { filter, dashboard: dashboardView, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }, "leads.csv"))}><Download size={15} aria-hidden="true" />Export CSV</button>}
       {can("leads.create") && <Link className="button button-primary" href="/leads/new"><Plus size={16} aria-hidden="true" />New lead</Link>}
     </div></header>
     {error && <p className="helper-banner" role="alert">{error} <button className="text-link" onClick={() => void reload().catch(() => {})}>Retry</button></p>}{notice && <p className="helper-banner" role="status">{notice}</p>}
-    {validation && <p className="helper-banner" role="alert">{validation}</p>}
-    <LeadNavigationPreparation leads={rows} enabled={!loading && queryFilter === filter} />
-    {(loading || queryFilter !== filter) && <span role="status">Updating lead results...</span>}
+    <LeadNavigationPreparation leads={rows} enabled={!loading && !queryUpdating} />
+    {resultsLoading && <span className="visually-hidden" role="status">{pageSize === "all" ? "Loading all matching leads..." : "Updating lead results..."}</span>}
     {dashboardView && <p className="helper-banner"><Link href="/">Dashboard</Link><span> / {filter.name || "Dashboard leads"} · Role-scoped results</span></p>}
     <div className="leads-layout">
     <aside className="lead-filter-sidebar" aria-label="Lead search and preferences">
@@ -163,14 +203,14 @@ export default function LeadsWorkspace({ initialFilter, dashboard = false }: { i
       <div className="saved-filter-controls">
       <SearchableDropdown ariaLabel="Saved filters" placeholder="Choose saved filter" value={data.filters.some((f) => f.id === filter.id) ? filter.id : ""} options={[{ value: "", label: "Choose saved filter" }, ...data.filters.map(f => ({ value: f.id, label: f.name }))]} onChange={value => { const saved = data.filters.find((f) => f.id === value); setFilter(saved ? { ...saved.filter_json, id: saved.id, name: saved.name } : emptyFilter()); setPage(0); setSelected([]); }} />
       <input aria-label="Filter name" placeholder="Name this filter" maxLength={120} value={filterName} onChange={(e) => setFilterName(e.target.value)} />
-      <button className="button button-secondary button-small" disabled={busy || !filterName.trim() || Boolean(validation)} onClick={() => void act(async () => { await apiRequest("/api/leads/preferences", { body: { action: "save", filter: { ...filter, name: filterName.trim() } } }); setFilterName(""); await reload(); setNotice("Filter saved to your account."); })}><Save size={13} />Save filter</button>
+      <button className="button button-secondary button-small" disabled={busy || !filterName.trim() || Boolean(validation)} onClick={() => void act(async () => { await apiRequest("/api/leads/preferences", { body: { action: "save", filter: { ...filter, criteria: activeCriteria, name: filterName.trim() } } }); setFilterName(""); await reload(); setNotice("Filter saved to your account."); })}><Save size={13} />Save filter</button>
       {data.filters.some((f) => f.id === filter.id) && <button className="button button-quiet button-small" disabled={busy} onClick={() => void act(async () => { await apiRequest("/api/leads/preferences", { body: { action: "delete", id: filter.id } }); setFilter(emptyFilter()); await reload(); })}><Trash2 size={13} />Delete filter</button>}
       </div>
     </section>
     </aside>
     <div className="lead-results">
-    <section className="panel leads-panel" aria-label="Lead results" aria-busy={loading || queryFilter !== filter}>
-    <div className="leads-view-bar"><div className="leads-current-view"><ListFilter size={16} aria-hidden="true" /><h2>{dashboardView ? filter.name || filter.quickView : filter.quickView}</h2><span className="leads-view-count">{rows.length}</span></div><span className="result-count">{rows.length} leads</span></div>
+    <section className="panel leads-panel" aria-label="Lead results" aria-busy={resultsLoading}>
+    <div className="leads-view-bar"><div className="leads-current-view"><ListFilter size={16} aria-hidden="true" /><h2>{dashboardView ? filter.name || filter.quickView : filter.quickView}</h2><span className="leads-view-count">{rows.length}</span></div><div className="leads-view-actions"><span className="result-count">{rows.length} leads</span><button ref={columnTriggerRef} className="button button-secondary button-small" aria-expanded={showColumns} aria-controls={showColumns ? "lead-column-options" : undefined} onClick={() => { setColumnSearch(""); setShowColumns(!showColumns); }}><Columns3 size={14} />Columns</button></div></div>
     {selected.length > 0 && <section className="lead-bulk-actions"><strong><CheckCircle2 size={16} aria-hidden="true" />{selected.length} selected</strong>
       <div className="lead-bulk-buttons">
         {can("leads.edit") && <button className="button lead-bulk-status" aria-label="Update status" disabled={busy} onClick={() => openBulk("stage")}><CheckCircle2 size={15} aria-hidden="true" />Update status</button>}
@@ -178,9 +218,6 @@ export default function LeadsWorkspace({ initialFilter, dashboard = false }: { i
         {canDelete && <button className="button lead-bulk-delete" aria-label="Delete" disabled={busy} onClick={() => openBulk("delete")}><Trash2 size={15} aria-hidden="true" />Delete</button>}
       </div>
     </section>}
-    <div className="table-toolbar"><label className="toolbar-search"><Search size={15} /><input aria-label="Search results" placeholder="Search leads" value={filter.query} onChange={event => { setFilter({ ...filter, query: event.target.value }); setPage(0); setSelected([]); }} /></label>
-      <div className="toolbar-actions"><button ref={columnTriggerRef} className="button button-secondary button-small" aria-expanded={showColumns} aria-controls={showColumns ? "lead-column-options" : undefined} onClick={() => { setColumnSearch(""); setShowColumns(!showColumns); }}><Columns3 size={14} />Columns</button></div>
-    </div>
     {showColumns && typeof document !== "undefined" && createPortal(<section ref={columnPanelRef} id="lead-column-options" className="lead-column-options" aria-label="Visible columns" style={{ ...columnPosition, visibility: columnPosition ? "visible" : "hidden" }}>
       <label className="lead-column-search"><Search size={15} aria-hidden="true" /><input type="search" aria-label="Search columns" placeholder="Search columns..." value={columnSearch} onChange={(event) => setColumnSearch(event.target.value)} /></label>
       <div className="lead-column-list" role="group" aria-label="Choose visible columns" aria-busy={columnSaving}>
@@ -190,15 +227,14 @@ export default function LeadsWorkspace({ initialFilter, dashboard = false }: { i
       {columnSaving && <span className="visually-hidden" role="status">Saving columns...</span>}
       {columnError && <p className="lead-column-error" role="alert">{columnError}</p>}
     </section>, document.body)}
-    {filter.criteria.length > 0 && <div className="active-filters"><button className="filter-chip active-filter-clear" aria-label="Clear filter conditions" onClick={() => { setFilter({ ...filter, criteria: [] }); setPage(0); setSelected([]); }}>{filter.criteria.length} conditions <X size={12} /></button></div>}
     <div className="table-wrap"><table className="data-table leads-table" aria-label="Leads"><thead><tr><th><input type="checkbox" aria-label="Select page" checked={visible.length > 0 && visible.every((lead) => selected.includes(lead.id))} onChange={(e) => setSelected(e.target.checked ? [...new Set([...selected, ...visible.map((r) => r.id)])] : selected.filter((id) => !visible.some((r) => r.id === id)))} /></th>{columns.map((key) => <th key={key}>{availableColumns.find((c) => c.key === key)?.label}</th>)}</tr></thead><tbody>
       {visible.map((lead) => <tr key={lead.id}><td><input type="checkbox" aria-label={`Select ${lead.name}`} checked={selected.includes(lead.id)} onChange={(e) => setSelected(e.target.checked ? [...selected, lead.id] : selected.filter((id) => id !== lead.id))} /></td>{columns.map((key, index) => {
         const raw = leadColumnValue(lead, key);
         const value = ["createdAt", "modifiedAt", "lastVisitAt"].includes(key) ? formatDateTime(String(raw ?? "")) || "—" : raw === "" || raw === undefined ? "—" : raw;
         return <td key={key}>{key === "name" ? <Link className="lead-cell" href={`/leads/${lead.id}`} prefetch={false}>{lead.name}</Link> : key === "stage" ? <StageBadge stage={lead.stage || "No stage"} /> : index === 0 ? <Link href={`/leads/${lead.id}`} prefetch={false}>{value}</Link> : value}</td>;
       })}</tr>)}
-      {!rows.length && <tr><td className="leads-empty-cell" colSpan={columns.length + 1}><div className="leads-empty-state"><span className="leads-empty-icon"><Users size={26} aria-hidden="true" /></span><strong>No leads match.</strong><p>Create a lead or change filters.</p></div></td></tr>}
-    </tbody></table></div><div className="table-footer"><span>{rows.length ? page * 50 + 1 : 0}–{page * 50 + rows.length} leads{data.hasMore ? " · More available" : ""}</span><div className="heading-actions"><button className="button button-secondary button-small" disabled={page === 0 || loading || queryFilter !== filter} onClick={() => { setPage(page - 1); setSelected([]); }}>Previous</button><span>Page {page + 1}</span><button className="button button-secondary button-small" disabled={!data.hasMore || loading || queryFilter !== filter || Boolean(validation)} onClick={() => { setCursors([...cursors.slice(0, page + 1), data.nextCursor]); setPage(page + 1); setSelected([]); }}>Next</button></div></div></section>
+      {!rows.length && <tr><td className="leads-empty-cell" colSpan={columns.length + 1}><div className="leads-empty-state"><span className="leads-empty-icon"><Users size={26} aria-hidden="true" /></span><strong>{resultsLoading ? "Loading leads..." : "No leads match."}</strong>{!resultsLoading && <p>Create a lead or change filters.</p>}</div></td></tr>}
+    </tbody></table></div><div className="table-footer"><span>{rows.length ? (pageSize === "all" ? 1 : page * pageSize) : 0}–{pageSize === "all" ? rows.length : page * pageSize + rows.length} leads{pageSize !== "all" && data.hasMore ? " · More available" : ""}</span><label className="lead-page-size">Rows per page<select aria-label="Leads per page" value={pageSize} onChange={event => changePageSize(event.target.value)}><option value={10}>10</option><option value={20}>20</option><option value={50}>50</option><option value={100}>100</option><option value="all">All matching</option></select></label><div className="heading-actions"><button className="button button-secondary button-small" disabled={page === 0 || resultsLoading || pageSize === "all"} onClick={() => { setPage(page - 1); setSelected([]); }}>Previous</button><span>Page {page + 1}</span><button className="button button-secondary button-small" disabled={!data.hasMore || resultsLoading || pageSize === "all" || Boolean(validation)} onClick={() => { setCursors([...cursors.slice(0, page + 1), data.nextCursor]); setPage(page + 1); setSelected([]); }}>Next</button></div></div></section>
     </div>
     </div>
     <dialog ref={bulkDialogRef} className="panel modal bulk-action-modal lead-bulk-dialog" aria-labelledby="lead-bulk-title" onCancel={event => { if (busy) event.preventDefault(); else setBulkAction(null); }}>

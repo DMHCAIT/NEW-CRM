@@ -211,6 +211,35 @@ test("new/import metadata requests never invoke the lead query", async () => {
   assert.deepEqual((await result.json()).leads,[]);
 });
 
+test("lead API accepts only the supported page sizes and forwards the selected size", async () => {
+  let pageSize = 0, pageReads = 0;
+  const route = load("src\\app\\api\\leads\\route.ts", {
+    "next/server": { NextResponse: Response },
+    "@/lib/crm-data": {},
+    "@/lib/server/auth": { ...auth, requireUser: async permission => {
+      assert.equal(permission, "leads.view");
+      return { user: { id: "actor" }, supabase: {} };
+    } },
+    "@/lib/live-leads": {},
+    "@/lib/server/login": {},
+    "@/lib/lead-filters": filters,
+    "@/lib/server/lead-query": {
+      queryParameters: leadQuery.queryParameters,
+      fetchLeadPage: async (_client, _query, size) => {
+        pageSize = size;
+        pageReads++;
+        return { leads: [], hasMore: false, nextCursor: null };
+      },
+    },
+  });
+  const valid = await route.GET(new Request("https://crm.example/api/leads?metadata=0&pageSize=20"));
+  assert.equal(valid.status, 200);
+  assert.equal(pageSize, 20);
+  const invalid = await route.GET(new Request("https://crm.example/api/leads?metadata=0&pageSize=25"));
+  assert.equal(invalid.status, 400);
+  assert.equal(pageReads, 1);
+});
+
 const reports = load("src\\lib\\reports.ts",{ "@/lib/lead-filters": filters });
 function exporter(pages, failureAt = -1) {
   const calls = [], errors = [];

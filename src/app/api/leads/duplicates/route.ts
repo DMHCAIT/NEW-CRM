@@ -12,7 +12,7 @@ export async function GET(request: Request) {
     const checkPhone = phone.replace(/\D/g, "").length >= 7 ? normalizePhone(phone, countryCode) : "";
     const checkEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : "";
     if (!checkPhone && !checkEmail) return NextResponse.json({ matches: [] });
-    const { data, error } = await supabase.rpc("find_live_lead_duplicates", { check_phone: checkPhone, check_email: checkEmail });
+    const { data, error } = await supabase.rpc("find_live_lead_duplicates", { check_phone: checkPhone, check_email: checkEmail, check_country_code: countryCode });
     dbError(error);
     return NextResponse.json({ matches: data ?? [] });
   } catch (error) { return jsonError(error); }

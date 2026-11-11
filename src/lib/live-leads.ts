@@ -3,8 +3,8 @@ import { HttpError } from "@/lib/server/auth";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { CurrentUser } from "@/lib/types";
 import { DEFAULT_LEAD_PICKLISTS, LEAD_PICKLIST_KEYS } from "@/lib/lead-picklists";
-import { normalizePhone } from "@/lib/lead-phone";
-export { normalizePhone } from "@/lib/lead-phone";
+import { countryCodeMatchesOptions, normalizePhone } from "@/lib/lead-phone";
+export { countryCallingPrefix, normalizePhone } from "@/lib/lead-phone";
 
 export const leadConfiguration = z.object({
   duplicateFields: z.enum(["phone_email", "phone", "email"]).default("phone_email"),
@@ -75,7 +75,7 @@ export function parseLead(value: unknown) {
   const v = result.data;
   const normalizedPhone = normalizePhone(v.phone, v.countryCode);
   return {
-    name: v.name, phone: `${v.phone.startsWith("+") || /\(\+\d+/.test(v.countryCode) ? "+" : ""}${normalizedPhone}`,
+    name: v.name, phone: `+${normalizedPhone}`,
     country_code: v.countryCode || null, normalized_phone: normalizedPhone,
     alt_phone: v.altPhone || null, email: v.email || null, normalized_email: v.email?.toLowerCase() || null,
     country: v.country || null, billing_address: v.billingAddress, course: v.course || null, qualification: v.qualification || null,
@@ -97,7 +97,9 @@ export function validateNewLeadFields(input: ReturnType<typeof parseLead>, confi
   ];
   for (const [field, value, options] of required) {
     if (!value) throw new HttpError(400, `${field} is required.`);
-    if (options.length && !options.includes(value)) throw new HttpError(400, `Choose a valid ${field}.`);
+    if (options.length && !options.includes(value) && !(field === "countryCode" && countryCodeMatchesOptions(value, options))) {
+      throw new HttpError(400, `Choose a valid ${field}.`);
+    }
   }
   if (!input.stage_id) throw new HttpError(400, "Stage is required.");
 }

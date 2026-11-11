@@ -15,13 +15,16 @@ import { leadCallNumber } from "@/lib/lead-phone";
 import { DEFAULT_LEAD_PICKLISTS } from "@/lib/lead-picklists";
 import { SectionLoading } from "@/components/section-loading";
 import { LeadEmailComposer } from "@/components/lead-email-composer";
+import { LeadNoteComposer } from "@/components/lead-note-composer";
+import { NoteImageAttachments } from "@/components/note-image-attachments";
+import type { NoteImage, NoteImageInput } from "@/lib/note-images";
 
 const loadInvoiceWorkspace = () => import("@/components/invoice-workspace").then(module => module.InvoiceWorkspace);
 const loadCourseCatalog = () => import("@/components/course-catalog").then(module => module.CourseCatalog);
 const InvoiceWorkspace = dynamic(loadInvoiceWorkspace, { loading: () => <SectionLoading title="Invoices" /> });
 const CourseCatalog = dynamic(loadCourseCatalog, { loading: () => <SectionLoading title="Courses" /> });
 
-type Timeline = { id: string; content?: string; description?: string; type?: string; created_at: string; user_id: string | null; meta?: { actor_name?: string; changes?: Record<string, { before: unknown; after: unknown; before_label?: string; after_label?: string }> } };
+type Timeline = { id: string; content?: string; images?: NoteImage[]; description?: string; type?: string; created_at: string; user_id: string | null; meta?: { actor_name?: string; changes?: Record<string, { before: unknown; after: unknown; before_label?: string; after_label?: string }> } };
 type DuplicateOwner = { assignee: string; merge_target_id: string | null };
 type DetailData = {
   lead: Lead & { customFields: Record<string, string> }; stages: StageRow[]; profiles: Profile[]; user: CurrentUser; configuration: LeadConfiguration;
@@ -66,6 +69,7 @@ export default function LeadDetailPage() {
   const [historyLimit, setHistoryLimit] = useState(25);
   const [preparationError, setPreparationError] = useState("");
   const [preparationAttempt, setPreparationAttempt] = useState(0);
+  const [noteImages, setNoteImages] = useState<NoteImageInput[]>([]);
   const modifiedAt = data?.lead.id === id ? data.lead.modifiedAt : undefined;
   const userId = data?.user.id;
   const canViewInvoices = data?.user.permissions.includes("invoices.view") ?? false;
@@ -102,7 +106,7 @@ export default function LeadDetailPage() {
     });
     return () => { active = false; };
   }, [id, modifiedAt, userId, canViewInvoices, canEditLead, preparationAttempt]);
-  useEffect(() => { setEmailContent(""); setSubject(""); }, [id]);
+  useEffect(() => { setNoteContent(""); setNoteImages([]); setEmailContent(""); setSubject(""); }, [id]);
   async function reload() {
     await reloadData();
     setPreparationAttempt(value => value + 1);
@@ -187,9 +191,10 @@ export default function LeadDetailPage() {
     {!rows.length && <p className="empty-notes">{empty}</p>}
     {rows.slice(0, historyLimit).map((row, index) => <div className="lead-timeline-entry" key={row.id}>
       {(index === 0 || new Date(row.created_at).toDateString() !== new Date(rows[index - 1].created_at).toDateString()) && <div className="lead-timeline-day">{new Intl.DateTimeFormat("en-IN", { dateStyle: "full" }).format(new Date(row.created_at))}</div>}
-      <article className={`timeline-item lead-event-${row.type ?? (row.content ? "note" : "activity")}`}><span className="timeline-dot" /><div className="lead-event-card">
-      <div className="lead-event-heading"><div className="lead-event-summary"><strong className="timeline-title">{row.meta?.actor_name || data.profiles.find(profile => profile.id === row.user_id)?.fullName || (row.user_id ? "User name unavailable (legacy record)" : "System")}</strong><span className="lead-event-category">{row.content ? "Note" : row.type === "call" ? "Call activity" : "Record activity"}</span></div><time dateTime={row.created_at}>{formatDateTime(row.created_at)}</time></div>
-      <p>{row.content ? "Added a note" : row.description}</p>{row.content && <p>{row.content}</p>}
+      <article className={`timeline-item lead-event-${row.type ?? (row.content !== undefined ? "note" : "activity")}`}><span className="timeline-dot" /><div className="lead-event-card">
+      <div className="lead-event-heading"><div className="lead-event-summary"><strong className="timeline-title">{row.meta?.actor_name || data.profiles.find(profile => profile.id === row.user_id)?.fullName || (row.user_id ? "User name unavailable (legacy record)" : "System")}</strong><span className="lead-event-category">{row.content !== undefined ? "Note" : row.type === "call" ? "Call activity" : "Record activity"}</span></div><time dateTime={row.created_at}>{formatDateTime(row.created_at)}</time></div>
+      <p>{row.content !== undefined ? "Added a note" : row.description}</p>{row.content && <p>{row.content}</p>}
+      {row.images && row.images.length > 0 && <NoteImageAttachments key={`${id}-${row.id}`} leadId={id} images={row.images} />}
       {row.meta?.changes && <ul className="lead-change-list">{Object.entries(row.meta.changes).filter(([, change]) => JSON.stringify(change.before) !== JSON.stringify(change.after)).flatMap(([key, change]) => {
         if (key === "custom_fields") {
           const before = isRecord(change.before) ? change.before : {}, after = isRecord(change.after) ? change.after : {};
@@ -303,14 +308,16 @@ export default function LeadDetailPage() {
     })} onConnect={() => void act(async () => {
       const result = await apiRequest<{ url: string }>("/api/integrations/gmail/connect", { method: "POST" }); window.location.assign(result.url);
     })} />}
-    {tab === "note" && overviewTab === "overview" && can("leads.edit") && <section className={`detail-overview lead-compose-section lead-compose-${tab}`}>{sectionIntro("Add a note", "Capture your conversation, decisions and next steps. Notes stay with this lead.", FileText)}<form onSubmit={(e) => { e.preventDefault(); const action = tab; void act(async () => {
-      await apiRequest(`/api/leads/${id}/actions`, { body: { action, content: noteContent } });
-      setNoteContent("");
-      await reload(); setNotice("Note added.");
-    }); }} className="live-update-form">
-      <label className="form-field">Note<textarea required maxLength={10000} rows={5} value={noteContent} onChange={e => setNoteContent(e.target.value)} /></label>
-      <div className="lead-compose-footer"><span>{noteContent.length.toLocaleString()} / 10,000 characters</span><button className="button button-primary" disabled={busy || !noteContent.trim()}>{busy ? "Saving..." : "Add note"}</button></div>
-    </form></section>}
+    {tab === "note" && overviewTab === "overview" && can("leads.edit") && <section className={`detail-overview lead-compose-section lead-compose-${tab}`}>{sectionIntro("Add a note", "Capture your conversation, decisions and next steps. Notes stay with this lead.", FileText)}<LeadNoteComposer key={id} disabled={busy} content={noteContent} onContentChange={content => { if (activeLeadId.current === id) setNoteContent(content); }} images={noteImages} onImagesChange={images => { if (activeLeadId.current === id) setNoteImages(images); }} onSave={async (content, images) => {
+      setBusy(true); setError(""); setNotice("");
+      try {
+        await apiRequest(`/api/leads/${id}/actions`, { body: { action: "note", content, images } });
+        if (activeLeadId.current !== id) return;
+        setNotice("Note added.");
+        try { await reload(); }
+        catch (failure) { setError(`Note saved, but the timeline could not refresh: ${failure instanceof Error ? failure.message : "Reload this lead to see it."}`); }
+      } finally { setBusy(false); }
+    }} /></section>}
     {tab === "note" && <section aria-label="Notes timeline" className="lead-section-history"><div className="detail-history-heading">{sectionIntro("Notes timeline", "Notes and conversations, newest first", FileText)}</div>{history(data.notes, "No notes yet. Open Notes to add your first note.")}</section>}
     {<>
     {tab === "email" && <section aria-label="Email timeline" className="lead-section-history"><div className="detail-history-heading">{sectionIntro("Email timeline", "Incoming and outgoing messages, newest first", Mail)}</div><div className="timeline-list">

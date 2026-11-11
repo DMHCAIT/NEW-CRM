@@ -189,8 +189,8 @@ const cases = [
   ["access", "src\\components\\access-editor.tsx", { component: "AccessEditor", states: [accessData, "counselor", {}, "", "", false] }],
   ["access-users", "src\\components\\access-editor.tsx", { component: "AccessEditor", props: { individual: true }, states: [accessData, "", {}, "", "", false] }],
   ["leads", "src\\app\\leads\\page.tsx", { overrides: { "@/lib/live-leads-client": liveMock } }],
-  ["leads-selected", "src\\app\\leads\\page.tsx", { states: [filter, "", [lead.id], false, "", "", "", 0, null, false], overrides: { "@/lib/live-leads-client": liveMock } }],
-  ["leads-transfer", "src\\app\\leads\\page.tsx", { states: [filter, "", [lead.id], false, "", "", "", 0, null, false, "", null, false, "", [null], "transfer"], overrides: { "@/lib/live-leads-client": liveMock } }],
+  ["leads-selected", "src\\app\\leads\\page.tsx", { states: [filter, "", [lead.id], false, "", "", "", 0, 50], overrides: { "@/lib/live-leads-client": liveMock } }],
+  ["leads-transfer", "src\\app\\leads\\page.tsx", { states: [filter, "", [lead.id], false, "", "", "", 0, 50, [], "", false, null, false, "", null, false, "", [null], "transfer"], overrides: { "@/lib/live-leads-client": liveMock } }],
   ["leads-empty", "src\\app\\leads\\page.tsx", { overrides: { "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({ data: { ...live, leads: [] }, loading: false, error: "", reload() {}, setError() {} }) } } }],
   ["leads-create", "src\\app\\leads\\new\\page.tsx", { overrides: { "@/lib/live-leads-client": liveMock } }],
   ["leads-conditions", "src\\app\\leads\\page.tsx", { states: [{ ...filter, criteria: [{ id: "stage-filter", field: "stage", operator: "in", value: stages[0].name }, { id: "date-filter", field: "createdAt", operator: "between", value: "2026-10-01", secondValue: "2026-10-31" }] }, "", [], false, "", "", "", 0, ["name", "stage"], true], overrides: { "@/lib/live-leads-client": liveMock } }],
@@ -209,7 +209,7 @@ const cases = [
   ["report-list", "src\\app\\reports\\[id]\\[mode]\\page.tsx", { overrides: { "@/components/reports-data-provider": { useReportsData: () => ({ user, leads: [lead], reports: [report] }) } } }],
   ["report-count", "src\\app\\reports\\[id]\\[mode]\\page.tsx", { overrides: { "next/navigation": { useParams: () => ({ id: report.id, mode: "count" }) }, "@/components/reports-data-provider": { useReportsData: () => ({ user, leads: [lead], reports: [report] }) } } }],
   ["meetings", "src\\app\\meetings\\page.tsx", { states: [true, "", null, "", new Date(2026, 9, 1)], overrides: { "../integrations/operational-ui": opMock } }],
-  ["invoices", "src\\app\\invoices\\page.tsx", { states: [true, "", "", "", 0, "", "", "", "", lead.id, null, "", "", "course-1", "DMHCA", "INR", "one_shot"], overrides: { "@/app/integrations/operational-ui": opMock } }],
+  ["invoices", "src\\app\\invoices\\page.tsx", { states: [true, "", "", "", 0, "", "", "", "", "", "", "", lead.id, null, "", "", "course-1", "DMHCA", "INR", "one_shot"], overrides: { "@/app/integrations/operational-ui": opMock } }],
   ["courses", "src\\app\\courses\\page.tsx", { overrides: { "@/app/integrations/operational-ui": opMock } }],
   ["invoice-detail", "src\\app\\invoices\\page.tsx", { states: [false, "", "", "invoice-1"], overrides: { "@/app/integrations/operational-ui": opMock } }],
   ["lead-invoices", "src\\app\\leads\\[id]\\page.tsx", { states: [false,false,"","","","",false,false,"","","invoices"], overrides: {
@@ -263,6 +263,17 @@ for (const [name, file, options] of cases) test(`live UI renders ${name} inside 
   if (name === "lead-import") {
     assert.match(html, /<strong>Import leads<\/strong>/);
     assert.match(html, /class="import-dropzone"/);
+    assert.match(html, /Download sample CSV/);
+    assert.match(html, /Required columns: name, phone and email/);
+    assert.match(html, /countryCode is optional/);
+    const uploadMarkup = html.slice(html.indexOf("import-dropzone"), html.indexOf("import-dropzone") + 1200);
+    const uploadLimit = uploadMarkup.match(/Up to ([\d.,\u00a0\u202f ]+) leads · Maximum file size 50 MB/);
+    assert.ok(uploadLimit, uploadMarkup);
+    assert.equal(uploadLimit[1].replace(/\D/g, ""), "200000");
+    assert.match(html, /delete both sample rows before importing/);
+    assert.match(html, /Notes are added to each lead.{0,8}Notes timeline/);
+    assert.match(html, /accept=".csv,.xlsx/);
+    assert.match(html, /choose an owner for that lead before importing/i);
   }
   if (name === "lead-detail") {
     assert.match(html, /class="lead-detail-layout lead-refined-workspace lead-crm-workspace"/);
@@ -388,13 +399,28 @@ test("shared CRM actions retain visible borders and keyboard focus", () => {
   assert.match(css, /\.nav-link:focus-visible \{ background: #254974; color: #fff; \}/);
 });
 
+test("decorative surfaces are borderless while form controls keep their boundaries", () => {
+  const globals = readFileSync(path.join(root, "src", "app", "globals.css"), "utf8");
+  const modules = readFileSync(path.join(root, "src", "app", "modules.css"), "utf8");
+  const leadsCss = readFileSync(path.join(root, "src", "app", "leads", "leads.css"), "utf8");
+  assert.match(globals, /\.panel \{ background: #fff/);
+  assert.doesNotMatch(globals, /\.panel \{[^}]*border:/);
+  assert.match(modules, /\.page-content \.panel,\s*\.page-content \[class\*="-card"\] \{ border-color: transparent; \}/);
+  assert.match(modules, /\.page-content \.panel-heading \{ border-bottom: 0; \}/);
+  assert.match(modules, /\.page-content :where\(input:not\(\[type="checkbox"\]\):not\(\[type="radio"\]\):not\(\[type="hidden"\]\), select, textarea\)[\s\S]*?border: 1px solid/);
+  assert.match(leadsCss, /\.filter-value-input \{[^}]*border: 1px solid/);
+});
+
 test("lead filters use the retained compact sidebar with columns in the results toolbar", async () => {
   const html = await renderPage("src\\app\\leads\\page.tsx", { overrides: { "@/lib/live-leads-client": liveMock } });
   const sidebar = html.match(/<aside class="lead-filter-sidebar"[\s\S]*?<\/aside>/)?.[0];
   assert.ok(sidebar);
-  for (const control of ["Search leads", "My Leads", "Condition matching", "Add condition", "Reset", "Saved filters", "Filter name", "Save filter"]) assert.ok(sidebar.includes(control), control);
+  for (const control of ["Search leads", "My Leads", "Add condition", "Reset", "Saved filters", "Filter name", "Save filter"]) assert.ok(sidebar.includes(control), control);
+  assert.doesNotMatch(sidebar, /Condition 1/);
   assert.doesNotMatch(sidebar, /class="data-table"/);
+  const results = html.match(/<div class="lead-results">[\s\S]*?<\/div><\/div><dialog/)?.[0] ?? html.slice(html.indexOf('<div class="lead-results">'));
   assert.match(html, /<\/aside><div class="lead-results">/);
+  assert.doesNotMatch(results, /aria-label="Search results"|class="active-filters"|1 conditions/);
   assert.match(html, /Columns/);
   assert.match(html, /class="leads-workspace"/);
   assert.match(html, /class="leads-view-bar"/);
@@ -407,6 +433,44 @@ test("lead filters use the retained compact sidebar with columns in the results 
   const css = readFileSync(path.join(root, "src", "app", "leads", "leads.css"), "utf8");
   assert.match(css, /grid-template-columns: 218px minmax\(0,1fr\)/);
   assert.match(css, /@media \(max-width: 940px\)/);
+  assert.match(css, /max-height: calc\(100dvh - 94px\)/);
+  assert.match(css, /\.leads-workspace \.lead-filter-sidebar \.filter-content \{ padding: 8px 10px 10px; \}/);
+  assert.match(css, /\.filter-criterion \{[^}]*gap: 4px; padding: 2px 0; margin: 0 0 4px;/);
+});
+
+test("lead page-size selector defaults to 50 and offers all supported sizes", async () => {
+  const html = await renderPage("src\\app\\leads\\page.tsx", { overrides: { "@/lib/live-leads-client": liveMock } });
+  const selector = html.match(/<select aria-label="Leads per page">[\s\S]*?<\/select>/)?.[0];
+  assert.ok(selector);
+  assert.match(selector, /<option value="50" selected="">50<\/option>/);
+  for (const size of ["10", "20", "100"]) assert.match(selector, new RegExp(`<option value="${size}">${size}<\\/option>`));
+  assert.match(selector, /<option value="all">All matching<\/option>/);
+});
+
+test("unfinished lead conditions stay in the sidebar without filtering or hiding leads", async () => {
+  const pendingFilter = { ...filter, criteria: [{ id: "condition", field: "stage", operator: "is", value: "" }] };
+  let requestPath = "";
+  const html = await renderPage("src\\components\\leads-workspace.tsx", {
+    states: [pendingFilter],
+    overrides: {
+      "@/lib/live-leads-client": {
+        ...liveMock,
+        useLiveLeadData(path) { requestPath = path; return { data: live, loading: false, error: "", reload() {}, setError() {} }; },
+      },
+    },
+  });
+  assert.match(html, /Alex Morgan/);
+  assert.match(html, /class="filter-criterion"/);
+  assert.doesNotMatch(html, /filter-validation|1 conditions|aria-label="Search results"/);
+  assert.equal(new URL(requestPath, "http://crm.local").searchParams.has("filter"), false);
+});
+
+test("invalid lead filter shows validation only beside its condition", async () => {
+  const invalidFilter = { ...filter, criteria: [{ id: "condition", field: "phone", operator: "is", value: "not a phone" }] };
+  const html = await renderPage("src\\components\\leads-workspace.tsx", { states: [invalidFilter], overrides: { "@/lib/live-leads-client": liveMock } });
+  assert.equal((html.match(/Enter a phone number containing digits\./g) ?? []).length, 1);
+  assert.match(html, /class="filter-validation" role="alert">Enter a phone number containing digits\./);
+  assert.doesNotMatch(html, /class="helper-banner" role="alert">Enter a phone number containing digits\./);
 });
 
 function elements(node) {
@@ -414,6 +478,140 @@ function elements(node) {
   if (Array.isArray(node)) return node.flatMap(elements);
   return [node, ...elements(node.props?.children)];
 }
+
+function importHarness({ unassigned = false, failFirstBatch = false, failPdf = false, allDuplicates = false } = {}) {
+  const states = [], requests = [], downloads = [], reference = { current: null };
+  states[14] = false;
+  let stateIndex = 0, currentError = "", saved = [], failed = false;
+  const parsed = [
+    { name: "First student", phone: "880987650001", email: "first@example.test", assignee: unassigned ? "" : user.email },
+    { name: "Repeated student", phone: "880987650001", email: "first@example.test", assignee: unassigned ? "" : user.email },
+    { name: "Second student", phone: "880987650002", email: "second@example.test", assignee: unassigned ? "" : user.email },
+  ];
+  const Component = load("src\\app\\leads\\import\\page.tsx", {
+    react: {
+      ...React, useEffect() {}, useCallback: callback => callback, useRef: () => reference,
+      useState(initial) {
+        const key = stateIndex++;
+        if (!(key in states)) states[key] = typeof initial === "function" ? initial() : initial;
+        return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }];
+      },
+    },
+    "@/lib/live-leads-client": { useLiveLeadData: () => ({ data: live, error: currentError, loading: false, setError: value => { currentError = value; } }) },
+    "@/lib/live-leads-csv": { MAX_LEAD_IMPORT_FILE_BYTES: 50000000, MAX_LEAD_IMPORT_ROWS: 200000, parseLeadSpreadsheet: async () => parsed },
+    "@/lib/lead-import-report": { downloadLeadImportPdf: async sheet => {
+      if (failPdf) throw new Error("PDF download unavailable");
+      downloads.push({ ...sheet });
+    } },
+    "@/lib/crm-data": { ...crm, apiRequest: async (url, init = {}) => {
+      requests.push({ url, ...init });
+      if (url.startsWith("/api/leads/imports?")) return { sheets: saved, total: saved.length };
+      if (url === "/api/leads/imports") {
+        const sheet = { id: "saved-sheet", filename: init.body.filename, total_rows: init.body.totalRows,
+          imported_rows: 0, duplicate_rows: init.body.duplicates, status: init.body.totalRows === init.body.duplicates ? "completed" : "importing", created_at: "2026-11-11T09:00:00Z" };
+        saved = [sheet];
+        return { sheet };
+      }
+      if (init.method === "DELETE") { saved = []; return { deleted: 2 }; }
+      assert.equal(url, "/api/leads/import");
+      if (init.body.checkOnly) return { duplicates: allDuplicates ? [0, 1] : [] };
+      if (failFirstBatch && !failed) { failed = true; throw new Error("Connection interrupted"); }
+      saved = saved.map(sheet => ({ ...sheet, imported_rows: init.body.rows.length, status: "completed" }));
+      return { imported: init.body.rows.length, skipped: 0 };
+    } },
+  }).default;
+  return {
+    requests, downloads,
+    render() { stateIndex = 0; return Component(); },
+    async read() {
+      const input = elements(this.render()).find(node => node.props?.["aria-label"] === "CSV or Excel file");
+      await input.props.onChange({ target: { files: [{ name: "November admissions.xlsx", size: 100 }] } });
+    },
+  };
+}
+
+test("import review compactly assigns owners and shows normalized phones without a wide all-column preview", async () => {
+  const ui = importHarness({ unassigned: true });
+  await ui.read();
+  let tree = ui.render(), nodes = elements(tree);
+  assert.equal(nodes.find(node => node.type === "button" && node.props.children === "Import validated leads").props.disabled, true);
+  const html = renderToStaticMarkup(tree);
+  assert.match(html, /import-review has-assignment/);
+  assert.match(html, /2 pending/);
+  assert.match(html, /\+880987650001/);
+  assert.match(html, /Apply to all/);
+  assert.doesNotMatch(html, /First 20 of|Assign them one at a time|<th>countryCode/);
+  if (process.env.UI_FIXTURE_DIR) {
+    mkdirSync(process.env.UI_FIXTURE_DIR, { recursive: true });
+    writeFileSync(path.join(process.env.UI_FIXTURE_DIR, "lead-import-review.html"), `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/styles.css"><title>Import review</title></head><body>${renderToStaticMarkup(React.createElement(shell, { user }, tree))}</body></html>`);
+  }
+  nodes.find(node => node.type === "select").props.onChange({ target: { value: id } });
+  nodes.find(node => node.type === "input" && node.props.type === "checkbox").props.onChange({ target: { checked: true } });
+  nodes = elements(ui.render());
+  nodes.find(node => node.type === "button" && node.props.children === "Assign and continue").props.onClick();
+  tree = ui.render();
+  assert.doesNotMatch(renderToStaticMarkup(tree), /Assign lead owner/);
+  assert.equal(elements(tree).find(node => node.type === "button" && node.props.children === "Import validated leads").props.disabled, false);
+});
+
+test("import completion automatically downloads exact sheet counts and confirms before deleting its leads", async () => {
+  const ui = importHarness();
+  await ui.read();
+  const button = elements(ui.render()).find(node => node.type === "button" && node.props.children === "Import validated leads");
+  await button.props.onClick();
+  assert.equal(ui.downloads.length, 1);
+  assert.equal(ui.downloads[0].filename, "November admissions.xlsx");
+  assert.equal(ui.downloads[0].total_rows, 3);
+  assert.equal(ui.downloads[0].imported_rows, 2);
+  assert.equal(ui.downloads[0].duplicate_rows, 1);
+  assert.equal(ui.downloads[0].status, "completed");
+  const batch = ui.requests.find(request => request.body?.importId);
+  assert.equal(batch.body.rows[0].phone, "+880987650001");
+  assert.equal(batch.body.batchIndex, 0);
+  assert.equal(batch.body.importId, "saved-sheet");
+  let tree = ui.render();
+  assert.match(renderToStaticMarkup(tree), /2 imported/);
+  elements(tree).find(node => node.props?.["aria-label"] === "Delete November admissions.xlsx and its imported leads").props.onClick();
+  assert.equal(ui.requests.filter(request => request.method === "DELETE").length, 0);
+  tree = ui.render();
+  assert.match(renderToStaticMarkup(tree), /Existing duplicate leads are not affected/);
+  elements(tree).find(node => node.type === "button" && node.props.children === "Delete sheet and leads").props.onClick();
+  await new Promise(setImmediate);
+  assert.equal(ui.requests.filter(request => request.method === "DELETE").length, 1);
+  assert.doesNotMatch(renderToStaticMarkup(ui.render()), />2 imported<|Delete sheet and leads/);
+});
+
+test("interrupted import retries the same sheet and batch, while PDF errors never claim download success", async () => {
+  const ui = importHarness({ failFirstBatch: true });
+  await ui.read();
+  await elements(ui.render()).find(node => node.type === "button" && node.props.children === "Import validated leads").props.onClick();
+  assert.equal(ui.downloads.length, 0);
+  await elements(ui.render()).find(node => node.type === "button" && node.props.children === "Retry import").props.onClick();
+  assert.equal(ui.requests.filter(request => request.url === "/api/leads/imports").length, 1);
+  const batches = ui.requests.filter(request => request.body?.importId);
+  assert.deepEqual(batches[0].body, batches[1].body);
+  assert.equal(ui.downloads[0].imported_rows, 2);
+  const brokenPdf = importHarness({ failPdf: true });
+  await brokenPdf.read();
+  await elements(brokenPdf.render()).find(node => node.type === "button" && node.props.children === "Import validated leads").props.onClick();
+  const html = renderToStaticMarkup(brokenPdf.render());
+  assert.match(html, /Import completed, but the PDF could not be downloaded/);
+  assert.doesNotMatch(html, /PDF summary downloaded/);
+  assert.match(html, /Download PDF for November admissions.xlsx/);
+});
+
+test("all-duplicate sheets still save history and automatically download a zero-import PDF", async () => {
+  const ui = importHarness({ allDuplicates: true });
+  await ui.read();
+  const button = elements(ui.render()).find(node => node.type === "button" && node.props.children === "Save duplicate report");
+  assert.equal(button.props.disabled, false);
+  await button.props.onClick();
+  assert.equal(ui.downloads.length, 1);
+  assert.equal(ui.downloads[0].total_rows, 3);
+  assert.equal(ui.downloads[0].imported_rows, 0);
+  assert.equal(ui.downloads[0].duplicate_rows, 3);
+  assert.equal(ui.requests.filter(request => request.body?.importId).length, 0);
+});
 
 function invoiceHarness(data = operations["/api/invoices"], initial = [], overrides = {}, stateOverrides = {}, effects) {
   const states = [...initial], requests = [], urls = [];
@@ -1097,6 +1295,64 @@ test("invoice pagination bounds rendered rows while filters and totals include l
   assert.equal(allView.props.children[1].props.children, 61);
 });
 
+test("all lead selection loads every cursor page using bounded requests", async () => {
+  const firstCursor = { id: "20000000-0000-4000-8000-000000000001", createdAt: "2026-10-21T09:00:00Z" };
+  const calls = [];
+  const api = load("src\\lib\\live-leads-client.tsx", {
+    "@/lib/crm-data": {
+      ...crm,
+      apiRequest: async (url, options) => {
+        calls.push({ url, options });
+        return calls.length === 1
+          ? { leads: [{ id: "first" }], hasMore: true, nextCursor: firstCursor }
+          : { leads: [{ id: "later" }], hasMore: false, nextCursor: null };
+      },
+    },
+  });
+  const rows = await api.loadAllLeadRows(filter);
+  assert.deepEqual(rows.map(row => row.id), ["first", "later"]);
+  assert.equal(calls.length, 2);
+  for (const call of calls) {
+    const url = new URL(call.url, "http://crm.local");
+    assert.equal(url.searchParams.get("pageSize"), "100");
+    assert.equal(url.searchParams.get("metadata"), "0");
+    assert.equal(call.options.maxAgeMs, 0);
+  }
+  assert.equal(new URL(calls[1].url, "http://crm.local").searchParams.get("cursor"), JSON.stringify(firstCursor));
+});
+
+test("all lead selection rejects a repeated pagination cursor", async () => {
+  const repeatedCursor = { id: "20000000-0000-4000-8000-000000000001", createdAt: "2026-10-21T09:00:00Z" };
+  const api = load("src\\lib\\live-leads-client.tsx", {
+    "@/lib/crm-data": {
+      ...crm,
+      apiRequest: async () => ({ leads: [], hasMore: true, nextCursor: repeatedCursor }),
+    },
+  });
+  await assert.rejects(api.loadAllLeadRows(filter), /page cursor did not advance/);
+});
+
+test("invoice register filters by invoice month and inclusive invoice-date range", () => {
+  const base = operations["/api/invoices"];
+  const invoices = [
+    { ...base.invoices[0], id: "jan-invoice", invoice_no: "INV-JAN", invoice_date: "2026-01-31" },
+    { ...base.invoices[0], id: "feb-early", invoice_no: "INV-FEB-01", invoice_date: "2026-02-01" },
+    { ...base.invoices[0], id: "feb-late", invoice_no: "INV-FEB-28", invoice_date: "2026-02-28" },
+  ];
+  const ui = invoiceHarness({ ...base, invoices });
+  const nodes = () => elements(ui.render());
+  const rows = () => nodes().find(node => node.type === "tbody").props.children;
+  nodes().find(node => node.props?.["aria-label"] === "Invoice month").props.onChange({ target: { value: "2026-02" } });
+  assert.deepEqual(rows().map(row => row.key), ["feb-early", "feb-late"]);
+  nodes().find(node => node.props?.["aria-label"] === "Invoice date from").props.onChange({ target: { value: "2026-02-15" } });
+  assert.deepEqual(rows().map(row => row.key), ["feb-late"]);
+  nodes().find(node => node.props?.["aria-label"] === "Invoice date to").props.onChange({ target: { value: "2026-02-28" } });
+  assert.deepEqual(rows().map(row => row.key), ["feb-late"], "the date range includes invoices on its end date");
+  nodes().find(node => node.props?.["aria-label"] === "Invoice date to").props.onChange({ target: { value: "2026-02-27" } });
+  assert.equal(rows().length, 0, "the date range excludes invoices after its end date");
+  assert.ok(nodes().some(node => node.type === "h3" && node.props.children === "No matching invoices"));
+});
+
 test("course catalog searches all records, paginates, omits company setup and preserves embedded scope", () => {
   const data = { ...operations["/api/courses"], courses: Array.from({ length: 61 }, (_, index) => ({ ...operations["/api/courses"].courses[0], id: `course-${index}`, name: `Course ${String(index).padStart(3, "0")}`, is_active: index !== 60 })) };
   const states = [];
@@ -1171,9 +1427,11 @@ test("lead record requests section-specific data and never renders stale section
 
 test("shared CRM theme preserves field boundaries, focus and error states", () => {
   const css = readFileSync(path.join(root, "src", "app", "globals.css"), "utf8");
+  const modules = readFileSync(path.join(root, "src", "app", "modules.css"), "utf8");
   assert.doesNotMatch(css, /border-color: transparent !important|outline: none !important/);
   assert.match(css, /:focus-visible \{ outline: 2px solid var\(--accent\)/);
-  assert.match(css, /\.panel \{ border: 1px solid var\(--border\)/);
+  assert.doesNotMatch(css, /\.panel \{[^}]*border:/);
+  assert.match(modules, /\.page-content :where\(input:not\(\[type="checkbox"\]\):not\(\[type="radio"\]\):not\(\[type="hidden"\]\), select, textarea\)[\s\S]*?border: 1px solid/);
   assert.match(css, /\[aria-invalid="true"\][\s\S]*?background-color: #fff1f0/);
   assert.match(css, /aria-selected="true"[^{]*\{[^}]*border-bottom: 3px solid #1677d2/);
 });
@@ -1977,7 +2235,7 @@ test("organized Leads workspace retains permissions and selection actions", asyn
   assert.match(html, /aria-label="Lead results"/);
   assert.match(html, /Columns/);
   const selectedHtml = await renderPage("src\\app\\leads\\page.tsx", {
-    states: [filter, "", [lead.id], false, "", "", "", 0, null, false],
+    states: [filter, "", [lead.id], false, "", "", "", 0, 50],
     overrides: { "@/lib/live-leads-client": liveMock },
   });
   assert.match(selectedHtml, /class="lead-bulk-actions"/);
@@ -1988,7 +2246,7 @@ test("selected lead actions respect roles even when a counselor has assignment a
   for (const role of ["counselor", "team_lead", "manager", "admin", "super_admin"]) {
     const data = { ...live, user: { ...user, profile: { ...profile, role } } };
     const html = await renderPage("src\\app\\leads\\page.tsx", {
-      states: [filter, "", [lead.id], false, "", "", "", 0, null, false],
+      states: [filter, "", [lead.id], false, "", "", "", 0, 50],
       overrides: { "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({ data, loading: false, error: "", reload() {}, setError() {} }) } },
     });
     const bar = html.match(/<section class="lead-bulk-actions"[\s\S]*?<\/section>/)[0];
@@ -2004,25 +2262,27 @@ test("selected lead actions respect roles even when a counselor has assignment a
 
 test("transfer dialog requires an assignee and defaults to keeping every lead's current stage", async () => {
   const html = await renderPage("src\\app\\leads\\page.tsx", {
-    states: [filter, "", [lead.id], false, "", "", "", 0, null, false, "", null, false, "", [null], "transfer"],
+    states: [filter, "", [lead.id], false, "", "", "", 0, 50, [], "", false, null, false, "", null, false, "", [null], "transfer"],
     overrides: { "@/lib/live-leads-client": liveMock },
   });
   assert.match(html, /aria-label="Transfer assignee"/);
   assert.match(html, /aria-label="Bulk stage"/);
   assert.match(html, /Keep current stage/);
-  assert.doesNotMatch(html, /<select/);
+  const dialog = html.match(/<dialog[\s\S]*?<\/dialog>/)?.[0];
+  assert.ok(dialog);
+  assert.doesNotMatch(dialog, /<select/);
   assert.match(html, /disabled="">Confirm transfer<\/button>/);
 });
 
 test("bulk transfer sends assignee with an optional stage in one PATCH and retains failed selections", async () => {
   for (const stageId of ["", stages[1].id]) {
-    const states = [filter, "", [lead.id, "lead-2"], false, "", "", "", 0, null, false, "", null, false, "", [null], null];
+    const states = [filter, "", [lead.id, "lead-2"], false, "", "", "", 0, 50, [], "", false, null, false, "", null, false, "", [null], null];
     const refs = [];
     let index = 0, refIndex = 0, error = "";
     const requests = [];
     const data = { ...live, leads: [lead, { ...lead, id: "lead-2", stageId: stages[2].id }] };
     const Component = load("src\\components\\leads-workspace.tsx", {
-      react: { ...React, useEffect() {}, useLayoutEffect() {},
+      react: { ...React, useEffect() {}, useLayoutEffect() {}, useMemo: factory => factory(),
         useRef(initial) { const key = refIndex++; return refs[key] ?? (refs[key] = { current: initial }); },
         useState(initial) { const key = index++; if (!(key in states)) states[key] = initial; return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }]; },
       },
@@ -2035,7 +2295,7 @@ test("bulk transfer sends assignee with an optional stage in one PATCH and retai
     }).default;
     const render = () => { index = 0; refIndex = 0; return elements(Component()); };
     render().find(node => node.type === "button" && node.props["aria-label"] === "Transfer").props.onClick();
-    assert.equal(states[15], "transfer");
+    assert.equal(states[19], "transfer");
     const selects = render();
     const assignee = selects.find(node => node.props?.ariaLabel === "Transfer assignee");
     const stage = selects.find(node => node.props?.ariaLabel === "Bulk stage");
@@ -2203,6 +2463,10 @@ test("live filter menus use real configuration, multi-select values and safe fie
   let current = { ...filter, criteria: [{ id: "condition", field: "stage", operator: "is", value: "" }] };
   const render = () => elements(actualLeads.LiveFilterEditor({ filter: current, leads: [], stages, profiles: [profile], onChange: next => { current = next; } }));
   const menu = label => render().find(node => node.props?.ariaLabel === label);
+  assert.equal(render().some(node => node.props?.["aria-label"] === "Condition matching"), false);
+  current = { ...current, criteria: [...current.criteria, { id: "condition-2", field: "stage", operator: "is", value: "" }] };
+  assert.equal(render().some(node => node.props?.["aria-label"] === "Condition matching"), true);
+  current = { ...current, criteria: current.criteria.slice(0, 1) };
   assert.deepEqual(menu("Filter value").props.options.map(option => option.label), stages.map(stage => stage.name).sort());
   menu("Filter value").props.onChange(stages[0].name);
   assert.equal(current.criteria[0].value, stages[0].name);
@@ -2300,6 +2564,7 @@ test("lead workspace keeps notes separate from overview and email history", asyn
     let index=0,refIndex=0;
     const data={...live,lead,notes:[],emails:[],activities:[],scheduledCalls:[]};
     const Component=load("src\\app\\leads\\[id]\\page.tsx",{
+      "@/components/lead-note-composer": { LeadNoteComposer: function LeadNoteComposer(props) { return React.createElement("textarea", { value: props.content, readOnly: true }); } },
       react:{...React,useEffect(){},useRef(initial){const key=refIndex++;return refs[key]??(refs[key]={current:initial});},
         useState(initial){const key=index++;if(!(key in states))states[key]=typeof initial==="function"?initial():initial;return[states[key],value=>{states[key]=value;}];}},
       "@/lib/crm-data":crm,
@@ -2312,7 +2577,11 @@ test("lead workspace keeps notes separate from overview and email history", asyn
       assert.match(renderToStaticMarkup(render()),new RegExp(`${label} views`));
       if(section!=="calls"){
         if (section === "email") nodes().find(node => node.type?.name === "LeadEmailComposer").props.onContent(`${section} draft`);
-        else nodes().find(node=>node.type==="textarea").props.onChange({target:{value:`${section} draft`}});
+        else {
+          const composer = nodes().find(node => node.type?.name === "LeadNoteComposer");
+          composer.props.onContentChange(`${section} draft`);
+          composer.props.onImagesChange([{ filename: "draft.png", type: "image/png", data: "draft-image" }]);
+        }
       }
       nodes().find(node=>node.props?.id===`lead-${section}-tab-timeline`).props.onClick();
       assert.match(renderToStaticMarkup(render()),new RegExp(`${section==="email"?"Email":label} timeline`));
@@ -2321,7 +2590,11 @@ test("lead workspace keeps notes separate from overview and email history", asyn
       nodes().find(node=>node.props?.role==="tablist").props.onKeyDown({key:"Home",preventDefault(){},currentTarget:{querySelector:selector=>({focus(){focused=selector;}})}});
       assert.equal(focused,`#lead-${section}-tab-overview`);
       if (section === "email") assert.equal(nodes().find(node => node.type?.name === "LeadEmailComposer").props.content, `${section} draft`);
-      else if(section!=="calls")assert.equal(nodes().find(node=>node.type==="textarea").props.value,`${section} draft`);
+      else if(section!=="calls") {
+        const composer = nodes().find(node => node.type?.name === "LeadNoteComposer");
+        assert.equal(composer.props.content, `${section} draft`);
+        assert.equal(composer.props.images[0].filename, "draft.png");
+      }
     }
     assert.equal(states[2],"note draft");
     assert.equal(states[3],"email draft");
@@ -2332,6 +2605,24 @@ test("lead workspace keeps notes separate from overview and email history", asyn
   assert.match(html, /Notes timeline/);
   assert.doesNotMatch(html, /Overview timeline|Email timeline|Edit lead|SMTP account/);
   assert.doesNotMatch(html, /No records yet/);
+});
+
+test("image-only notes render compact attachments without loading full timeline images", async () => {
+  const html = await renderPage("src\\app\\leads\\[id]\\page.tsx", {
+    states: [false,false,"","","","",false,false,"","","note"],
+    overrides: { "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({
+      data: { ...live, lead, notes: [{ id: "image-note", content: "", user_id: id, created_at: lead.createdAt, images: [{ id: "note-image", filename: "admission.png" }] }], activities: [], emails: [] },
+      loading: false, error: "", reload() {}, setError() {},
+    }) } },
+  });
+  assert.match(html, /Upload image/);
+  assert.match(html, /Paste with Ctrl/);
+  assert.match(html, /Added a note/);
+  assert.match(html, /lead-event-note/);
+  assert.match(html, /aria-label="View admission.png" aria-haspopup="dialog"/);
+  assert.match(html, /View image/);
+  assert.doesNotMatch(html, /src="\/api\/leads\/report-1\/notes\/note-image"|target="_blank"[^>]*>.*admission.png/);
+  assert.doesNotMatch(html, /<span class="lead-event-category">Record activity/);
 });
 
 test("lead overview loads before related preparation, then prepares tabs without another click", async () => {

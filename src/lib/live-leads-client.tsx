@@ -6,7 +6,7 @@ import { Plus, RotateCcw, SlidersHorizontal, X } from "lucide-react";
 import { SearchableDropdown } from "@/components/searchable-dropdown";
 import { apiRequest, getCachedApiRead, getPendingApiRead, type StageRow } from "@/lib/crm-data";
 import type { CurrentUser, Lead, Profile } from "@/lib/types";
-import { FILTER_FIELDS, RECENT_VISIT_SOURCES, criterionError, defaultOperator, operatorNeedsValue, operatorsForField, type FilterField, type SavedLeadFilter } from "@/lib/lead-filters";
+import { FILTER_FIELDS, RECENT_VISIT_SOURCES, criterionError, criterionIsActive, defaultOperator, operatorNeedsValue, operatorsForField, type FilterField, type SavedLeadFilter } from "@/lib/lead-filters";
 import type { LeadConfiguration } from "@/lib/live-leads";
 import { DEFAULT_LEAD_PICKLISTS, type LeadPicklistKey } from "@/lib/lead-picklists";
 import type { LeadCursor, LeadPage } from "@/lib/server/lead-query";
@@ -29,6 +29,26 @@ export async function loadLeadListData(path: string, options: { maxAgeMs: number
   params.set("metadata", "0");
   const page = await apiRequest<LeadPage>(`/api/leads?${params}`, options);
   return { ...metadata, ...page };
+}
+
+export async function loadAllLeadRows(filter: SavedLeadFilter, dashboard = false): Promise<Lead[]> {
+  const leads: Lead[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: LeadCursor | null = null;
+  for (;;) {
+    const path = leadQueryPath(filter, { cursor, dashboard, pageSize: 100 });
+    const params = new URLSearchParams(path.split("?")[1]);
+    params.set("metadata", "0");
+    const page = await apiRequest<LeadPage>(`/api/leads?${params}`, { maxAgeMs: 0 });
+    leads.push(...page.leads);
+    if (!page.hasMore) return leads;
+    const nextCursorKey = JSON.stringify(page.nextCursor);
+    if (!page.nextCursor || seenCursors.has(nextCursorKey)) {
+      throw new Error("Could not load all matching leads because the page cursor did not advance.");
+    }
+    seenCursors.add(nextCursorKey);
+    cursor = page.nextCursor;
+  }
 }
 
 export function getCachedLeadListData(path: string): LiveLeadData | undefined {
@@ -153,13 +173,14 @@ export function useDebouncedValue<T>(value: T, delay = 120, enabled = true) {
 }
 
 export function leadQueryPath(filter: SavedLeadFilter, options: {
-  cursor?: LeadCursor | null; dashboard?: boolean; view?: string;
+  cursor?: LeadCursor | null; dashboard?: boolean; view?: string; pageSize?: number;
   owner?: string; stage?: string; sort?: string; offset?: number; count?: boolean;
 } = {}, base = "/api/leads") {
   const params = new URLSearchParams();
   if (filter.criteria.length || filter.query || filter.quickView === "My Leads") params.set("filter", JSON.stringify(filter));
   if (typeof window !== "undefined") params.set("timezone", Intl.DateTimeFormat().resolvedOptions().timeZone);
   if (options.cursor) params.set("cursor", JSON.stringify(options.cursor));
+  if (options.pageSize && options.pageSize !== 50) params.set("pageSize", String(options.pageSize));
   if (options.dashboard) params.set("dashboard", "1");
   if (options.view) params.set("view", options.view);
   if (options.owner) params.set("owner", options.owner);
@@ -189,7 +210,7 @@ export function LiveFilterEditor({ filter, onChange, leads, stages = [], profile
       {["All accessible leads", "My Leads"].map((view) => <button type="button" key={view} className={`filter-option${filter.quickView === view ? " active" : ""}`} aria-pressed={filter.quickView === view} onClick={() => onChange({ ...filter, quickView: view })}>{view}</button>)}
       <div className="criteria-builder">
       <div className="criteria-heading"><span className="filter-label">CONDITIONS</span><button type="button" className="text-link" onClick={addCondition}><Plus size={12} /> Add condition</button></div>
-      <div className="criteria-match" role="group" aria-label="Condition matching"><span>Match</span>{(["all", "any"] as const).map((mode) => <button type="button" key={mode} className={filter.matchMode === mode ? "selected" : ""} aria-pressed={filter.matchMode === mode} onClick={() => onChange({ ...filter, matchMode: mode })}>{mode === "all" ? "All" : "Any"}</button>)}</div>
+      {filter.criteria.length > 1 && <div className="criteria-match" role="group" aria-label="Condition matching"><span>Match</span>{(["all", "any"] as const).map((mode) => <button type="button" key={mode} className={filter.matchMode === mode ? "selected" : ""} aria-pressed={filter.matchMode === mode} onClick={() => onChange({ ...filter, matchMode: mode })}>{mode === "all" ? "All" : "Any"}</button>)}</div>}
       {filter.criteria.map((c, index) => {
       const field = FILTER_FIELDS.find((f) => f.key === c.field);
       const kind = field?.kind;
@@ -227,10 +248,9 @@ export function LiveFilterEditor({ filter, onChange, leads, stages = [], profile
             : <input className="filter-value-input" aria-label="Filter value" placeholder={kind === "date" || kind === "boolean" ? undefined : "Enter a value"} type={["last_days", "next_days"].includes(c.operator) ? "number" : kind === "date" || kind === "boolean" ? "date" : "text"} min={["last_days", "next_days"].includes(c.operator) ? 1 : undefined} value={c.value} onChange={(e) => patch({ value: e.target.value })} />}
         </>}
         {["between", "not_between", "custom_date"].includes(c.operator) && <input className="filter-value-input" type="date" aria-label="Filter end date" value={c.secondValue ?? ""} onChange={(e) => patch({ secondValue: e.target.value })} />}
-        {criterionError(c) && <p className="filter-validation" role="alert">{criterionError(c)}</p>}
+        {criterionIsActive(c) && criterionError(c) && <p className="filter-validation" role="alert">{criterionError(c)}</p>}
       </div>;
     })}
-    {!filter.criteria.length && <p className="saved-filter-empty">Add conditions to narrow your leads.</p>}
     </div>
     </div>
   </section>;

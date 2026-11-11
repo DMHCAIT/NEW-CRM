@@ -18,7 +18,9 @@ export async function GET(request: Request) {
       "Server-Timing": `auth;dur=${authenticated - started}, data;dur=${Date.now() - authenticated}`,
     } });
     const query = queryParameters(params);
-    if (params.get("metadata") === "0" || query.countOnly) return respond(await fetchLeadPage(supabase, query, view === "pipeline" ? 25 : 50));
+    const requestedPageSize = params.has("pageSize") ? Number(params.get("pageSize")) : 50;
+    if (![10, 20, 50, 100].includes(requestedPageSize)) throw new HttpError(400, "Choose a page size of 10, 20, 50 or 100.");
+    if (params.get("metadata") === "0" || query.countOnly) return respond(await fetchLeadPage(supabase, query, view === "pipeline" ? 25 : requestedPageSize));
     if (view === "pipeline") {
       const stagesRequest = fetchStages(supabase);
       const [stages, profiles, stagePages] = await Promise.all([
@@ -32,7 +34,7 @@ export async function GET(request: Request) {
       return respond({ leads: stagePages.flatMap(group => group.leads), hasMore: false, nextCursor: null, stagePages, stages, profiles, user });
     }
     const [page, stages, profiles, filters, columns, configuration] = await Promise.all([
-      params.get("metadata") === "only" ? Promise.resolve({ leads: [], hasMore: false, nextCursor: null }) : fetchLeadPage(supabase, query),
+      params.get("metadata") === "only" ? Promise.resolve({ leads: [], hasMore: false, nextCursor: null }) : fetchLeadPage(supabase, query, requestedPageSize),
       fetchStages(supabase), fetchProfiles(supabase),
       supabase.from("saved_filters").select("id,name,filter_json,pinned_to_dashboard").eq("owner_id", user.id).order("created_at"),
       supabase.from("user_columns").select("columns_json").eq("user_id", user.id).eq("view_name", "leads").maybeSingle(),

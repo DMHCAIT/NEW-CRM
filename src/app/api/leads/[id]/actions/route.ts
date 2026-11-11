@@ -7,6 +7,7 @@ import { prepareGmailSend, sendGmailMessage } from "@/lib/server/operational-gma
 import { getSupabaseAdminClient } from "@/lib/supabase/server";
 import { checkOrigin } from "@/lib/server/login";
 import { sanitizeSignature, signatureText } from "@/lib/server/email-signature";
+import { parseNoteImages } from "@/lib/server/note-images";
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
@@ -15,9 +16,14 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const id = uuid((await context.params).id);
     const lead = await fetchLead(supabase, id);
     if (!lead || lead.isArchived) throw new HttpError(404, "Lead not found.");
+    if (Number(request.headers.get("content-length") ?? 0) > 20_200_000) throw new HttpError(413, "Note attachments exceed the request size limit.");
     const body = await readJson<Record<string, unknown>>(request);
     if (body.action === "note") {
-      const { error } = await supabase.from("notes").insert({ lead_id: id, user_id: user.id, content: requireString(body.content, "Note", 10000) });
+      const images = parseNoteImages(body.images);
+      const content = images.length && body.content === "" ? "" : requireString(body.content, "Note", 10000);
+      const { error } = images.length
+        ? await supabase.rpc("add_live_lead_note", { lead_id: id, note_content: content, images_json: images })
+        : await supabase.from("notes").insert({ lead_id: id, user_id: user.id, content });
       dbError(error);
     } else if (body.action === "activity") {
       const { error } = await supabase.from("activities").insert({ lead_id: id, user_id: user.id, type: "manual", description: requireString(body.content, "Activity", 10000) });
