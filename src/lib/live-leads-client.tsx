@@ -21,10 +21,21 @@ export type LiveLeadData = {
   total?: number;
 };
 
+let leadMetadataPath = "";
+
+function getLeadListMetadata(maxAgeMs = 30000) {
+  return getCachedApiRead<LiveLeadData>(leadQueryPath(emptyFilter()), maxAgeMs)
+    ?? (leadMetadataPath ? getCachedApiRead<LiveLeadData>(leadMetadataPath, maxAgeMs) : undefined);
+}
+
 export async function loadLeadListData(path: string, options: { maxAgeMs: number }): Promise<LiveLeadData> {
   const basePath = leadQueryPath(emptyFilter());
-  const metadata = options.maxAgeMs > 0 ? getCachedApiRead<LiveLeadData>(basePath) : undefined;
-  if (!metadata || path === basePath) return apiRequest<LiveLeadData>(path, options);
+  const metadata = options.maxAgeMs > 0 ? getLeadListMetadata(options.maxAgeMs) : undefined;
+  if (!metadata || path === basePath) {
+    const result = await apiRequest<LiveLeadData>(path, options);
+    leadMetadataPath = path;
+    return result;
+  }
   const params = new URLSearchParams(path.split("?")[1]);
   params.set("metadata", "0");
   const page = await apiRequest<LeadPage>(`/api/leads?${params}`, options);
@@ -54,7 +65,7 @@ export async function loadAllLeadRows(filter: SavedLeadFilter, dashboard = false
 export function getCachedLeadListData(path: string): LiveLeadData | undefined {
   const cached = getCachedApiRead<LiveLeadData>(path);
   if (cached !== undefined) return cached;
-  const metadata = getCachedApiRead<LiveLeadData>(leadQueryPath(emptyFilter()));
+  const metadata = getLeadListMetadata();
   if (!metadata) return undefined;
   const params = new URLSearchParams(path.split("?")[1]);
   params.set("metadata", "0");
@@ -70,7 +81,7 @@ function leadDetailRecordsPath(path: string) {
 
 function getLeadDetailMetadata(path: string, maxAgeMs: number) {
   const overviewPath = `${path.split("?")[0]}?section=overview`;
-  return getCachedApiRead<Pick<LiveLeadData, "stages" | "profiles" | "configuration">>(leadQueryPath(emptyFilter()), maxAgeMs)
+  return getLeadListMetadata(maxAgeMs)
     ?? getCachedApiRead<Pick<LiveLeadData, "stages" | "profiles" | "configuration">>(overviewPath, maxAgeMs);
 }
 

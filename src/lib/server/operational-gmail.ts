@@ -6,7 +6,7 @@ import { appUrl, requireEnv } from "@/lib/server/env";
 import { decryptSession, encryptSession, encryptionKey } from "@/lib/server/login-crypto";
 import { databaseError, parseInput } from "@/lib/server/operational";
 import { getIntegrationConfig, requireIntegrationValue } from "@/lib/server/integration-settings";
-import { delegatedGmailScopes, delegatedGmailToken, oauthMailboxDomain, oauthMailboxEligible, workspaceMailbox, workspaceMailboxEligible, workspaceManaged } from "@/lib/server/gmail-delegation";
+import { delegatedGmailScopes, delegatedGmailToken, invalidateDelegatedGmailToken, oauthMailboxDomain, oauthMailboxEligible, workspaceMailbox, workspaceMailboxEligible, workspaceManaged } from "@/lib/server/gmail-delegation";
 
 export const gmailRequirements = ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI", "AUTH_ENCRYPTION_KEY", "NEXT_PUBLIC_APP_URL", "SUPABASE_SERVICE_ROLE_KEY"];
 export function gmailCallback(config?: Record<string, string>) {
@@ -110,6 +110,7 @@ export async function sendGmailMessage(mailbox: { email: string; accessToken: st
     body: JSON.stringify({ raw: gmailRawMessage(mailbox.email, to, subject, text, html) }),
     cache: "no-store", signal: AbortSignal.timeout(20000),
   });
+  if (response.status === 401 || response.status === 403) invalidateDelegatedGmailToken(mailbox.accessToken);
   if (!response.ok) throw new HttpError(response.status === 429 ? 429 : 502, response.status === 403 || response.status === 401
     ? "Gmail authorization failed. Reconnect your mailbox in OAuth mode, or ask your Workspace administrator to check delegated sending access."
     : "Gmail did not accept the email. Check your Sent folder before retrying.");
@@ -129,6 +130,7 @@ export async function gmailRequest<T>(accessToken: string, path: string): Promis
   const response = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/${path}`, {
     headers: { Authorization: `Bearer ${accessToken}` }, cache: "no-store", signal: AbortSignal.timeout(20000),
   });
+  if (response.status === 401 || response.status === 403) invalidateDelegatedGmailToken(accessToken);
   if (response.status === 404) throw new HttpError(404, "Gmail history or message no longer exists.");
   if (!response.ok) throw new HttpError(response.status === 403 || response.status === 429 ? response.status : 502,
     `Gmail request failed (Google HTTP ${response.status}). Check mailbox consent, API access and Google quota.`);

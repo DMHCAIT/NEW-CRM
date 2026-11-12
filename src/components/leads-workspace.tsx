@@ -37,10 +37,13 @@ export default function LeadsWorkspace({ initialFilter, dashboard = false }: { i
   const [cursors, setCursors] = useState<(LeadCursor | null)[]>([null]);
   const activeCriteria = filter.criteria.filter(criterionIsActive);
   const validation = activeCriteria.map(criterionError).find(Boolean);
-  const queryFilterKey = JSON.stringify({ ...filter, criteria: activeCriteria });
-  const settledQueryFilterKey = useDebouncedValue(queryFilterKey, 120, !validation);
-  const queryUpdating = settledQueryFilterKey !== queryFilterKey;
-  const queryFilter = useMemo(() => JSON.parse(settledQueryFilterKey) as SavedLeadFilter, [settledQueryFilterKey]);
+  const delayedFilterKey = JSON.stringify({ ...filter, criteria: activeCriteria, quickView: undefined });
+  const settledFilterKey = useDebouncedValue(delayedFilterKey, 120, !validation);
+  const queryUpdating = settledFilterKey !== delayedFilterKey;
+  const queryFilter = useMemo(() => ({
+    ...JSON.parse(settledFilterKey) as SavedLeadFilter, quickView: filter.quickView,
+  }), [settledFilterKey, filter.quickView]);
+  const settledQueryFilterKey = JSON.stringify(queryFilter);
   const path = leadQueryPath(queryFilter, { cursor: cursors[page], dashboard, pageSize: pageSize === "all" ? 100 : pageSize });
   const { data, loading, error, reload, setError } = useLiveLeadData(path, loadLeadListData, getCachedLeadListData);
   useEffect(() => {
@@ -59,9 +62,9 @@ export default function LeadsWorkspace({ initialFilter, dashboard = false }: { i
   }, [pageSize, settledQueryFilterKey, dashboard, validation, queryUpdating, queryFilter, setError]);
   useEffect(() => {
     if (!data?.nextCursor || !data.hasMore || loading || queryUpdating) return;
-    const nextPath = leadQueryPath(queryFilter, { cursor: data.nextCursor, dashboard });
+    const nextPath = leadQueryPath(queryFilter, { cursor: data.nextCursor, dashboard, pageSize: pageSize === "all" ? 100 : pageSize });
     void loadLeadListData(nextPath, { maxAgeMs: 30000 }).catch((e: unknown) => setError(e instanceof Error ? e.message : "Could not prefetch the next page."));
-  }, [data, loading, queryFilter, queryUpdating, dashboard, setError]);
+  }, [data, loading, queryFilter, queryUpdating, dashboard, pageSize, setError]);
   const [bulkAction, setBulkAction] = useState<"transfer" | "stage" | "delete" | null>(null);
   const bulkDialogRef = useRef<HTMLDialogElement>(null);
   useEffect(() => {
@@ -75,10 +78,17 @@ export default function LeadsWorkspace({ initialFilter, dashboard = false }: { i
   const columnSaveRef = useRef(false);
   const availableColumns = leadColumns(data?.configuration.fields);
   const matchingColumns = availableColumns.filter((column) => column.label.toLocaleLowerCase().includes(columnSearch.trim().toLocaleLowerCase()));
-  const rows = data && !validation && !queryUpdating
+  const rows = data && !validation && !queryUpdating && !loading
     ? pageSize === "all" ? allRowsKey === settledQueryFilterKey && !allRowsLoading ? allRows : [] : data.leads
     : [];
   const resultsLoading = loading || queryUpdating || (pageSize === "all" && allRowsLoading);
+  function changeFilter(next: SavedLeadFilter) {
+    setFilter(next);
+    setPage(0);
+    setCursors([null]);
+    setSelected([]);
+    setAllRowsKey("");
+  }
   function changePageSize(value: string) {
     setPageSize(value === "all" ? "all" : Number(value));
     setPage(0);
@@ -164,10 +174,21 @@ export default function LeadsWorkspace({ initialFilter, dashboard = false }: { i
     await act(async () => {
       const completed: string[] = [];
       try {
-        for (const id of ids) {
-          await apiRequest(`/api/leads/${id}`, action === "delete" ? { method: "DELETE" } : { method: "PATCH", body: action === "transfer" ? { assigneeId, ...(stageId ? { stageId } : {}) } : { stageId } });
-          completed.push(id);
+        const remaining = [...ids];
+        let failure: Error | undefined;
+        async function worker() {
+          while (remaining.length && !failure) {
+            const id = remaining.shift()!;
+            try {
+              await apiRequest(`/api/leads/${id}`, action === "delete" ? { method: "DELETE" } : { method: "PATCH", body: action === "transfer" ? { assigneeId, ...(stageId ? { stageId } : {}) } : { stageId } });
+              completed.push(id);
+            } catch (error) {
+              failure ??= error instanceof Error ? error : new Error("Update failed.");
+            }
+          }
         }
+        await Promise.all(Array.from({ length: Math.min(3, ids.length) }, () => worker()));
+        if (failure) throw failure;
         setBulkAction(null);
         setNotice(`${completed.length} leads ${action === "delete" ? "deleted from active views" : action === "transfer" ? "transferred" : "updated"}.`);
       } catch (e) { throw new Error(`${completed.length} of ${ids.length} leads updated. ${e instanceof Error ? e.message : "Update failed."}`); }
@@ -197,14 +218,14 @@ export default function LeadsWorkspace({ initialFilter, dashboard = false }: { i
     {dashboardView && <p className="helper-banner"><Link href="/">Dashboard</Link><span> / {filter.name || "Dashboard leads"} · Role-scoped results</span></p>}
     <div className="leads-layout">
     <aside className="lead-filter-sidebar" aria-label="Lead search and preferences">
-    <LiveFilterEditor filter={filter} leads={data.leads} stages={data.stages} profiles={data.profiles} picklists={data.configuration.picklists} onChange={(f) => { setFilter(f); setPage(0); setSelected([]); }} />
+    <LiveFilterEditor filter={filter} leads={data.leads} stages={data.stages} profiles={data.profiles} picklists={data.configuration.picklists} onChange={changeFilter} />
     <section className="panel saved-filter-panel" aria-label="Saved filters">
       <div className="panel-heading"><h2>Saved filters</h2><Save size={14} /></div>
       <div className="saved-filter-controls">
-      <SearchableDropdown ariaLabel="Saved filters" placeholder="Choose saved filter" value={data.filters.some((f) => f.id === filter.id) ? filter.id : ""} options={[{ value: "", label: "Choose saved filter" }, ...data.filters.map(f => ({ value: f.id, label: f.name }))]} onChange={value => { const saved = data.filters.find((f) => f.id === value); setFilter(saved ? { ...saved.filter_json, id: saved.id, name: saved.name } : emptyFilter()); setPage(0); setSelected([]); }} />
+      <SearchableDropdown ariaLabel="Saved filters" placeholder="Choose saved filter" value={data.filters.some((f) => f.id === filter.id) ? filter.id : ""} options={[{ value: "", label: "Choose saved filter" }, ...data.filters.map(f => ({ value: f.id, label: f.name }))]} onChange={value => { const saved = data.filters.find((f) => f.id === value); changeFilter(saved ? { ...saved.filter_json, id: saved.id, name: saved.name } : emptyFilter()); }} />
       <input aria-label="Filter name" placeholder="Name this filter" maxLength={120} value={filterName} onChange={(e) => setFilterName(e.target.value)} />
       <button className="button button-secondary button-small" disabled={busy || !filterName.trim() || Boolean(validation)} onClick={() => void act(async () => { await apiRequest("/api/leads/preferences", { body: { action: "save", filter: { ...filter, criteria: activeCriteria, name: filterName.trim() } } }); setFilterName(""); await reload(); setNotice("Filter saved to your account."); })}><Save size={13} />Save filter</button>
-      {data.filters.some((f) => f.id === filter.id) && <button className="button button-quiet button-small" disabled={busy} onClick={() => void act(async () => { await apiRequest("/api/leads/preferences", { body: { action: "delete", id: filter.id } }); setFilter(emptyFilter()); await reload(); })}><Trash2 size={13} />Delete filter</button>}
+      {data.filters.some((f) => f.id === filter.id) && <button className="button button-quiet button-small" disabled={busy} onClick={() => void act(async () => { await apiRequest("/api/leads/preferences", { body: { action: "delete", id: filter.id } }); changeFilter(emptyFilter()); await reload(); })}><Trash2 size={13} />Delete filter</button>}
       </div>
     </section>
     </aside>

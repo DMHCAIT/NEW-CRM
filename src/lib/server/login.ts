@@ -74,22 +74,22 @@ export async function startLogin(request: Request, email: string, password: stri
     device: deviceLabel(request.headers.get("user-agent")),
     device_id: loginHash(`device:${deviceId}`, key),
   }));
-  try {
-    await sendMail({
+  const previous = store.get(challengeCookie)?.value;
+  const [delivery, cleanup] = await Promise.allSettled([
+    sendMail({
       to: data.user.email, subject: "Your DMHCA CRM verification code",
       html: emailLayout("Verify your sign-in", `<p>Your verification code is:</p><p style="font-size:30px;letter-spacing:6px"><strong>${code}</strong></p><p>It expires in 10 minutes. Never share this code. If you did not request it, change your password and contact your administrator.</p>`),
-    });
-  } catch (error) {
-    console.error("Verification email delivery failed", error);
+    }),
+    previous ? loginDatabaseRequest("LOGIN_CHALLENGE_CLEANUP", () =>
+      admin.from("login_challenges").delete().eq("id", loginHash(previous, key))) : Promise.resolve(),
+  ]);
+  if (delivery.status === "rejected") {
+    console.error("Verification email delivery failed", delivery.reason);
     const { error: cleanupError } = await admin.from("login_challenges").delete().eq("id", loginHash(id, key));
     if (cleanupError) console.error("Could not remove undelivered login challenge", cleanupError);
     throw new HttpError(503, "Verification email could not be sent. Contact your administrator to check SMTP settings.");
   }
-  const previous = store.get(challengeCookie)?.value;
-  if (previous) {
-    await loginDatabaseRequest("LOGIN_CHALLENGE_CLEANUP", () =>
-      admin.from("login_challenges").delete().eq("id", loginHash(previous, key)));
-  }
+  if (cleanup.status === "rejected") throw cleanup.reason;
   store.set(challengeCookie, id, cookieOptions);
   store.set(deviceCookie, deviceId, { ...cookieOptions, maxAge: 365 * 24 * 60 * 60 });
 }
@@ -112,9 +112,11 @@ export async function verifyLogin(code: string) {
   const isolated = createClient(requireEnv("NEXT_PUBLIC_SUPABASE_URL"), requireEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY"), {
     auth: { persistSession: false, autoRefreshToken: false },
   });
-  const { data: authenticated, error: authError } = await isolated.auth.setSession(tokens);
+  const [{ data: authenticated, error: authError }, { data: profile, error: profileError }] = await Promise.all([
+    isolated.auth.setSession(tokens),
+    admin.from("profiles").select("status,deleted_at").eq("id", challenge.user_id).single(),
+  ]);
   if (authError || !authenticated.session || !authenticated.user || authenticated.user.id !== challenge.user_id) throw new HttpError(401, "Sign-in expired. Please start again.");
-  const { data: profile, error: profileError } = await admin.from("profiles").select("status,deleted_at").eq("id", authenticated.user.id).single();
   if (profileError) throw profileError;
   if (profile.status !== "active" || profile.deleted_at) throw new HttpError(403, "Your account is inactive. Contact your administrator.");
   // The token was verified with Supabase above; bind verification to this exact Auth session.

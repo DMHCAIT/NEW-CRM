@@ -1,4 +1,4 @@
-import { createPrivateKey, sign } from "node:crypto";
+import { createHash, createPrivateKey, sign } from "node:crypto";
 import { z } from "zod";
 import { HttpError } from "@/lib/server/auth";
 
@@ -53,6 +53,41 @@ export function workspaceMailbox(config: Record<string, string>, loginEmail: str
 export async function delegatedGmailToken(config: Record<string, string>, loginEmail: string) {
   const { account } = workspaceCredentials(config);
   const subject = workspaceMailbox(config, loginEmail);
+  const key = createHash("sha256").update(JSON.stringify([account, subject, delegatedGmailScopes])).digest("hex");
+  for (const [id, entry] of delegatedTokens) {
+    if (entry.expiresAt <= Date.now()) delegatedTokens.delete(id);
+  }
+  const saved = delegatedTokens.get(key);
+  if (saved) return (await saved.promise).accessToken;
+  if (delegatedTokens.size >= 100) delegatedTokens.delete(delegatedTokens.keys().next().value!);
+  const entry: DelegatedToken = { promise: requestDelegatedGmailToken(account, subject), expiresAt: Date.now() + 5 * 60_000 };
+  delegatedTokens.set(key, entry);
+  try {
+    const result = await entry.promise;
+    entry.expiresAt = Math.min(entry.expiresAt, result.expiresAt);
+    entry.accessToken = result.accessToken;
+    return result.accessToken;
+  } catch (error) {
+    if (delegatedTokens.get(key) === entry) delegatedTokens.delete(key);
+    throw error;
+  }
+}
+
+type DelegatedToken = {
+  promise: Promise<{ accessToken: string; expiresAt: number }>;
+  expiresAt: number;
+  accessToken?: string;
+};
+const delegatedTokens = new Map<string, DelegatedToken>();
+
+export function invalidateDelegatedGmailToken(accessToken: string) {
+  for (const [key, entry] of delegatedTokens) {
+    if (entry.accessToken === accessToken) delegatedTokens.delete(key);
+  }
+}
+
+async function requestDelegatedGmailToken(account: ReturnType<typeof workspaceCredentials>["account"], subject: string) {
+  const requestedAt = Date.now();
   const now = Math.floor(Date.now() / 1000);
   const encode = (value: object) => Buffer.from(JSON.stringify(value)).toString("base64url");
   const unsigned = `${encode({ alg: "RS256", typ: "JWT" })}.${encode({
@@ -76,5 +111,5 @@ export async function delegatedGmailToken(config: Record<string, string>, loginE
   const profile = z.object({ emailAddress: z.string().email() }).safeParse(await profileResponse.json());
   if (!profile.success || profile.data.emailAddress.toLowerCase() !== subject)
     throw new HttpError(409, "Use your primary Google Workspace mailbox address as your CRM login; the delegated mailbox does not match.");
-  return result.data.access_token;
+  return { accessToken: result.data.access_token, expiresAt: requestedAt + Math.max(0, result.data.expires_in - 60) * 1000 };
 }

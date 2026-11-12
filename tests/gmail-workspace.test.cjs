@@ -31,7 +31,7 @@ function load(file, mocks = {}) {
   const output = ts.transpileModule(fs.readFileSync(path.join(__dirname, "..", file), "utf8"), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021 },
   }).outputText;
-  new Function("exports", "require", "fetch", output)(exports, name => {
+  new Function("exports", "require", "fetch", "Date", output)(exports, name => {
     if (name in mocks) return mocks[name];
     if (name === "@/lib/server/auth") return auth;
     if (name === "@/lib/server/env") return {
@@ -44,7 +44,7 @@ function load(file, mocks = {}) {
     if (name === "next/server") return { NextResponse: { json: (data, options) => ({ data, status: options?.status ?? 200 }) } };
     if (name.startsWith("@/")) return load(`${name.replace("@/", "src\\").replaceAll("/", "\\")}.ts`, mocks);
     return require(name);
-  }, mocks.fetch ?? (() => assert.fail("Unexpected network request")));
+  }, mocks.fetch ?? (() => assert.fail("Unexpected network request")), mocks.Date ?? Date);
   return exports;
 }
 function providerFetch(email = user.email) {
@@ -105,6 +105,83 @@ test("managed mode restricts exact domain, rejects invalid configuration and doe
     assert.throws(() => api.workspaceCredentials({ ...config, GOOGLE_SERVICE_ACCOUNT_JSON: value }),
       error => error.status === 400 && !error.message.includes("invalid-private-secret"));
   }
+});
+
+test("Workspace Gmail reuses verified tokens for five minutes and separates mailboxes and credentials", async () => {
+  let time = Date.now(), tokens = 0, profiles = 0;
+  const api = load("src\\lib\\server\\gmail-delegation.ts", {
+    Date: class extends Date { static now() { return time; } },
+    fetch: async (url, init) => {
+      if (url === "https://oauth2.googleapis.com/token") {
+        tokens++;
+        const claims = JSON.parse(Buffer.from(init.body.get("assertion").split(".")[1], "base64url"));
+        return Response.json({ access_token: claims.sub, expires_in: 3600 });
+      }
+      profiles++;
+      return Response.json({ emailAddress: init.headers.Authorization.slice("Bearer ".length) });
+    },
+  });
+  const results = await Promise.all(Array.from({ length: 5 }, () => api.delegatedGmailToken(config, user.email)));
+  assert.ok(results.every(token => token === user.email));
+  assert.equal(tokens, 1, "concurrent sends share one token exchange");
+  assert.equal(profiles, 1, "only verified mailbox tokens are reused");
+  await api.delegatedGmailToken(config, user.email.toUpperCase());
+  assert.equal(tokens, 1);
+  await api.delegatedGmailToken(config, "other@dmhca.in");
+  assert.equal(tokens, 2, "another mailbox never shares the first user's token");
+  const changed = { ...config, GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify({ ...account, client_id: "987654321" }) };
+  await api.delegatedGmailToken(changed, user.email);
+  assert.equal(tokens, 3, "credential changes bypass previously cached authorization");
+  time += 5 * 60_000;
+  await api.delegatedGmailToken(config, user.email);
+  assert.equal(tokens, 4, "authorization is rechecked after at most five minutes");
+  await assert.rejects(api.delegatedGmailToken(config, "outsider@gmail.com"), error => error.status === 403);
+  assert.equal(tokens, 4, "domain restrictions still apply before cache lookup");
+});
+
+test("Workspace token expiry keeps a safety margin and failed mailbox checks are never cached", async () => {
+  let time = Date.now(), tokens = 0, fail = true;
+  const api = load("src\\lib\\server\\gmail-delegation.ts", {
+    Date: class extends Date { static now() { return time; } },
+    fetch: async url => {
+      if (url === "https://oauth2.googleapis.com/token") {
+        tokens++;
+        return Response.json({ access_token: "delegated-token", expires_in: 90 });
+      }
+      return fail ? new Response("", { status: 403 }) : Response.json({ emailAddress: user.email });
+    },
+  });
+  await assert.rejects(api.delegatedGmailToken(config, user.email), /mailbox access failed/);
+  fail = false;
+  await api.delegatedGmailToken(config, user.email);
+  assert.equal(tokens, 2, "failed authorization must be retried, not cached");
+  time += 29_000;
+  await api.delegatedGmailToken(config, user.email);
+  assert.equal(tokens, 2);
+  time += 1_000;
+  await api.delegatedGmailToken(config, user.email);
+  assert.equal(tokens, 3, "renew before Google token expiry, even inside five minutes");
+});
+
+test("Google authorization rejection clears cached delegated tokens without retrying a send", async () => {
+  let tokens = 0, sends = 0;
+  const delegation = load("src\\lib\\server\\gmail-delegation.ts", {
+    fetch: async url => url === "https://oauth2.googleapis.com/token"
+      ? Response.json({ access_token: `delegated-${++tokens}`, expires_in: 3600 })
+      : Response.json({ emailAddress: user.email }),
+  });
+  const api = gmail({
+    "@/lib/server/gmail-delegation": delegation,
+    fetch: async () => { sends++; return new Response("", { status: 401 }); },
+  });
+  const token = await delegation.delegatedGmailToken(config, user.email);
+  await assert.rejects(api.sendGmailMessage({ email: user.email, accessToken: token }, "lead@example.com", "Course", "Message"), /authorization failed/);
+  assert.equal(sends, 1, "sending must not retry automatically");
+  const refreshed = await delegation.delegatedGmailToken(config, user.email);
+  assert.equal(tokens, 2, "next explicit attempt obtains fresh authorization");
+  await assert.rejects(api.gmailRequest(refreshed, "profile"), /Gmail request failed/);
+  await delegation.delegatedGmailToken(config, user.email);
+  assert.equal(tokens, 3, "read authorization rejection also invalidates the cached token");
 });
 
 test("delegation errors are explicit, sanitized, and mailbox aliases cannot change the sender", async () => {

@@ -182,6 +182,31 @@ test("lead typing and pagination request records only while metadata is fresh; r
   assert.equal(reads.at(-1), path);
 });
 
+test("filtered first visits share metadata with subsequent scope changes and clear it after writes", async () => {
+  const reads = [];
+  const api = client(async path => {
+    reads.push(path);
+    return ok(path.includes("metadata=0")
+      ? { leads: [{ id: "my-lead" }], hasMore: false, nextCursor: null }
+      : { leads: [{ id: "filtered-lead" }], stages: ["New"], profiles: ["Owner"], configuration: {}, user: { id: "actor" } });
+  });
+  const helpers = loadModule("src\\lib\\live-leads-client.tsx", {
+    react: {}, "@/lib/crm-data": api, "lucide-react": {},
+    "@/components/searchable-dropdown": {}, "@/lib/lead-filters": {}, "@/lib/lead-picklists": {},
+  }, { window: {}, Intl });
+  const first = helpers.leadQueryPath({ ...helpers.emptyFilter(), query: "doctor" });
+  const mine = helpers.leadQueryPath({ ...helpers.emptyFilter(), quickView: "My Leads" });
+  await helpers.loadLeadListData(first, { maxAgeMs: 30000 });
+  const result = await helpers.loadLeadListData(mine, { maxAgeMs: 30000 });
+  assert.equal(reads.length, 2);
+  assert.equal(new URL(reads[1], "http://crm.test").searchParams.get("metadata"), "0");
+  assert.deepEqual(result.profiles, ["Owner"]);
+  assert.equal(helpers.getCachedLeadListData(mine).leads[0].id, "my-lead");
+  await api.apiRequest("/api/leads/record", { method: "PATCH", body: { course: "Updated" } });
+  await helpers.loadLeadListData(mine, { maxAgeMs: 30000 });
+  assert.equal(reads.at(-1), mine, "writes must invalidate reused metadata");
+});
+
 test("live searches settle after 120 ms and cancel obsolete typing timers without Enter", () => {
   const updates = [], effects = [], timers = new Map(), cleared = [];
   let id = 0;

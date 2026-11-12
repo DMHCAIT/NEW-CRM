@@ -61,18 +61,19 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       const content = requireString(body.content, "Message", 20000);
       if (/[\r\n]/.test(subject)) throw new HttpError(400, "Subject must be a single line.");
       if (body.includeSignature !== undefined && typeof body.includeSignature !== "boolean") throw new HttpError(400, "Invalid signature option.");
-      let signature = "";
-      if (body.includeSignature !== false) {
-        const { data: profile, error } = await supabase.from("profiles").select("email_signature_html").eq("id", user.id).single();
-        dbError(error);
-        if (!profile) throw new HttpError(404, "Your email signature profile could not be found.");
-        signature = sanitizeSignature(profile.email_signature_html);
-      }
+      const [signature, mailbox] = await Promise.all([
+        body.includeSignature === false ? Promise.resolve("") : (async () => {
+          const { data: profile, error } = await supabase.from("profiles").select("email_signature_html").eq("id", user.id).single();
+          dbError(error);
+          if (!profile) throw new HttpError(404, "Your email signature profile could not be found.");
+          return sanitizeSignature(profile.email_signature_html);
+        })(),
+        prepareGmailSend(getSupabaseAdminClient(), user.id, user.email),
+      ]);
       const textSignature = signatureText(signature);
       const plain = content + (textSignature ? `\n\n${textSignature}` : "");
       const escaped = content.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
       const html = `<div style="white-space:pre-wrap">${escaped.replace(/\r?\n/g, "<br>")}</div>${signature ? `<br><div>${signature}</div>` : ""}`;
-      const mailbox = await prepareGmailSend(getSupabaseAdminClient(), user.id, user.email);
       const { data, error } = await supabase.from("emails").insert({ lead_id: id, user_id: user.id, from_email: mailbox.email, to_email: lead.email, subject, body: plain, body_html: html, direction: "outbound", status: "queued" }).select("id").single();
       dbError(error);
       let message: { id: string };

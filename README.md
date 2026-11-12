@@ -10,6 +10,31 @@ Related-list timelines use compact date-grouped rows, right-aligned timestamps,
 and wrapping field changes. Notes, emails, calls and invoice events retain their
 full details without large padded event cards.
 
+### Interactive performance
+
+Lead list filters reuse fresh metadata even when the first visit is a filtered
+view. Cached data expires after 30 seconds; writes and manual refresh invalidate
+it. Next-page preparation uses the selected page size. Bulk lead changes run up
+to three requests concurrently, retain failed/unattempted selections, and wait
+for in-flight writes before reporting partial completion.
+Ordinary lead-field updates and transfers skip custom-field settings reads;
+changes to custom fields still load and validate the current configuration.
+
+Verification checks the authenticated session and active profile in parallel;
+both must succeed and the login audit must be saved before authenticated cookies
+are set. Replacing a pending login overlaps old-challenge cleanup with code
+delivery. SMTP acceptance is still awaited, not treated as background success.
+
+Workspace Gmail reuses verified delegated access tokens in server memory for at
+most five minutes, or until 60 seconds before Google's expiry, whichever is
+earlier. Entries are scoped to mailbox, service-account credentials and scopes,
+bounded to 100, and failed authorization is not cached. Google 401/403 responses
+invalidate reused tokens without automatically resending messages. Settings are still loaded
+for every operation; credential changes bypass old entries. Cold server instances
+must authorize again. Email sending waits for Google acceptance and the persisted
+email status, but timeline refresh no longer delays the success notice or keeps
+the composer busy. Refresh failures explicitly warn against resending.
+
 ### TeleCMI click to call
 
 Apply migrations through `202611110010_telecmi_calling.sql` using `npm run db:migrate`.

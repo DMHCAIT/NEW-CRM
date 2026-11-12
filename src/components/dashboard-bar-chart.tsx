@@ -17,7 +17,7 @@ type Props = {
 
 export function DashboardBarChart({ label, categories, percent = false, emptyMessage, legend = [] }: Props) {
   const width = Math.max(320, categories.length * 112 + 70);
-  const top = 32;
+  const top = 52;
   const baseline = 232;
   const plotHeight = baseline - top;
   const totals = categories.map(category => category.segments.reduce((sum, segment) => sum + segment.value, 0));

@@ -468,6 +468,59 @@ test("unfinished lead conditions stay in the sidebar without filtering or hiding
   assert.equal(new URL(requestPath, "http://crm.local").searchParams.has("filter"), false);
 });
 
+test("My Leads switches on one click without debounce and clears the previous page cursor", () => {
+  const states = [];
+  let index = 0, settledKey, requestPath, pending = false;
+  const mine = { ...lead, id: "my-lead", name: "My assigned lead" };
+  const nextCursor = { id: lead.id, createdAt: lead.createdAt };
+  const { default: Workspace } = load("src\\components\\leads-workspace.tsx", {
+    react: { ...React, useEffect() {}, useLayoutEffect() {}, useMemo: factory => factory(), useRef: initial => ({ current: initial }),
+      useState(initial) {
+        const key = index++;
+        if (!(key in states)) states[key] = typeof initial === "function" ? initial() : initial;
+        return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }];
+      },
+    },
+    "@/lib/live-leads-client": {
+      ...liveMock,
+      useDebouncedValue(value) { settledKey ??= value; return settledKey; },
+      useLiveLeadData(path) {
+        requestPath = path;
+        const selectedFilter = JSON.parse(new URL(path, "http://crm.local").searchParams.get("filter") ?? "{}");
+        const myView = selectedFilter.quickView === "My Leads";
+        return { data: { ...live, leads: myView && !pending ? [mine] : [lead], hasMore: true, nextCursor },
+          loading: myView && pending, error: "", reload() {}, setError() {} };
+      },
+    },
+  });
+  const render = () => { index = 0; return elements(Workspace()); };
+  const editor = nodes => nodes.find(node => node.type === actualLeads.LiveFilterEditor);
+  const clickView = (nodes, label) => elements(editor(nodes).type(editor(nodes).props))
+    .find(node => node.type === "button" && node.props.children === label).props.onClick();
+  let nodes = render();
+  nodes.find(node => node.type === "button" && node.props.children === "Next").props.onClick();
+  nodes = render();
+  assert.ok(new URL(requestPath, "http://crm.local").searchParams.has("cursor"));
+  pending = true;
+  clickView(nodes, "My Leads");
+  nodes = render();
+  const params = new URL(requestPath, "http://crm.local").searchParams;
+  assert.equal(JSON.parse(params.get("filter")).quickView, "My Leads", "issue the selected view request before the debounce settles");
+  assert.equal(params.has("cursor"), false, "start the selected view on its first page");
+  assert.ok(!nodes.some(node => node.type === Link && node.props.children === lead.name), "do not show the old view under the new heading");
+  assert.ok(nodes.some(node => node.type === "strong" && node.props.children === "Loading leads..."));
+  pending = false;
+  nodes = render();
+  assert.ok(nodes.some(node => node.type === Link && node.props.children === mine.name), "show the result without another click");
+  clickView(nodes, "All accessible leads");
+  render();
+  assert.equal(new URL(requestPath, "http://crm.local").searchParams.has("filter"), false);
+  nodes = render();
+  editor(nodes).props.onChange({ ...editor(nodes).props.filter, query: "new search" });
+  render();
+  assert.equal(new URL(requestPath, "http://crm.local").searchParams.has("filter"), false, "retain debounce for search edits");
+});
+
 test("invalid lead filter shows validation only beside its condition", async () => {
   const invalidFilter = { ...filter, criteria: [{ id: "condition", field: "phone", operator: "is", value: "not a phone" }] };
   const html = await renderPage("src\\components\\leads-workspace.tsx", { states: [invalidFilter], overrides: { "@/lib/live-leads-client": liveMock } });
@@ -1605,11 +1658,24 @@ test("dashboard column charts retain axes for empty data and plot exact values w
   ] };
   const nodes = elements(DashboardBarChart(props));
   const rects = nodes.filter(node => node.type === "rect");
-  assert.equal(rects[0].props.height, 100);
+  assert.equal(rects[0].props.height, 90);
   assert.equal(rects[1].props.height, 0);
   assert.equal(rects[2].props.fill, "transparent", "zero conversions have a clickable baseline target, not a false bar");
   assert.ok(nodes.some(node => node.type === Link && node.props.href === "/leads?converted"));
   assert.ok(nodes.some(node => node.type === Link && node.props.href === "/leads?zero"));
+});
+
+test("dashboard chart maximum-value labels stay clear of the axis caption", () => {
+  const { DashboardBarChart } = load("src\\components\\dashboard-bar-chart.tsx");
+  for (const [percent, value] of [[false, 48], [true, 100]]) {
+    const nodes = elements(DashboardBarChart({
+      label: "Label spacing", percent, emptyMessage: "No records",
+      categories: [{ label: "First category", href: "/leads", segments: [{ label: "Leads", value, color: "#32a698", href: "/leads" }] }],
+    }));
+    const caption = nodes.find(node => node.props.className === "dashboard-axis-caption");
+    const total = nodes.find(node => node.props.className === "dashboard-bar-value");
+    assert.ok(total.props.y - caption.props.y >= 24, "reserve separate vertical space for the caption and tallest bar label");
+  }
 });
 
 test("country/course conversion bars use pair-specific totals and drilldowns", async () => {
@@ -2382,6 +2448,106 @@ test("bulk transfer sends assignee with an optional stage in one PATCH and retai
     assert.deepEqual(requests[0].body, { assigneeId: profile.id, ...(stageId ? { stageId } : {}) });
     assert.deepEqual(states[2], ["lead-2"]);
     assert.match(error, /1 of 2 leads updated.*Transfer denied/);
+  }
+});
+
+test("bulk updates run at most three requests concurrently and settle in-flight changes before reporting failures", async () => {
+  for (const fail of [false, true]) {
+    const records = Array.from({ length: 7 }, (_, index) => ({ ...lead, id: `bulk-${index}` }));
+    const states = [filter, "", records.map(row => row.id), false, "", "", "", 0, 50, [], "", false, null, false, "", null, false, "", [null], null];
+    const refs = [], pending = new Map(), requests = [];
+    let index = 0, refIndex = 0, error = "", peak = 0, refreshed = false;
+    const Component = load("src\\components\\leads-workspace.tsx", {
+      react: { ...React, useEffect() {}, useLayoutEffect() {}, useMemo: factory => factory(),
+        useRef(initial) { const key = refIndex++; return refs[key] ?? (refs[key] = { current: initial }); },
+        useState(initial) { const key = index++; if (!(key in states)) states[key] = initial; return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }]; },
+      },
+      "@/lib/crm-data": { ...crm, apiRequest: (url, options) => {
+        requests.push({ url, ...options });
+        return new Promise((resolve, reject) => {
+          pending.set(url, { resolve, reject });
+          peak = Math.max(peak, pending.size);
+        });
+      } },
+      "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({
+        data: { ...live, leads: records }, error, loading: false,
+        reload: async () => { assert.equal(pending.size, 0); refreshed = true; },
+        setError: value => { error = value; },
+      }) },
+    }).default;
+    const render = () => { index = 0; refIndex = 0; return elements(Component()); };
+    render().find(node => node.props?.["aria-label"] === "Transfer").props.onClick();
+    render().find(node => node.props?.ariaLabel === "Transfer assignee").props.onChange(profile.id);
+    render().find(node => node.type === "form" && node.props.onSubmit).props.onSubmit({ preventDefault() {} });
+    assert.equal(pending.size, 3, "do not serialize the first batch");
+    if (fail) {
+      const [url, operation] = [...pending][1];
+      pending.delete(url); operation.reject(new Error("Transfer denied"));
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(refreshed, false, "wait for other writes already in flight");
+    }
+    while (pending.size) {
+      for (const [url, operation] of [...pending]) { pending.delete(url); operation.resolve({}); }
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    assert.equal(peak, 3, "bound backend load to three concurrent updates");
+    assert.equal(refreshed, true);
+    assert.equal(requests.length, fail ? 3 : 7, "stop scheduling new writes after a failure");
+    assert.equal(states[2].length, fail ? 5 : 0, "retain failed and unattempted selections");
+    if (fail) assert.match(error, /2 of 7 leads updated.*Transfer denied/);
+    else assert.equal(error, "");
+  }
+});
+
+test("assignment automations use collapsed searchable selectors for single owners and rotation pools", async () => {
+  const users = [
+    { id: "owner-a", full_name: "Assignee Alpha", active: true },
+    { id: "owner-b", full_name: "Assignee Beta", active: true },
+    { id: "inactive", full_name: "Inactive assignee", active: false },
+  ];
+  const selector = () => null;
+  for (const canManage of [true, false]) {
+    const states = [{
+      canManage, users, rules: [
+        { rule_key: "facebook", enabled: true, strategy: "round_robin", owner_ids: ["owner-a", "inactive"], next_owner_index: 0 },
+        { rule_key: "website", enabled: false, strategy: "single", owner_ids: ["owner-b"], next_owner_index: 0 },
+      ],
+    }, "", "", false, null];
+    let index = 0;
+    const requests = [];
+    const { LeadAssignmentAutomations } = load("src\\components\\lead-assignment-automations.tsx", {
+      react: { ...React, useEffect() {}, useState(initial) {
+        const key = index++;
+        if (!(key in states)) states[key] = initial;
+        return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }];
+      } },
+      "@/components/searchable-dropdown": { SearchableDropdown: selector },
+      "@/lib/crm-data": { ...crm, apiRequest: async (url, init) => { requests.push({ url, ...init }); return { rule: init.body }; } },
+    });
+    const render = () => { index = 0; return elements(LeadAssignmentAutomations()); };
+    let nodes = render();
+    const selectors = nodes.filter(node => node.type === selector);
+    assert.equal(selectors.length, 5);
+    assert.ok(selectors.every(node => node.props.disabled === !canManage));
+    assert.ok(!nodes.some(node => node.type === "input" && node.props.type === "radio"));
+    const rotation = selectors.find(node => node.props.id === "assignment-facebook");
+    const single = selectors.find(node => node.props.id === "assignment-website");
+    assert.equal(rotation.props.multiple, true);
+    assert.deepEqual(rotation.props.value, ["owner-a", "inactive"]);
+    assert.equal(rotation.props.options.find(option => option.value === "inactive").disabled, false, "allow removing an inactive rotation member");
+    assert.equal(single.props.options.find(option => option.value === "inactive").disabled, true);
+    assert.equal(single.props.value, "owner-b");
+    if (!canManage) continue;
+    single.props.onChange("owner-a");
+    rotation.props.onChange(["owner-b"]);
+    assert.deepEqual(states[0].rules[1].owner_ids, ["owner-a"]);
+    assert.deepEqual(states[0].rules[0].owner_ids, ["owner-b"]);
+    nodes = render();
+    const card = nodes.find(node => node.type === "article" && elements(node).some(child => child.props.id === "assignment-facebook"));
+    const save = elements(card).find(node => node.type === "button");
+    await save.props.onClick();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(requests[0].body, { rule_key: "facebook", enabled: true, strategy: "round_robin", owner_ids: ["owner-b"] });
   }
 });
 
@@ -3168,6 +3334,36 @@ test("lead email composer displays the connected sender alongside existing email
   for (const label of ["Email timeline", "Messages sent to this lead and replies from them", "Sync Gmail to check for new replies.", "Accepted by provider", "Your course information"]) assert.ok(html.includes(label), label);
   assert.match(html, /Your Google Workspace mailbox is connected/);
   assert.doesNotMatch(html, /Overview timeline|Notes timeline|Sent through your configured SMTP/);
+});
+
+test("accepted email releases the composer before timeline refresh and preserves success if refresh fails", async () => {
+  const updates = [], states = [false, false, "", "Message", "Subject", "", false, false, "", "", "email"];
+  let stateIndex = 0, rejectRefresh, sent = 0, error = "";
+  const Composer = () => null;
+  const Component = load("src\\app\\leads\\[id]\\page.tsx", {
+    react: { ...hookStates([]), useState(initial) {
+      const key = stateIndex++;
+      return [key < states.length ? states[key] : typeof initial === "function" ? initial() : initial, value => updates.push({ key, value })];
+    } },
+    "@/components/lead-email-composer": { LeadEmailComposer: Composer },
+    "@/lib/crm-data": { ...crm, apiRequest: async () => { sent++; return { ok: true }; } },
+    "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({
+      data: { ...live, lead, notes: [], activities: [], emails: [], mailbox: { email: user.email } },
+      loading: false, error: "", setError: value => { error = value; },
+      reload: () => new Promise((resolve, reject) => { rejectRefresh = reject; }),
+    }) },
+  }).default;
+  const composer = elements(Component()).find(node => node.type === Composer);
+  let finished = false;
+  const send = composer.props.onSend(true).then(() => { finished = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(sent, 1);
+  assert.equal(finished, true, "provider acceptance, not timeline reload, completes Send");
+  assert.ok(updates.some(update => update.key === 5 && update.value.includes("Gmail accepted")));
+  rejectRefresh(new Error("Database unavailable"));
+  await send;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(error, /Email sent.*Do not resend.*Database unavailable/);
 });
 
 test("lead email composer shows login address and blocks unconnected or mismatched mailboxes", async () => {

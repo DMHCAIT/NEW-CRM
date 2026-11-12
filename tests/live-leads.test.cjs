@@ -246,7 +246,7 @@ test("email log failure after provider acceptance warns against duplicate sends"
 });
 
 test("single-field lead PATCH preserves unrelated columns and merges custom fields", async () => {
-  let updated, leadReads = 0;
+  let updated, leadReads = 0, configurationReads = 0;
   const crmData = load("src\\lib\\crm-data.ts", { "@/lib/permissions": { isCrmRole: () => true } });
   const returnedRow = { id: "lead", name: "Server normalized", modified_at: "2099-01-01T10:00:00Z", closure_fee: "1250", custom_fields: { Existing: "kept" }, call_schedule_revision: 4, modifier: { full_name: "Server editor" } };
   const selects = [];
@@ -260,7 +260,10 @@ test("single-field lead PATCH preserves unrelated columns and merges custom fiel
       } },
     }) },
     "@/lib/crm-data": { ...crmData, fetchLead: async () => { leadReads++; return { ...validLead, country: "", course: "", qualification: "", source: "Website", closureFee: 0 }; } },
-    "@/lib/live-leads": { ...validation, uuid: value => value, fetchLeadConfiguration: async () => ({ fields: [{ name: "New field", active: true, type: "text" }] }) },
+    "@/lib/live-leads": { ...validation, uuid: value => value, fetchLeadConfiguration: async () => {
+      configurationReads++;
+      return { fields: [{ name: "New field", active: true, type: "text" }] };
+    } },
     "@/lib/supabase/server": {},
   });
   async function patch(body) {
@@ -289,9 +292,12 @@ test("single-field lead PATCH preserves unrelated columns and merges custom fiel
   assert.deepEqual(JSON.parse(JSON.stringify(updated)), { speciality: "Cardiology", modified_by: "editor" });
   assert.equal((await patch({ speciality: "" })).status, 200);
   assert.equal(updated.speciality, null);
+  assert.equal(configurationReads, 0, "ordinary field updates skip both custom-field settings queries");
   assert.equal((await patch({ customFields: { "New field": "value" } })).status, 200);
+  assert.equal(configurationReads, 1, "custom fields still load and validate current configuration");
   assert.equal(updated.custom_fields.Existing, "kept");
   assert.equal(updated.custom_fields["New field"], "value");
+  assert.equal((await patch({ customFields: { "Unknown field": "value" } })).status, 400);
   assert.equal((await patch({ assigneeId: "20000000-0000-4000-8000-000000000001" })).status, 403);
   assert.equal((await patch({})).status, 400);
 });

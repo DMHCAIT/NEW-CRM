@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { apiRequest, errorMessage } from "@/lib/crm-data";
 import { Check, LoaderCircle, RotateCw, Save } from "lucide-react";
+import { SearchableDropdown } from "@/components/searchable-dropdown";
 
 type RuleKey = "facebook" | "website" | "junk" | "not_interested" | "closed_won";
 type Strategy = "single" | "round_robin";
@@ -76,18 +77,27 @@ export function LeadAssignmentAutomations() {
           ?? { rule_key: definition.key, enabled: false, strategy: "single" as const, owner_ids: [], next_owner_index: 0 };
         const isSaving = saving === rule.rule_key;
         const rotating = definition.rotating;
-        const setOwners = (userId: string, checked: boolean) => {
-          const owner_ids = rotating && rule.strategy === "round_robin"
-            ? checked ? [...rule.owner_ids, userId] : rule.owner_ids.filter(id => id !== userId)
-            : checked ? [userId] : [];
-          update(rule.rule_key, { owner_ids });
+        const ownerOptions = (data?.users ?? []).map(user => ({
+          value: user.id,
+          label: `${user.full_name}${!user.active ? " (inactive)" : ""}`,
+          disabled: !user.active && !rule.owner_ids.includes(user.id),
+        }));
+        const ownerLabel = rule.strategy === "round_robin" ? "Select the rotation pool" : "Select an assignee";
+        const ownerProps = {
+          id: `assignment-${rule.rule_key}`,
+          ariaLabel: `${definition.title}: ${ownerLabel}`,
+          options: ownerOptions,
+          disabled: !data?.canManage || isSaving,
+          openDirection: "auto" as const,
+          optionsMaxHeight: 192,
         };
-        return <article className="assignment-automation-card" key={definition.key}>
+        return <article className={`assignment-automation-card${rule.enabled ? " is-enabled" : ""}`} key={definition.key}>
           <div className="assignment-automation-heading">
-            <div><h3>{definition.title}</h3><p>{definition.description}</p></div>
+            <div><span className="assignment-automation-category">{rotating ? "Integration source" : "Stage change"}</span><h3>{definition.title}</h3></div>
             <span className={`assignment-automation-status${rule.enabled ? " is-enabled" : ""}`}>{rule.enabled ? "Enabled" : "Paused"}</span>
           </div>
-          <label className="checkbox-field"><input type="checkbox" checked={rule.enabled} disabled={!data?.canManage || isSaving || !data.users.some(user => user.active)} onChange={event => update(rule.rule_key, { enabled: event.target.checked })} /> Enable this automation</label>
+          <p className="assignment-automation-description">{definition.description}</p>
+          <label className="checkbox-field assignment-automation-toggle"><input type="checkbox" checked={rule.enabled} disabled={!data?.canManage || isSaving || !data.users.some(user => user.active)} onChange={event => update(rule.rule_key, { enabled: event.target.checked })} /> Enable this automation</label>
           {rotating && <label className="form-field assignment-automation-strategy">Assignment method
             <select className="form-input" value={rule.strategy} disabled={!data?.canManage || isSaving} onChange={event => {
               const strategy = event.target.value as Strategy;
@@ -97,19 +107,12 @@ export function LeadAssignmentAutomations() {
               <option value="round_robin">Round robin across selected users</option>
             </select>
           </label>}
-          <fieldset className="assignment-automation-users" disabled={!data?.canManage || isSaving}>
-            <legend>{rule.strategy === "round_robin" ? "Select the rotation pool" : "Select an assignee"}</legend>
-            {data?.users.map(user => <label className="checkbox-field" key={user.id}>
-              <input
-                type={rule.strategy === "round_robin" ? "checkbox" : "radio"}
-                name={`assignment-${rule.rule_key}`}
-                checked={rule.owner_ids.includes(user.id)}
-                disabled={!user.active && !rule.owner_ids.includes(user.id)}
-                onChange={event => setOwners(user.id, event.target.checked)}
-              />
-              {user.full_name}{!user.active && " (inactive)"}
-            </label>)}
-          </fieldset>
+          <div className="assignment-automation-assignee">
+            <label htmlFor={ownerProps.id}>{ownerLabel}</label>
+            {rule.strategy === "round_robin"
+              ? <SearchableDropdown {...ownerProps} multiple value={rule.owner_ids} placeholder="Search and select users" onChange={owner_ids => update(rule.rule_key, { owner_ids })} />
+              : <SearchableDropdown {...ownerProps} value={rule.owner_ids[0] ?? ""} placeholder="Search and choose an assignee" onChange={userId => update(rule.rule_key, { owner_ids: userId ? [userId] : [] })} />}
+          </div>
           {rule.strategy === "round_robin" && <small>Each new lead goes to the next active user in this list.</small>}
           {rule.enabled && rule.owner_ids.some(id => !data?.users.some(user => user.id === id && user.active)) && <small className="form-error">Remove inactive users before enabling this rule.</small>}
           {data?.canManage && <div className="assignment-automation-actions"><button className="button button-primary" type="button" disabled={isSaving || (rule.enabled && (rule.owner_ids.length === 0 || rule.owner_ids.some(id => !data.users.some(user => user.id === id && user.active))))} onClick={() => void save(rule)}>{isSaving ? <><LoaderCircle size={14} />Saving…</> : <><Save size={14} />Save rule</>}</button></div>}

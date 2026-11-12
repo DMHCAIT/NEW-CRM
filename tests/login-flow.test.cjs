@@ -14,7 +14,7 @@ function transpile(file, dependencies, logger = console) {
   return exports;
 }
 
-function harness({ wrongPassword = false, sendFails = false, wrongCode = false, auditFails = false, rateLimited = false, deviceId, databaseFailure, throws = false, failureCode = "42501" } = {}) {
+function harness({ wrongPassword = false, sendFails = false, wrongCode = false, auditFails = false, rateLimited = false, deviceId, databaseFailure, throws = false, failureCode = "42501", verifyAuth, verifyProfile } = {}) {
   const events = [];
   const logs = [];
   function databaseError(stage) {
@@ -44,7 +44,7 @@ function harness({ wrongPassword = false, sendFails = false, wrongCode = false, 
     from: (table) => ({
       select: () => ({ eq: () => ({
         maybeSingle: async () => ({ data: { status: "active", deleted_at: null }, error: databaseError("LOGIN_PROFILE") }),
-        single: async () => ({ data: { status: "active", deleted_at: null }, error: null }),
+        single: async () => { await verifyProfile?.(); return { data: { status: "active", deleted_at: null }, error: null }; },
       }) }),
       insert: async (value) => {
         const error = table === "login_challenges" ? databaseError("LOGIN_CHALLENGE") : null;
@@ -69,7 +69,7 @@ function harness({ wrongPassword = false, sendFails = false, wrongCode = false, 
     "node:crypto": crypto,
     "@supabase/supabase-js": { createClient: () => ({ auth: {
       signInWithPassword: async () => ({ data: wrongPassword ? {} : { session, user }, error: wrongPassword ? new Error("invalid") : null }),
-      setSession: async () => ({ data: { session, user }, error: null }),
+      setSession: async () => { await verifyAuth?.(); return { data: { session, user }, error: null }; },
     } }) },
     "next/headers": { cookies: async () => ({
       get: (name) => cookies.has(name) ? { value: cookies.get(name) } : undefined,
@@ -200,4 +200,34 @@ test("verification cannot replace a device session after the device cookie chang
   await assert.rejects(api.verifyLogin("123456"), /device changed/);
   assert.equal(events.includes("insert:login_sessions"), false);
   assert.equal(events.includes("authenticated-cookie"), false);
+});
+
+test("verification overlaps independent auth and profile checks but grants no session until both finish", async () => {
+  const started = [];
+  let releaseAuth, releaseProfile;
+  const { api, events } = harness({
+    verifyAuth: () => { started.push("auth"); return new Promise(resolve => { releaseAuth = resolve; }); },
+    verifyProfile: () => { started.push("profile"); return new Promise(resolve => { releaseProfile = resolve; }); },
+  });
+  await api.startLogin(request, "user@example.com", "password");
+  const pending = api.verifyLogin("123456");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(started, ["auth", "profile"]);
+  assert.equal(events.includes("authenticated-cookie"), false);
+  releaseAuth();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(events.includes("insert:login_sessions"), false);
+  releaseProfile();
+  await pending;
+  assert.ok(events.indexOf("insert:login_sessions") < events.indexOf("authenticated-cookie"));
+});
+
+test("parallel verification remains fail-closed if either required check fails", async () => {
+  for (const stage of ["verifyAuth", "verifyProfile"]) {
+    const { api, events } = harness({ [stage]: async () => { throw new Error("Required check unavailable"); } });
+    await api.startLogin(request, "user@example.com", "password");
+    await assert.rejects(api.verifyLogin("123456"), /Required check unavailable/);
+    assert.equal(events.includes("insert:login_sessions"), false);
+    assert.equal(events.includes("authenticated-cookie"), false);
+  }
 });

@@ -71,7 +71,7 @@ export async function PATCH(request: Request, context: Context) {
     const [current, extras, configuration, stages] = await Promise.all([
       fetchLead(supabase, id),
       supabase.from("leads").select("custom_fields,call_schedule_revision").eq("id", id).single(),
-      fetchLeadConfiguration(supabase),
+      Object.hasOwn(body, "customFields") ? fetchLeadConfiguration(supabase) : undefined,
       Object.hasOwn(body, "stageId") ? fetchStages(supabase) : undefined,
     ]);
     if (!current || current.isArchived) throw new HttpError(404, "Lead not found.");
@@ -84,7 +84,7 @@ export async function PATCH(request: Request, context: Context) {
       stageId: current.stageId ?? null, assigneeId: current.assigneeId ?? null, followUpAt: current.followUpAt ?? null,
       closureFee: current.closureFee, expectedClosureDate: current.expectedClosureDate ?? null, customFields: previousFields, ...body,
     });
-    validateCustomFields(input.custom_fields, configuration, previousFields);
+    if (configuration) validateCustomFields(input.custom_fields, configuration, previousFields);
     input.custom_fields = { ...previousFields, ...input.custom_fields };
     if (input.assignee_id !== (current.assigneeId ?? null) && (!user.permissions.includes("leads.assign") || !["team_lead", "manager", "admin", "super_admin"].includes(user.profile.role))) throw new HttpError(403, "Assignment permission and a team lead, manager or administrator role are required.");
     if (Object.hasOwn(body, "stageId") && input.stage_id && !stages?.some(stage => stage.id === input.stage_id)) throw new HttpError(400, "Choose an active CRM stage.");

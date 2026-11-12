@@ -319,8 +319,12 @@ export default function LeadDetailPage() {
     {["note", "email"].includes(tab) && overviewTab === "overview" && !can("leads.edit") && <section className="detail-overview"><h2>{sectionLabel}</h2><p>Read only. This lead&apos;s {tab === "note" ? "notes" : "email history"} appears below.</p></section>}
     {tab === "email" && overviewTab === "overview" && can("leads.edit") && <LeadEmailComposer key={id} lead={lead} login={data.user.email} mailbox={data.mailbox} subject={subject} content={emailContent} onSubject={setSubject} onContent={setEmailContent} busy={busy} onSend={includeSignature => act(async () => {
       await apiRequest(`/api/leads/${id}/actions`, { body: { action: "email", subject, content: emailContent, includeSignature } });
+      if (activeLeadId.current !== id) return;
       setEmailContent(""); setSubject("");
-      await reload(); setNotice("Gmail accepted your email. This does not confirm recipient delivery.");
+      setNotice("Gmail accepted your email. This does not confirm recipient delivery.");
+      void reload().catch(failure => {
+        if (activeLeadId.current === id) setError(`Email sent, but the timeline could not refresh. Do not resend: ${failure instanceof Error ? failure.message : "Reload this lead to see it."}`);
+      });
     })} onConnect={() => void act(async () => {
       const result = await apiRequest<{ url: string }>("/api/integrations/gmail/connect", { method: "POST" }); window.location.assign(result.url);
     })} />}
