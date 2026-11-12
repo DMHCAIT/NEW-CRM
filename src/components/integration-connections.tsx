@@ -1,17 +1,19 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, CheckCircle2, ChevronRight, ExternalLink, Globe, Mail, Plug, Search, ShieldCheck, Video, Wallet } from "lucide-react";
+import { ArrowLeft, CheckCircle2, ChevronRight, ExternalLink, Globe, Mail, Phone, Plug, Search, ShieldCheck, Video, Wallet } from "lucide-react";
 import { gmailRequiredFields, integrationDefinitions, type IntegrationDefinition, type IntegrationProvider } from "@/lib/integration-definitions";
 import { integrationFieldHelp } from "@/lib/integration-guides";
 import { IntegrationSetupGuide } from "@/components/integration-setup-guide";
 import { OperationFeedback, formValues, operationRequest, useOperationalData } from "@/app/integrations/operational-ui";
+import { TELECMI_CALL_MESSAGE } from "@/lib/telecmi";
 
 export type IntegrationSummary = { id?: IntegrationProvider; name: string; configured: boolean; missing: string[]; required: string[] };
 type Setting = { provider: IntegrationProvider; source: string; revision: string | null; values: Record<string, string>; saved: Record<string, boolean>; updatedAt: string | null; testedAt: string | null; testStatus: string | null; testMessage: string | null };
 type SettingsData = { canManage: boolean; settings: Setting[]; appUrl: string };
-const icons = { zoom: Video, razorpay: Wallet, stripe: Wallet, smtp: Mail, gmail: Mail, intake: Globe, facebook: Plug };
+const icons = { zoom: Video, razorpay: Wallet, stripe: Wallet, smtp: Mail, gmail: Mail, intake: Globe, facebook: Plug, telecmi: Phone };
 const fieldOptions: Record<string, { value: string; label: string }[]> = {
+  TELECMI_DEVICE_ROUTING_CONFIRMED: [{ value: "", label: "Not confirmed" }, { value: "false", label: "Not confirmed" }, { value: "true", label: "Confirmed with TeleCMI" }],
   GOOGLE_MAILBOX_MODE: [{ value: "", label: "Per-user OAuth (default)" }, { value: "oauth", label: "Per-user OAuth" }, { value: "workspace", label: "Workspace-managed (administrator delegation)" }],
   SMTP_PORT: [{ value: "", label: "Choose a port" }, { value: "587", label: "587 - STARTTLS" }, { value: "465", label: "465 - Implicit TLS" }, { value: "2525", label: "2525 - STARTTLS" }],
   SMTP_SECURE: [{ value: "", label: "Automatic (based on port)" }, { value: "true", label: "Implicit TLS (port 465)" }, { value: "false", label: "STARTTLS (port 587 / 2525)" }],
@@ -58,7 +60,7 @@ export function IntegrationConnections({ integrations, onChange }: { integration
   const definition = integrationDefinitions.find(item => item.id === selected);
   const setting = settings.data?.settings.find(item => item.provider === selected);
   useEffect(() => { setGmailMode(setting?.values.GOOGLE_MAILBOX_MODE || (setting?.saved.GOOGLE_CLIENT_ID ? "oauth" : "workspace")); }, [selected, setting?.revision, setting?.values.GOOGLE_MAILBOX_MODE, setting?.saved.GOOGLE_CLIENT_ID]);
-  const categories = ["All integrations", "Lead capture", "Email", "Meetings", "Payments"];
+  const categories = ["All integrations", "Lead capture", "Email", "Meetings", "Payments", "Calling"];
   const visible = integrationDefinitions.filter(item => (!query.trim() || `${item.name} ${item.category} ${item.detail}`.toLowerCase().includes(query.trim().toLowerCase())) &&
     (category === "All integrations" || (category === "Email" ? ["smtp", "gmail"].includes(item.id) : item.category === category)));
   return <section className="integration-connections" aria-label="Integration connections">
@@ -82,6 +84,7 @@ export function IntegrationConnections({ integrations, onChange }: { integration
       <div className="integration-provider-switcher" aria-label="Choose integration">{integrationDefinitions.map(item => <button type="button" key={item.id} aria-pressed={item.id === selected} disabled={busy} onClick={() => select(item.id)}>{item.name}</button>)}</div>
       <div className="integration-configuration-body"><IntegrationSetupGuide provider={definition.id} appUrl={settings.data?.appUrl ?? ""} />
       <div className="integration-connection-settings"><div className="integration-settings-intro"><span className="integration-category">IN CRM</span><h3>Connection settings</h3><p>Enter values from your provider account. Required fields are marked with an asterisk.</p></div>
+        {definition.id === "telecmi" && <p className="integration-network-note" role="status">{TELECMI_CALL_MESSAGE}</p>}
         {definition.endpoint && !(definition.id === "gmail" && gmailMode === "workspace") && <div className="integration-endpoint"><small>{definition.id === "gmail" ? "Authorized redirect URI" : "Webhook endpoint"}</small><code>{settings.data?.appUrl}{definition.endpoint}</code></div>}
         {definition.id === "gmail" && gmailMode === "workspace" && <p className="integration-network-note">A Workspace super administrator must approve domain-wide delegation for both Gmail scopes. This grants organization-wide mailbox authority to the service account. CRM limits use to each authenticated user&apos;s login address in the configured domain. Employees do not need to connect individually.</p>}
         <p className="integration-secret-help"><ShieldCheck size={14} />Secret fields are write-only. Leave them blank to keep the saved value. Changing credentials resets the previous test result.</p>
@@ -98,7 +101,7 @@ export function IntegrationConnections({ integrations, onChange }: { integration
                 <input name={field.key} type={field.secret ? "password" : field.key === "GOOGLE_REDIRECT_URI" ? "url" : "text"} autoComplete={field.secret ? "new-password" : "off"} aria-describedby={`help-${field.key}`} required={Boolean(required && !(field.secret && setting?.saved[field.key]))} defaultValue={field.secret ? "" : value} maxLength={8192} placeholder={field.secret && setting?.saved[field.key] ? "Leave blank to keep saved secret" : field.placeholder} />}
               <span className="integration-field-help" id={`help-${field.key}`}>{integrationFieldHelp[field.key]}{field.key === "GOOGLE_WORKSPACE_DOMAIN" && " Leave blank to use your CRM login's domain."}</span></label>;
           })}
-        </fieldset><div className="integration-config-actions"><button className="button button-primary" disabled={busy}>{busy ? "Working..." : definition.id === "gmail" && gmailMode === "workspace" ? "Save & connect Workspace" : "Save credentials"}</button><button type="button" className="button button-secondary" disabled={busy || settings.loading || dirty} onClick={() => void action(definition, setting, "test")}>{definition.id === "gmail" || definition.id === "intake" ? "Check saved setup" : "Test saved connection"}</button></div>
+        </fieldset><div className="integration-config-actions"><button className="button button-primary" disabled={busy}>{busy ? "Working..." : definition.id === "gmail" && gmailMode === "workspace" ? "Save & connect Workspace" : "Save credentials"}</button><button type="button" className="button button-secondary" disabled={busy || settings.loading || dirty} onClick={() => void action(definition, setting, "test")}>{definition.id === "gmail" || definition.id === "intake" || definition.id === "telecmi" ? "Check saved setup" : "Test saved connection"}</button></div>
         {dirty && <p className="field-help">Save your changes before testing the active configuration.</p>}
         {setting?.testedAt && <div className={`integration-test-result${setting.testStatus === "passed" ? " is-passed" : ""}`}><strong>{setting.testStatus === "passed" ? "Check passed" : "Check failed"}</strong><time>{new Date(setting.testedAt).toLocaleString()}</time><p>{setting.testMessage}</p></div>}
       </form>

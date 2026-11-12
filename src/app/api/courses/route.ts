@@ -7,21 +7,21 @@ import { checkOrigin } from "@/lib/server/login";
 
 export async function GET() {
   try {
-    const { supabase, user } = await requireUser("invoices.view");
+    const { supabase, user } = await requireUser();
+    const canManage = ["admin", "super_admin"].includes(user.profile.role);
     const [courses, companies] = await Promise.all([
       supabase.from("courses").select("*").order("name").limit(1000),
-      supabase.from("invoice_companies").select("*").order("code"),
+      canManage ? supabase.from("invoice_companies").select("*").order("code") : Promise.resolve({ data: [], error: null }),
     ]);
     databaseError(courses.error); databaseError(companies.error);
-    return NextResponse.json({ courses: courses.data, companies: companies.data,
-      canManage: ["admin", "super_admin"].includes(user.profile.role) && user.permissions.includes("settings.manage") });
+    return NextResponse.json({ courses: courses.data, companies: companies.data, canManage });
   } catch (error) { return jsonError(error); }
 }
 
 export async function POST(request: Request) {
   try {
     checkOrigin(request);
-    const { supabase, user } = await requireUser("settings.manage");
+    const { supabase, user } = await requireUser();
     if (!["admin", "super_admin"].includes(user.profile.role)) throw new HttpError(403, "Only administrators can manage course prices and billing companies.");
     const input = parseInput(z.discriminatedUnion("kind", [
       z.object({ kind: z.literal("course"), id: z.string().uuid().optional(), values: courseInput }),

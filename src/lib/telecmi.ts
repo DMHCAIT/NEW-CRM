@@ -1,0 +1,1 @@
+export const TELECMI_CALL_MESSAGE = "Click to call rings your mapped TeleCMI agent first, then connects the lead after you answer. Your agent must be available in TeleCMI. A call request is not proof of connection.";

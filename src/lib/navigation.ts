@@ -21,7 +21,7 @@ export interface NavigationItem {
   label: string;
   href: string;
   icon: LucideIcon;
-  permission: Permission;
+  permission?: Permission;
   group: "workspace" | "manage";
 }
 
@@ -31,7 +31,7 @@ export const navigationItems: NavigationItem[] = [
   { label: "Pipeline", href: "/pipeline", icon: Blocks, permission: "pipeline.view", group: "workspace" },
   { label: "Meetings", href: "/meetings", icon: CalendarDays, permission: "meetings.view", group: "workspace" },
   { label: "Invoices", href: "/invoices", icon: FileText, permission: "invoices.view", group: "workspace" },
-  { label: "Courses", href: "/courses", icon: BookOpen, permission: "invoices.view", group: "workspace" },
+  { label: "Courses", href: "/courses", icon: BookOpen, group: "workspace" },
   { label: "Reports", href: "/reports", icon: ChartNoAxesCombined, permission: "reports.view", group: "workspace" },
   { label: "Automations", href: "/automations", icon: ListChecks, permission: "automations.view", group: "manage" },
   { label: "Import", href: "/leads/import", icon: FileUp, permission: "leads.import", group: "manage" },

@@ -202,6 +202,7 @@ test("managed inbox status does not claim Google authorization was verified and 
   assert.equal(result.data.connection.last_synced_at, null);
   assert.equal(result.data.canSync, true);
   assert.equal(result.data.canConnect, false);
+  assert.equal(Object.hasOwn(result.data, "messages"), false, "mailbox status never returns a general inbox list");
   assert.ok(!JSON.stringify(result).includes(account.private_key));
   connection = { email: user.email, auth_mode: "workspace", sync_state: { mode: "history" }, sync_lock_at: new Date(Date.now() - 16 * 60000).toISOString() };
   assert.equal((await route.GET()).data.connection.syncInProgress, false, "expired sync leases must not leave the mailbox locked in the UI");
@@ -223,6 +224,39 @@ test("managed mode refuses new OAuth connections and pending callbacks before cr
   assert.equal((await connect.POST(new Request("https://crm.example"))).status, 409);
   const callback = load("src\\app\\api\\auth\\gmail\\callback\\route.ts", mocks);
   assert.equal((await callback.GET(new Request("https://crm.example"))).status, 409);
+});
+
+test("OAuth callback explains when Workspace settings are not active after a Gmail API 403", async () => {
+  const state = "a".repeat(43);
+  const oauthConfig = { GOOGLE_MAILBOX_MODE: "oauth" };
+  const query = {
+    delete: () => query, eq: () => query, gt: () => query, select: () => query,
+    maybeSingle: async () => ({ data: { encrypted_verifier: "stored-verifier" }, error: null }),
+  };
+  const admin = { from: () => query };
+  const callback = load("src\\app\\api\\auth\\gmail\\callback\\route.ts", {
+    "@/lib/server/auth": { ...auth, requireUser: async () => ({ user, supabase: {} }) },
+    "@/lib/server/env": { appUrl: () => "https://crm.example" },
+    "@/lib/server/integration-settings": { getIntegrationConfig: async () => oauthConfig },
+    "@/lib/server/login-crypto": { decryptSession: () => "verifier" },
+    "@/lib/server/operational": { databaseError: error => { if (error) throw error; } },
+    "@/lib/server/operational-intake": { secureEqual: () => true },
+    "@/lib/server/operational-gmail": {
+      canConnectMailbox() {}, crmSessionId: async () => "session",
+      gmailCallback: () => "https://crm.example/api/auth/gmail/callback", gmailCookie: "oauth-cookie",
+      gmailCryptoKey: () => "key", gmailScopes: ["read", "send"],
+      googleTokenRequest: async () => ({ access_token: "access", refresh_token: "refresh", expires_in: 3600, scope: "read send" }),
+      gmailRequest: async () => { throw new HttpError(403, "Gmail request failed (Google HTTP 403)."); },
+      oauthStateHash: () => "hash",
+    },
+    "@/lib/supabase/server": { getSupabaseAdminClient: () => admin },
+    "next/headers": { cookies: async () => ({ get: () => ({ value: state }), set() {} }) },
+    "next/server": { NextResponse: { json: (data, options) => ({ data, status: options?.status ?? 200 }) } },
+  });
+  const result = await callback.GET(new Request(`https://crm.example/api/auth/gmail/callback?state=${state}&code=authorization-code`));
+  assert.equal(result.status, 403);
+  assert.match(result.error, /individual OAuth/);
+  assert.match(result.error, /live CRM has saved Workspace mode/);
 });
 
 test("OAuth connect accepts new domain users, supplies Google domain hint and requires credentials", async () => {
@@ -287,7 +321,7 @@ test("OAuth status hides old outside-domain mailboxes and disables connect and s
   assert.equal(outside.canConnect, false);
   assert.equal(outside.canSync, false);
   assert.equal(outside.connection, null);
-  assert.deepEqual(outside.messages, []);
+  assert.equal(Object.hasOwn(outside, "messages"), false);
   assert.match(outside.unavailableReason, /@dmhca.in/);
   const api = load("src\\lib\\server\\operational-gmail.ts", mocks);
   const mailbox = await api.currentGmailMailbox({}, user.id, email);

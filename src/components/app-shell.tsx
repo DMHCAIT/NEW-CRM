@@ -148,7 +148,7 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
   if (!user) return <>{children}</>;
   const previewRole = user.profile.role;
   const initials = user.profile.fullName.split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase();
-  const visibleItems = navigationItems.filter((item) => user.permissions.includes(item.permission)
+  const visibleItems = navigationItems.filter((item) => (!item.permission || user.permissions.includes(item.permission))
     && (item.href !== "/admin/login-activity" || previewRole === "admin" || previewRole === "super_admin"));
   const workspaceItems = visibleItems.filter((item) => item.group === "workspace");
   const manageItems = visibleItems.filter((item) => item.group === "manage");
@@ -166,9 +166,8 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
       )}
       <aside className={`sidebar ${mobileOpen ? "sidebar-open" : ""}`} aria-label="Workspace sidebar">
         <div className="brand">
-          <div className="brand-mark" aria-hidden="true">D</div>
           <div>
-            <div className="brand-name">DMHCA</div>
+            <div className="brand-name">IBMP</div>
             <div className="brand-caption">ADMISSIONS CRM</div>
           </div>
           <button className="icon-button sidebar-close" onClick={() => setMobileOpen(false)} aria-label="Close menu">

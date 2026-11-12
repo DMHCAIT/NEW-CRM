@@ -130,7 +130,8 @@ export async function gmailRequest<T>(accessToken: string, path: string): Promis
     headers: { Authorization: `Bearer ${accessToken}` }, cache: "no-store", signal: AbortSignal.timeout(20000),
   });
   if (response.status === 404) throw new HttpError(404, "Gmail history or message no longer exists.");
-  if (!response.ok) throw new HttpError(response.status === 429 ? 429 : 502, `Gmail request failed (Google HTTP ${response.status}). Check mailbox consent, API access and Google quota.`);
+  if (!response.ok) throw new HttpError(response.status === 403 || response.status === 429 ? response.status : 502,
+    `Gmail request failed (Google HTTP ${response.status}). Check mailbox consent, API access and Google quota.`);
   return await response.json() as T;
 }
 export async function validGmailToken(admin: SupabaseClient, connection: { user_id: string; encrypted_tokens: string | null }, loginEmail?: string) {

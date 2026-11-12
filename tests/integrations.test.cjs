@@ -233,6 +233,12 @@ test("Gmail errors do not manufacture message data or advance the history cursor
   await assert.rejects(api.gmailSyncPage("token", { mode: "history" }, "100"), /Gmail request failed \(Google HTTP 503\)/);
 });
 
+test("Gmail API 403 remains distinguishable from server and quota failures", async () => {
+  const api = gmail(async () => new Response("", { status: 403 }));
+  await assert.rejects(api.gmailRequest("token", "profile"), error =>
+    error.status === 403 && /Google HTTP 403/.test(error.message));
+});
+
 test("personal mailbox connection is available to lead editors but not viewers", () => {
   const api = gmail(() => assert.fail("No network expected"));
   api.canConnectMailbox(["leads.edit"]);

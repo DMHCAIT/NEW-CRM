@@ -10,6 +10,59 @@ Related-list timelines use compact date-grouped rows, right-aligned timestamps,
 and wrapping field changes. Notes, emails, calls and invoice events retain their
 full details without large padded event cards.
 
+### TeleCMI click to call
+
+Apply migrations through `202611110010_telecmi_calling.sql` using `npm run db:migrate`.
+This integration implements the [TeleCMI India admin click-to-call API](https://doc.telecmi.com/chub-india/docs/click-to-call-admin/),
+`POST https://piopiy.telecmi.com/v1/adminConnect`. Confirm your TeleCMI plan supports it.
+Set **TELECMI_APP_SECRET** in `.env.local` and restart Next.js, or save the account
+app secret in **Integrations > TeleCMI**. App ID, product, documentation URL and device
+routing confirmation are optional reference fields; this API needs only the secret
+and the mapped agent ID. Saved CRM settings replace environment defaults, so if you
+already saved setup in CRM, update the secret there. Shared secrets use the existing
+encrypted, write-only integration settings. Do not enter counsellors' login passwords.
+Only Admin/Super Admin users with `integrations.manage` may change this setup.
+
+Use **Integrations > TeleCMI agents** to map each active CRM user to the agent ID
+supplied by TeleCMI. Each agent can belong to only one CRM user. Mappings are
+service-only database records, not readable or writable directly by browser clients;
+the admin API enforces authorization and revision checks for edits/removals.
+Inactive users cannot receive new or updated mappings; their mappings can be removed.
+
+Counsellors do not need integration-management access or their own API secret.
+Their default `leads.edit` permission allows calls on leads they can access.
+The administrator selects the counsellor by CRM name/email and enters that
+counsellor's unique TeleCMI agent ID. Calls always use the signed-in user's mapping,
+not the lead owner's or administrator's. TeleCMI attributes call history to the
+agent supplied in `agent_id`; configure each agent's name/email in TeleCMI itself.
+CRM cannot substitute an arbitrary email/name for a provider-issued agent ID.
+The CRM Calls timeline also displays the counsellor name, TeleCMI agent ID and
+provider request ID, when accepted. This is call logging, not audio recording;
+audio recording availability and consent settings are managed in TeleCMI.
+
+Open a consented test lead and press **Click to call**. The server verifies
+`leads.edit` and lead visibility, loads the signed-in user's mapping, and sends
+`agent_id`, `token`, `to` and a unique request ID in `custom`. Destination numbers
+use the existing lead phone/country-code normalization, without the leading `+`.
+TeleCMI rings the agent first, then the lead after the agent answers.
+**Check saved setup is local only**; a real test call is needed to verify credentials.
+
+The database atomically reserves each request and logs its activity before sending.
+Repeated request IDs never resend, and a per-user 60-second cooldown prevents rapid
+duplicates across tabs or servers. Acceptance records the provider request ID; it
+does not claim the call connected. Timeouts, malformed responses and server errors
+are recorded as unknown: inspect your agent and TeleCMI call history before retrying.
+If the provider accepted a request but saving the result fails, CRM explicitly warns
+against retrying. Historical phone-app attempts and scheduled calls are unchanged.
+
+TeleCMI must configure each agent's supported Windows/desktop app, mobile app or
+registered phone routing and availability. CRM cannot detect installed apps or
+guarantee which device rings. Configure your approved outbound caller ID, account
+balance, agent availability and number permissions in TeleCMI. No public webhook,
+browser SDK or inbound CRM URL is required to initiate calls. Call-status/CDR
+webhooks, recordings and connected-call durations are not implemented; use TeleCMI
+for those outcomes. Other TeleCMI products/regions require a separately verified API.
+
 ### Images in lead notes
 
 The Notes editor supports image uploads and clipboard paste (Ctrl+V / Cmd+V),
@@ -986,6 +1039,23 @@ columns without deleting existing invoices, leads, payments or approvals.
 
 Open **Courses** as an Admin/Super Admin with `settings.manage`:
 
+Migration `202611110011_course_fee_catalog.sql` loads the supplied 144 unique
+courses: 30 PG Diplomas, 70 Fellowships, 24 Certificates (including the Advanced
+Certificate), and 20 PGC courses. DMHCA INR and USD amounts are stored exactly as
+provided, including paise; the repeated Certificate in Neonatal Care is stored
+once. Matching names retain their existing IDs and become active with the updated
+DMHCA fees. New IBMP USD fees remain unset; existing IBMP prices are preserved.
+No existing invoice or enrollment snapshot is changed. These are catalogue prices
+before the invoice's applicable tax/discount rules; the import adds no tax or
+currency conversion. Run `npm run db:migrate`, then Refresh the Courses workspace.
+
+Migration `202611110012_course_lead_picklist.sql` also adds the active catalogue
+names to **CRM settings > Courses**, making them available in lead course dropdowns.
+Existing course choices, other picklists, custom fields and duplicate rules are
+preserved; existing leads are not renamed. Matching choices are merged without
+case-insensitive duplicates. Reload CRM settings or the lead form after migration.
+This is a one-time merge; later catalogue edits and lead dropdown edits remain separate.
+
 1. Add each course's **DMHCA INR**, **DMHCA USD** and **IBMP USD** prices separately. There is no
    automatic currency conversion. Staff with `invoices.view` can read prices;
    only administrators can change them or deactivate courses. The new
@@ -1728,6 +1798,45 @@ allow policy creates a separate lead. Never embed source/signing keys in public
 forms or chatbot frontend bundles.
 
 ### Facebook Lead Ads
+
+#### Connecting 10 or more Meta instant forms
+
+1. Fill `FACEBOOK_APP_ID`, `FACEBOOK_APP_SECRET`,
+   `FACEBOOK_WEBHOOK_VERIFY_TOKEN` and `FACEBOOK_GRAPH_VERSION` in `.env.local`.
+   Use your actual Meta App ID/secret, choose a private verification token, and
+   select a supported Graph version from your app dashboard. Restart Next.js.
+   Alternatively, save these in **Integrations > Facebook Lead Ads**; saved CRM
+   settings replace environment defaults. Do not configure both with different values.
+2. Deploy CRM at a publicly reachable HTTPS origin and set `NEXT_PUBLIC_APP_URL`
+   to that origin. Meta cannot deliver webhooks to localhost. In your Meta app's
+   Page webhook setup, use `https://YOUR_PUBLIC_CRM_DOMAIN/api/webhooks/facebook`
+   and the identical verification token. Subscribe to `leadgen`.
+3. Ensure your app/business has the required `leads_retrieval` and Page access,
+   any required App Review/production approval, and Leads Access permissions.
+   Authorize the app for each Page's `leadgen` subscription; webhook verification
+   alone does not subscribe every Page.
+4. In **Integrations > Facebook Pages**, save each numeric Page ID and its own
+   Page access token. Tokens are encrypted and write-only. Ten forms on one Page
+   need one Page connection; forms on multiple Pages need one connection per Page.
+   Leave legacy `FACEBOOK_PAGE_ID` / `FACEBOOK_PAGE_ACCESS_TOKEN` empty when using
+   these saved Page connections.
+5. Press **Check forms & subscription**. The check requests up to 100 forms and
+   displays their names, IDs and statuses. If Meta returns a truncated list,
+   obtain any missing Form IDs from Meta. Merely listing a form does not route it.
+6. Under **Lead source routing**, press **Create source**, choose **Facebook Lead
+   Ads**, enter a distinct source name, Page ID and exact Form ID, then select an
+   active counsellor and initial stage. Repeat for all 10 forms. You do not need
+   ten app secrets, ten webhooks or form-specific environment variables.
+7. Use Meta's [Lead Ads Testing Tool](https://developers.facebook.com/tools/lead-ads-testing/)
+   for each form. Verify webhook delivery and the correct source, counsellor and
+   stage in CRM. Forms must collect name and phone; email is optional. Replayed
+   events are deduplicated. A matching existing lead may retain its current owner
+   under your duplicate policy instead of becoming a new lead.
+
+This receives new webhook-delivered leads; it does not backfill historical form
+submissions. App identity/forms checks are not proof of end-to-end lead delivery.
+Actual Page IDs, Form IDs, tokens, assignments and Meta-side approval are required
+before the forms are connected.
 
 In **Integrations > Facebook Lead Ads**, save `FACEBOOK_APP_ID`,
 `FACEBOOK_APP_SECRET`, `FACEBOOK_WEBHOOK_VERIFY_TOKEN` and `FACEBOOK_GRAPH_VERSION`

@@ -11,7 +11,7 @@ import { checkIntegration } from "@/lib/server/integration-checks";
 import { appUrl } from "@/lib/server/env";
 import { workspaceManaged } from "@/lib/server/gmail-delegation";
 
-const providerSchema = z.enum(["zoom", "razorpay", "stripe", "smtp", "gmail", "intake", "facebook"]);
+const providerSchema = z.enum(["zoom", "razorpay", "stripe", "smtp", "gmail", "intake", "facebook", "telecmi"]);
 export async function GET() {
   try {
     const { user } = await requireUser("integrations.view");

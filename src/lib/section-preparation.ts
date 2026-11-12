@@ -18,7 +18,7 @@ export function sectionReadPaths(href: string, user: CurrentUser) {
 
 export function prepareSidebarSections(user: CurrentUser, currentPath: string, prepare: (href: string) => Promise<unknown>,
   options: { isVisible: () => boolean; onError: (error: unknown) => void }) {
-  const queue = navigationItems.filter(item => item.href !== currentPath && user.permissions.includes(item.permission)
+  const queue = navigationItems.filter(item => item.href !== currentPath && (!item.permission || user.permissions.includes(item.permission))
     && (item.href === "/" || sectionReadPaths(item.href, user).length > 0)).map(item => item.href);
   return prepareQueue(queue, prepare, options);
 }

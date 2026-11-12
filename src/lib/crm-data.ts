@@ -289,10 +289,11 @@ export async function apiRequest<T = unknown>(path: string, init: { method?: str
 }
 
 async function fetchApi<T>(path: string, method: string, body: unknown): Promise<T> {
+  const binaryBody = typeof Blob !== "undefined" && body instanceof Blob;
   const response = await fetch(path, {
     method,
-    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
+    headers: body === undefined ? undefined : binaryBody ? { "Content-Type": body.type } : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : binaryBody ? body : JSON.stringify(body),
     cache: "no-store",
   });
   const payload: unknown = await response.json().catch(() => ({}));

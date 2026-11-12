@@ -35,7 +35,15 @@ export async function GET(request: Request) {
     if (!tokens.refresh_token) throw new HttpError(400, "Google did not issue an offline refresh token. Remove this app's grant in Google and reconnect with consent.");
     const grantedScopes = tokens.scope?.split(" ") ?? [];
     if (!gmailScopes.every(scope => grantedScopes.includes(scope))) throw new HttpError(403, "Gmail read and send consent are both required.");
-    const profile = await gmailRequest<{ emailAddress: string; historyId: string }>(tokens.access_token, "profile");
+    let profile: { emailAddress: string; historyId: string };
+    try {
+      profile = await gmailRequest<{ emailAddress: string; historyId: string }>(tokens.access_token, "profile");
+    } catch (error) {
+      if (error instanceof HttpError && error.status === 403) {
+        throw new HttpError(403, "Google denied Gmail API access during individual OAuth. This callback is not the Workspace-managed flow. If Workspace-managed access is intended, verify that the live CRM has saved Workspace mode and the latest deployment; otherwise enable Gmail API and grant this mailbox both read and send scopes.");
+      }
+      throw error;
+    }
     if (!profile.emailAddress || !profile.historyId) throw new HttpError(502, "Google returned an invalid mailbox profile.");
     requireOAuthMailbox(profile.emailAddress, user.email);
     const { error: saveError } = await admin.rpc("integration_set_gmail", {

@@ -8,6 +8,7 @@ import { getSupabaseAdminClient } from "@/lib/supabase/server";
 import { checkOrigin } from "@/lib/server/login";
 import { sanitizeSignature, signatureText } from "@/lib/server/email-signature";
 import { parseNoteImages } from "@/lib/server/note-images";
+import { initiateTelecmiCall } from "@/lib/server/telecmi";
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
@@ -28,6 +29,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     } else if (body.action === "activity") {
       const { error } = await supabase.from("activities").insert({ lead_id: id, user_id: user.id, type: "manual", description: requireString(body.content, "Activity", 10000) });
       dbError(error);
+    } else if (body.action === "telecmi_call") {
+      return NextResponse.json(await initiateTelecmiCall(lead, user, body.requestId));
     } else if (body.action === "call_started") {
       const { error } = await supabase.from("activities").insert({
         lead_id: id, user_id: user.id, type: "call", description: "Phone app opened to call lead",

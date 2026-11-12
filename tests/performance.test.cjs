@@ -16,6 +16,7 @@ function client(fetch, { browser = true, now = () => Date.now(), intl = Intl } =
     fetch,
     Date: class extends Date { static now() { return now(); } },
     Intl: intl,
+    Blob,
     ...(browser ? { window: {} } : {}),
   });
   return exports;
@@ -53,6 +54,16 @@ test("notification write subscribers refresh only after a persisted response, in
   const next = api.apiRequest("/api/leads/record", { method: "PATCH", body: {} });
   release(ok({ ok: true })); await next;
   assert.equal(completions, 2);
+});
+
+test("binary API writes preserve image bytes instead of JSON-encoding them", async () => {
+  let request;
+  const image = new Blob(["image-data"], { type: "image/png" });
+  const api = client(async (path, init) => { request = { path, init }; return ok({ url: "https://storage.example.test/image.png" }); });
+  assert.equal((await api.apiRequest("/api/users/signature-image", { body: image })).url, "https://storage.example.test/image.png");
+  assert.equal(request.path, "/api/users/signature-image");
+  assert.equal(request.init.headers["Content-Type"], "image/png");
+  assert.equal(request.init.body, image);
 });
 
 test("simultaneous browser reads share one request without caching invoice status", async () => {
@@ -1050,7 +1061,7 @@ test("sidebar preparation is permission-bound, limited to two sections, and stop
   const items = [
     { href: "/", permission: "dashboard.view" }, { href: "/leads", permission: "leads.view" },
     { href: "/pipeline", permission: "pipeline.view" }, { href: "/invoices", permission: "invoices.view" },
-    { href: "/courses", permission: "invoices.view" }, { href: "/users", permission: "users.view" },
+    { href: "/courses" }, { href: "/users", permission: "users.view" },
     { href: "/admin/login-activity", permission: "access.manage" },
   ];
   const helpers = loadModule("src\\lib\\section-preparation.ts", { "@/lib/navigation": { navigationItems: items } }, { Intl });

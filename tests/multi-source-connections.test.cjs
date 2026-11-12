@@ -93,6 +93,32 @@ test("routing prefers exact Page/form over catch-all and never routes another Pa
   assert.equal(await intake.facebookSource(admin, "2", "20"), null);
 });
 
+test("Meta Page checks request up to 100 forms and return all ten forms without claiming delivery", async () => {
+  const forms = Array.from({ length: 10 }, (_, index) => ({ id: String(100 + index), name: `Meta form ${index + 1}`, status: "ACTIVE" }));
+  let truncated = false;
+  const api = helpers(async (input, options) => {
+    const url = new URL(input);
+    assert.equal(url.origin, "https://graph.facebook.com");
+    assert.equal(options.method, undefined);
+    if (url.pathname.endsWith("/me")) return Response.json({ id: "1", name: "Admissions" });
+    if (url.pathname.endsWith("/leadgen_forms")) {
+      assert.equal(url.searchParams.get("limit"), "100");
+      assert.equal(url.searchParams.get("fields"), "id,name,status");
+      return Response.json({ data: forms, ...(truncated ? { paging: { next: "https://graph.facebook.com/next" } } : {}) });
+    }
+    assert.ok(url.pathname.endsWith("/subscribed_apps"));
+    return Response.json({ data: [{ id: config.FACEBOOK_APP_ID, subscribed_fields: ["leadgen"] }] });
+  });
+  const result = await api.testFacebookPage("1", "page-token", config);
+  assert.equal(result.forms.length, 10);
+  assert.deepEqual(Array.from(result.forms, form => form.id), forms.map(form => form.id));
+  assert.equal(result.formsTruncated, false);
+  assert.equal(result.subscriptionVerified, true);
+  assert.equal(result.leadAccessProven, false);
+  truncated = true;
+  assert.equal((await api.testFacebookPage("1", "page-token", config)).formsTruncated, true);
+});
+
 test("Page token lookup is encrypted, Page-scoped and never falls back for a disabled DB connection", async () => {
   const encrypted = settings.encryptIntegrationValues({ FACEBOOK_PAGE_ACCESS_TOKEN: "page-one-secret" });
   const connection = { encrypted_credentials: encrypted, is_active: true };
@@ -329,6 +355,61 @@ function facebookHarness({ disabled = false, fetchedForm = "20" } = {}) {
   return { api, writes, calls };
 }
 const entry = (page, form, lead) => ({ id: page, changes: [{ field: "leadgen", value: { page_id: page, leadgen_id: lead, ...(form ? { form_id: form } : {}) } }] });
+
+test("ten Meta forms across two Pages keep distinct routes, Page tokens and replay protection", async () => {
+  const formRoutes = Array.from({ length: 10 }, (_, index) => ({
+    page: index < 5 ? "1" : "2", facebook_form_id: String(100 + index),
+    source_id: `source-${index}`, leadId: String(1000 + index),
+  }));
+  const recorded = new Set(), writes = [], graphCalls = [];
+  const admin = { from(table) {
+    const filters = {};
+    const query = {
+      select() { return query; },
+      eq(key, value) { filters[key] = value; return query; },
+      then(resolve, reject) {
+        assert.equal(table, "intake_source_settings");
+        return Promise.resolve({ data: formRoutes.filter(row => row.page === filters.facebook_page_id), error: null }).then(resolve, reject);
+      },
+      async maybeSingle() {
+        if (table === "lead_sources") return { data: { is_active: true }, error: null };
+        assert.equal(table, "inbound_events");
+        return { data: recorded.has(`${filters.source_id}:${filters.external_event_id}`) ? { id: "recorded" } : null, error: null };
+      },
+    };
+    return query;
+  } };
+  const api = route(facebookPath, admin, { "@/lib/server/operational-intake": {
+    ...intake,
+    facebookPageToken: async (_admin, page) => `token-${page}`,
+    facebookGraph: async (id, token) => {
+      const form = formRoutes.find(item => item.leadId === id);
+      assert.ok(form);
+      assert.equal(token, `token-${form.page}`);
+      graphCalls.push(id);
+      return { id, form_id: form.facebook_form_id, field_data: [
+        { name: "full_name", values: [`Student ${id}`] },
+        { name: "phone_number", values: [`+91987654${id}`] },
+      ] };
+    },
+    recordIntake: async (_admin, source, input) => {
+      recorded.add(`${source}:${input.event_id}`);
+      writes.push({ source, input });
+    },
+  } });
+  const event = { object: "page", entry: formRoutes.map(form => entry(form.page, form.facebook_form_id, form.leadId)) };
+  assert.equal((await api.POST(facebookRequest(event))).accepted, 10);
+  assert.equal(writes.length, 10);
+  assert.equal(new Set(writes.map(item => item.source)).size, 10);
+  for (const [index, form] of formRoutes.entries()) {
+    assert.equal(writes[index].source, form.source_id);
+    assert.equal(writes[index].input.event_id, `facebook:${form.leadId}`);
+    assert.equal(writes[index].input.lead.name, `Student ${form.leadId}`);
+  }
+  assert.equal((await api.POST(facebookRequest(event))).accepted, 10);
+  assert.equal(writes.length, 10, "replaying a batch must not import any form twice");
+  assert.equal(graphCalls.length, 10, "persisted replays must not refetch lead data");
+});
 
 test("webhook verifies app-wide signatures before privileged access", async () => {
   const api = route(facebookPath, null, { "@/lib/supabase/server": { getSupabaseAdminClient: () => assert.fail("Must not run") } });

@@ -12,6 +12,10 @@ async function checkedJson(url: string, init: RequestInit, message: string) {
 }
 export async function checkIntegration(provider: IntegrationProvider, config: Record<string, string>, recipient?: string) {
   const value = (key: string) => requireIntegrationValue(config, key);
+  if (provider === "telecmi") {
+    value("TELECMI_APP_SECRET");
+    return "TeleCMI app secret is configured (local check only). No authentication request or call was sent. Map your CRM user to an agent, then use Click to call on a consented test lead to verify the secret, agent availability and routing.";
+  }
   if (provider === "stripe") {
     await checkedJson("https://api.stripe.com/v1/balance", { headers: { Authorization: `Bearer ${value("STRIPE_SECRET_KEY")}` } }, "Stripe authentication failed");
     value("STRIPE_WEBHOOK_SECRET");

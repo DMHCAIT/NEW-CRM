@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Globe, Link2, Mail, Plus, RefreshCw } from "lucide-react";
 import { IntegrationConnections } from "@/components/integration-connections";
 import { FacebookPageConnections } from "@/components/facebook-page-connections";
+import { TelecmiAgentMappings } from "@/components/telecmi-agent-mappings";
 import { SearchableDropdown } from "@/components/searchable-dropdown";
 import { Configuration, OperationFeedback, formValues, operationRequest, useOperationalData } from "./operational-ui";
 import { SectionLoading } from "@/components/section-loading";
@@ -11,8 +12,7 @@ import { SectionLoading } from "@/components/section-loading";
 type Integration = Configuration & { name: string; detail: string; endpoint?: string; webhook?: Configuration };
 type Source = { id: string; name: string; is_active: boolean; allowed_origins: string[]; intake_source_settings: { channel: string; owner_id: string; stage_id: string | null; facebook_page_id: string | null; facebook_form_id?: string | null } | null };
 type SourceData = { sources: Source[]; owners: { id: string; full_name: string }[]; stages: { id: string; name: string }[]; canManage: boolean };
-type Mail = { id: string; gmail_message_id: string; lead_id: string | null; from_email: string; subject: string; body: string; received_at: string | null };
-type GmailData = { managed: boolean; unavailableReason?: string | null; connection: { email: string; last_synced_at: string | null; last_error: string | null; initialSync: boolean; hasPendingPage: boolean; syncInProgress: boolean } | null; messages: Mail[]; canSync: boolean; canConnect: boolean };
+type GmailData = { managed: boolean; unavailableReason?: string | null; connection: { email: string; last_synced_at: string | null; last_error: string | null; initialSync: boolean; hasPendingPage: boolean; syncInProgress: boolean } | null; canSync: boolean; canConnect: boolean };
 
 export default function IntegrationsPage() {
   const state = useOperationalData<{ integrations: Integration[]; unsupported: string[]; note: string }>("/api/integrations");
@@ -27,7 +27,6 @@ export default function IntegrationsPage() {
   const [newKey, setNewKey] = useState<{ id: string; apiKey: string | null } | null>(null);
   const [busy, setBusy] = useState(false);
   const [localError, setLocalError] = useState("");
-  const [mail, setMail] = useState<Mail | null>(null);
   const [editingSource, setEditingSource] = useState<Source | null>(null);
   const [sourceError, setSourceError] = useState("");
   const sourceFeedback = useRef<HTMLDivElement>(null);
@@ -50,9 +49,10 @@ export default function IntegrationsPage() {
   if (state.loading && !state.data) return <SectionLoading title="Integrations" />;
   return <div className="integrations-page">
     <div className="page-heading integration-page-heading"><span className="integration-page-icon"><Link2 size={25} /></span><div><span className="integration-category">SETUP / CONNECTED APPS</span><h1>Integrations</h1><p>Connect your tools. Bring every enquiry, conversation and payment into CRM.</p></div><button className="button button-secondary" onClick={() => { void state.refresh(); void sources.refresh(); void gmail.refresh(); }} disabled={state.loading}><RefreshCw size={14} />Refresh</button></div>
-    <nav className="integration-workspace-nav" aria-label="Integration workspace"><a href="#integration-apps">Apps &amp; setup guides</a>{sources.data?.canManage && <a href="#integration-facebook-pages">Facebook Pages</a>}<a href="#integration-sources">Lead source routing</a><a href="#integration-mailbox">My mailbox</a></nav>
+    <nav className="integration-workspace-nav" aria-label="Integration workspace"><a href="#integration-apps">Apps &amp; setup guides</a><a href="#integration-telecmi">TeleCMI agents</a>{sources.data?.canManage && <a href="#integration-facebook-pages">Facebook Pages</a>}<a href="#integration-sources">Lead source routing</a><a href="#integration-mailbox">My mailbox</a></nav>
     <OperationFeedback {...state} error={localError || state.error} />
     <div id="integration-apps">{state.data && <IntegrationConnections integrations={state.data.integrations} onChange={() => { void state.refresh(); void gmail.refresh(); }} />}</div>
+    <TelecmiAgentMappings />
     {sources.data?.canManage && <FacebookPageConnections canManage={sources.data.canManage} />}
     <section className="panel integration-workspace" id="integration-sources">
       <div className="panel-heading"><div><span className="integration-category">ROUTE NEW ENQUIRIES</span><h2>Websites, chatbots &amp; Facebook forms</h2><p>Choose who receives each source&apos;s enquiries and where new leads start.</p></div>{sources.data?.canManage && !sourceForm && <button className="button button-primary" disabled={Boolean(newKey)} onClick={() => { setSourceError(""); setSourceForm(true); setNewOwnerId(""); setNewStageId(defaultStageId); }}><Plus size={14} />Create source</button>}</div>
@@ -109,13 +109,11 @@ export default function IntegrationsPage() {
       {gmail.data?.connection ? <><p>{gmail.data.managed ? "Managed mailbox (access checked when sending or syncing)" : "Connected mailbox"}: <strong>{gmail.data.connection.email}</strong> · Last sync: {gmail.data.connection.last_synced_at ? new Date(gmail.data.connection.last_synced_at).toLocaleString() : "Never"}</p>
         {gmail.data.connection.last_error && <p role="alert">{gmail.data.connection.last_error}</p>}
         {gmail.data.connection.syncInProgress && <p role="status">Mailbox synchronization is already running. Refresh after it finishes.</p>}
-        <p>{gmail.data.connection.initialSync ? "Initial inbox import; continue syncing until all pages complete." : gmail.data.connection.hasPendingPage ? "Additional message changes remain." : "History cursor ready. Run sync to fetch new changes."}</p>
+        <p>{gmail.data.connection.initialSync ? "Initial mailbox sync; continue until all pages are processed. Only replies matched to a CRM lead appear in that lead's Emails tab." : gmail.data.connection.hasPendingPage ? "Additional message changes remain." : "History cursor ready. Sync to check for new replies to CRM leads."}</p>
         <div className="heading-actions">{gmail.data.canSync && <><button className="button button-primary" disabled={gmail.busy || busy || gmail.data.connection.syncInProgress} onClick={() => void gmail.mutate("/api/integrations/gmail/sync", "POST")}>{gmail.data.connection.hasPendingPage || gmail.data.connection.initialSync ? "Continue sync" : "Sync inbox"}</button><button className="button button-secondary" disabled={gmail.busy || gmail.data.connection.syncInProgress} onClick={() => { if (confirm("Reset the stored history cursor and re-import your inbox?")) void gmail.mutate("/api/integrations/gmail/sync", "DELETE"); }}>Reset expired history</button></>}{gmail.data.canConnect && <button className="button button-secondary" disabled={gmail.busy || Boolean(gmail.data.connection.syncInProgress)} onClick={() => { if (confirm("Delete local Gmail tokens and inbox copy? Linked CRM email history is retained.")) void gmail.mutate("/api/integrations/gmail", "DELETE"); }}>Disconnect locally</button>}</div>
       </> : gmail.data && !gmail.loading && !gmail.error && !gmail.data.unavailableReason && <div className="integration-blank-state"><span className="integration-blank-icon"><Mail size={21} /></span><div><h3>Your mailbox is not connected</h3><p>Ask your administrator to complete Google OAuth setup, then connect with your CRM login email. Lead emails will be sent from your own mailbox.</p><a href="#integration-apps">View Gmail setup guide</a></div></div>}
-      {!!gmail.data?.messages.length && <div className="table-wrap"><table className="data-table"><thead><tr><th>Received</th><th>From</th><th>Subject</th><th>CRM lead</th><th /></tr></thead><tbody>{gmail.data.messages.map((message) => <tr key={message.id}><td>{message.received_at ? new Date(message.received_at).toLocaleString() : "—"}</td><td>{message.from_email}</td><td>{message.subject || "(no subject)"}</td><td>{message.lead_id ? <a href={`/leads/${message.lead_id}`}>Open accessible lead</a> : "No accessible sender match"}</td><td><button className="button button-secondary button-small" onClick={() => setMail(message)}>Read</button></td></tr>)}</tbody></table></div>}
-      {gmail.data?.connection && !gmail.loading && !gmail.error && !gmail.data.messages.length && <div className="integration-blank-state"><span className="integration-blank-icon"><Mail size={21} /></span><div><h3>No inbox messages stored yet</h3><p>{gmail.data.canSync ? "Use Sync inbox or Continue sync to import messages from your connected mailbox." : "Ask an integration administrator to sync the mailbox. Lead email sending is available from the lead workspace."}</p></div></div>}
-      {mail && <article style={{ marginTop: 20 }}><button className="button button-secondary" onClick={() => setMail(null)}>Close message</button><h3>{mail.subject}</h3><p>From: {mail.from_email}</p><pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{mail.body}</pre></article>}
-      <details className="integration-section-help"><summary>About inbox sync &amp; privacy</summary><p>Latest 50 stored inbox messages. Sender matching uses only leads currently visible to your verified CRM user. Matching emails are also logged to the lead when you have leads.edit permission. Removed Gmail messages leave CRM email history intact. Inbox sync is requested here, not a background import at login. In OAuth mode, disconnect locally deletes tokens; revoke the app in Google to revoke the remote grant. In managed mode, a Workspace super administrator revokes domain-wide delegation centrally.</p></details>
+      {gmail.data?.connection && <p className="integration-network-note">Your full inbox is not displayed in CRM. Open a lead&apos;s Emails tab to see only messages sent to that lead and replies matched to the lead&apos;s email address. Unmatched mailbox messages are not shown here.</p>}
+      <details className="integration-section-help"><summary>About inbox sync &amp; privacy</summary><p>Sync checks mailbox changes and links inbound messages to a lead only when the sender matches that lead&apos;s email. Conversations are shown on the individual lead record, not as a general inbox. Inbox sync is requested here, not a background import at login. In OAuth mode, disconnect locally deletes tokens; revoke the app in Google to revoke the remote grant. In managed mode, a Workspace super administrator revokes domain-wide delegation centrally.</p></details>
     </section>
   </div>;
 }

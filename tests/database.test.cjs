@@ -75,6 +75,113 @@ before(async () => {
 
 after(async () => { if (db) await db.close(); });
 
+test("supplied course fee list seeds 144 unique active courses with exact DMHCA prices and unset IBMP fees", async () => {
+  const sql = readFileSync(join(__dirname, "..", "supabase", "migrations", "202611110011_course_fee_catalog.sql"), "utf8");
+  const expected = [...sql.matchAll(/\('((?:''|[^'])+)', (\d+(?:\.\d+)?), (\d+)\)/g)].map(match => ({
+    name: match[1].replaceAll("''", "'"), price_inr: Number(match[2]).toFixed(2), price_usd: Number(match[3]).toFixed(2),
+  }));
+  assert.equal(expected.length, 144);
+  assert.equal(new Set(expected.map(course => course.name)).size, 144);
+  const { rows } = await asUser(counselorId, counselorSession, tx => tx.query(
+    "select name,price_inr,price_usd,price_ibmp_usd,is_active from public.courses where name=any($1::text[])", [expected.map(course => course.name)]));
+  assert.equal(rows.length, 144, "counsellors must be able to read the entire supplied catalogue");
+  for (const course of expected) assert.deepEqual(rows.find(row => row.name === course.name), {
+    ...course, price_ibmp_usd: null, is_active: true,
+  });
+  const groups = [
+    ["PG Diploma in ", 30, 409746400, 5360000],
+    ["Fellowship in ", 70, 979144619, 13250000],
+    ["PGC in ", 20, 82190000, 1139000],
+  ];
+  for (const [prefix, count, inrPaise, usdCents] of groups) {
+    const group = rows.filter(row => row.name.startsWith(prefix));
+    assert.equal(group.length, count);
+    assert.equal(group.reduce((sum, row) => sum + Math.round(Number(row.price_inr) * 100), 0), inrPaise);
+    assert.equal(group.reduce((sum, row) => sum + Math.round(Number(row.price_usd) * 100), 0), usdCents);
+  }
+  const certificates = rows.filter(row => /^(Advanced )?Certificate in /.test(row.name));
+  assert.equal(certificates.length, 24);
+  assert.equal(certificates.reduce((sum, row) => sum + Math.round(Number(row.price_inr) * 100), 0), 59710000);
+  assert.equal(certificates.reduce((sum, row) => sum + Math.round(Number(row.price_usd) * 100), 0), 824000);
+  for (const [name, inr, usd] of [
+    ["PG Diploma in Emergency Medicine", "139831.00", "1800.00"],
+    ["PG Diploma in Ultrasonography", "161017.00", "2200.00"],
+    ["PG Diploma in Hospital Administration", "118644.00", "1300.00"],
+    ["Fellowship in Clinical Cardiology", "127118.64", "1700.00"],
+    ["Fellowship in Cardiothoracic Surgery", "164221.45", "2200.00"],
+    ["Fellowship in Women's Imaging", "135593.22", "1850.00"],
+    ["Certificate in Neonatal Care", "11900.00", "170.00"],
+    ["Advanced Certificate in Cath Lab Technology", "36200.00", "500.00"],
+    ["PGC in ENT", "50850.00", "700.00"],
+    ["PGC in Family Planning", "33900.00", "470.00"],
+  ]) {
+    const course = rows.find(row => row.name === name);
+    assert.equal(course.price_inr, inr, name);
+    assert.equal(course.price_usd, usd, name);
+  }
+});
+
+test("course fee migration updates matching courses without duplicating IDs, clearing IBMP or rewriting invoices", async () => {
+  const { migrationBody } = require("../scripts/database.cjs");
+  const migration = migrationBody(readFileSync(join(__dirname, "..", "supabase", "migrations", "202611110011_course_fee_catalog.sql"), "utf8"));
+  const rollback = new Error("Rollback catalogue migration fixture");
+  await assert.rejects(db.transaction(async tx => {
+    const original = (await tx.query("select id from public.courses where name='Fellowship in Clinical Cardiology'")).rows[0];
+    await tx.query("update public.courses set price_inr=140000,price_usd=2000,price_ibmp_usd=2500 where id=$1", [original.id]);
+    await tx.exec("set local role authenticated");
+    await tx.query("select set_config('request.jwt.claims',$1,true)", [JSON.stringify({ sub: counselorId, session_id: counselorSession })]);
+    const invoiceId = (await tx.query("select public.operational_create_invoice($1::jsonb) as id",
+      [JSON.stringify({ ...invoiceDefaults, course_id: original.id, lead_id: leadId, currency: "USD", due_date: "2026-12-31" })])).rows[0].id;
+    await tx.exec("reset role");
+    const invoiceBefore = (await tx.query("select * from public.invoices where id=$1", [invoiceId])).rows[0];
+    const itemsBefore = (await tx.query("select * from public.invoice_items where invoice_id=$1", [invoiceId])).rows;
+    await tx.query("update public.courses set is_active=false where id=$1", [original.id]);
+    const countBefore = (await tx.query("select count(*)::int as count from public.courses")).rows[0].count;
+    await tx.exec(migration);
+    await tx.exec(migration);
+    assert.deepEqual((await tx.query("select id,price_inr,price_usd,price_ibmp_usd,is_active from public.courses where id=$1", [original.id])).rows[0], {
+      id: original.id, price_inr: "127118.64", price_usd: "1700.00", price_ibmp_usd: "2500.00", is_active: true,
+    });
+    assert.equal((await tx.query("select count(*)::int as count from public.courses")).rows[0].count, countBefore);
+    assert.deepEqual((await tx.query("select * from public.invoices where id=$1", [invoiceId])).rows[0], invoiceBefore);
+    assert.deepEqual((await tx.query("select * from public.invoice_items where invoice_id=$1", [invoiceId])).rows, itemsBefore);
+    assert.equal((await tx.query("select price_inr from public.courses where id=$1", [courseId])).rows[0].price_inr, "200.00");
+    throw rollback;
+  }), error => error === rollback);
+});
+
+test("course names populate the settings picklist without changing existing choices or unrelated configuration", async () => {
+  const { rows: [saved] } = await db.query("select value from public.crm_settings where setting_key='lead_configuration'");
+  const catalogue = (await db.query("select name from public.courses where is_active and name <> all($1::text[])",
+    [["Admission fee", "Installment course", "Loan course", "Payment course"]])).rows;
+  assert.equal(catalogue.length, 144);
+  for (const { name } of catalogue) assert.ok(saved.value.picklists.course.includes(name), name);
+  const { migrationBody } = require("../scripts/database.cjs");
+  const migration = migrationBody(readFileSync(join(__dirname, "..", "supabase", "migrations", "202611110012_course_lead_picklist.sql"), "utf8"));
+  const rollback = new Error("Rollback course picklist fixture");
+  await assert.rejects(db.transaction(async tx => {
+    const config = {
+      duplicateFields: "phone", creationPolicy: "warn",
+      fields: [{ name: "Custom field", active: true, type: "text", options: [] }],
+      picklists: { course: ["Legacy course", "fellowship in clinical cardiology"], country: ["India"], source: ["Website"] },
+    };
+    await tx.query("update public.crm_settings set value=$1::jsonb where setting_key='lead_configuration'", [JSON.stringify(config)]);
+    const leadsBefore = (await tx.query("select id,course from public.leads order by id")).rows;
+    await tx.exec(migration);
+    const first = (await tx.query("select value from public.crm_settings where setting_key='lead_configuration'")).rows[0].value;
+    assert.deepEqual({ ...first, picklists: config.picklists }, config);
+    assert.deepEqual(first.picklists.country, config.picklists.country);
+    assert.deepEqual(first.picklists.source, config.picklists.source);
+    assert.ok(first.picklists.course.includes("Legacy course"));
+    assert.equal(first.picklists.course.filter(name => name.toLowerCase() === "fellowship in clinical cardiology").length, 1);
+    for (const { name } of catalogue) assert.ok(first.picklists.course.some(option => option.toLowerCase() === name.toLowerCase()), name);
+    await tx.exec(migration);
+    assert.deepEqual((await tx.query("select value from public.crm_settings where setting_key='lead_configuration'")).rows[0].value, first);
+    assert.deepEqual((await tx.query("select id,course from public.leads order by id")).rows, leadsBefore);
+    throw rollback;
+  }), error => error === rollback);
+});
+
 test("company-specific prices are authoritative and missing IBMP fees never fall back to DMHCA", async () => {
   const course = (await db.query("insert into public.courses(name,price_inr,price_usd) values($1,1000,25) returning id",
     [`Separate pricing ${randomUUID()}`])).rows[0].id;
@@ -776,6 +883,68 @@ test("automation runs execute real actions once per user/rule/lead/day", async (
   assert.equal((await asUser(adminId, adminSession, (tx) => tx.query("select public.operational_run_automation($1,$2) as count", [id, leadId]))).rows[0].count, 0);
   assert.equal((await db.query("select * from public.notifications where user_id=$1", [adminId])).rows.length, 1);
   await assert.rejects(asUser(counselorId, counselorSession, (tx) => tx.query("select public.operational_run_automation($1,$2)", [id, leadId])), /Not authorized/);
+});
+
+test("assignment automations rotate integration leads, notify website assignees and route stage changes", async () => {
+  const websiteSourceId = "20000000-0000-4000-8000-000000000101";
+  const facebookSourceId = "20000000-0000-4000-8000-000000000102";
+  const websiteLeadIds = ["30000000-0000-4000-8000-000000000101", "30000000-0000-4000-8000-000000000102"];
+  const facebookLeadIds = ["30000000-0000-4000-8000-000000000103", "30000000-0000-4000-8000-000000000104"];
+  await db.exec("begin");
+  try {
+    const stages = await db.query("select id,name from public.lead_stages where name in ('Junk','Not Interested','Closed Won')");
+    const stage = Object.fromEntries(stages.rows.map(row => [row.name, row.id]));
+    assert.ok(stage.Junk && stage["Not Interested"] && stage["Closed Won"]);
+    await db.query(`insert into public.lead_sources(id,name,api_key_hash) values
+      ($1,'Assignment website source','website-test-hash'),($2,'Assignment Facebook source','facebook-test-hash')`,
+    [websiteSourceId, facebookSourceId]);
+    await db.query(`insert into public.intake_source_settings(source_id,channel,owner_id,created_by,facebook_page_id)
+      values($1,'website',$3,$3,null),($2,'facebook',$3,$3,'987654321')`,
+    [websiteSourceId, facebookSourceId, adminId]);
+    await db.query(`update public.lead_assignment_automations
+      set enabled=true,strategy='round_robin',owner_ids=array[$1::uuid,$2::uuid],next_owner_index=0
+      where rule_key='facebook'`, [counselorId, superId]);
+    await db.query(`update public.lead_assignment_automations
+      set enabled=true,strategy='single',owner_ids=array[$1::uuid]
+      where rule_key='website'`, [superId]);
+
+    async function createIntakeLead(id, sourceId, sourceName, eventId, phone) {
+      await db.query(`insert into public.leads(id,name,phone,normalized_phone,source,created_by,assignee_id)
+        values($1,$2,$3,$4,$5,$6,$6)`, [id, `Assignment ${eventId}`, phone, phone, sourceName, adminId]);
+      await db.query(`insert into public.inbound_events(source_id,lead_id,payload,status,external_event_id)
+        values($1,$2,'{}'::jsonb,'created',$3)`, [sourceId, id, eventId]);
+      return (await db.query("select assignee_id from public.leads where id=$1", [id])).rows[0].assignee_id;
+    }
+
+    assert.equal(await createIntakeLead(websiteLeadIds[0], websiteSourceId, "Assignment website source", "website-1", "8888888001"), superId);
+    const notification = await db.query("select type,payload from public.notifications where lead_id=$1 and user_id=$2", [websiteLeadIds[0], superId]);
+    assert.equal(notification.rows.length, 1);
+    assert.equal(notification.rows[0].type, "lead_assigned");
+    assert.match(notification.rows[0].payload.message, /New website lead assigned/);
+    const snapshot = await asUser(superId, superSession, tx => tx.query("select public.crm_notification_snapshot() as data"));
+    assert.ok(snapshot.rows[0].data.notifications.some(item => item.lead_id === websiteLeadIds[0] && item.type === "lead_assigned"));
+
+    assert.equal(await createIntakeLead(facebookLeadIds[0], facebookSourceId, "Assignment Facebook source", "facebook-1", "8888888002"), counselorId);
+    assert.equal(await createIntakeLead(facebookLeadIds[1], facebookSourceId, "Assignment Facebook source", "facebook-2", "8888888003"), superId);
+
+    await db.query(`update public.lead_assignment_automations
+      set enabled=true,strategy='single',owner_ids=array[$1::uuid]
+      where rule_key='junk'`, [counselorId]);
+    await db.query("update public.leads set stage_id=$1 where id=$2", [stage.Junk, websiteLeadIds[0]]);
+    assert.equal((await db.query("select assignee_id from public.leads where id=$1", [websiteLeadIds[0]])).rows[0].assignee_id, counselorId);
+    await db.query(`update public.lead_assignment_automations
+      set enabled=true,strategy='single',owner_ids=array[$1::uuid]
+      where rule_key='not_interested'`, [superId]);
+    await db.query("update public.leads set stage_id=$1 where id=$2", [stage["Not Interested"], websiteLeadIds[0]]);
+    assert.equal((await db.query("select assignee_id from public.leads where id=$1", [websiteLeadIds[0]])).rows[0].assignee_id, superId);
+    await db.query(`update public.lead_assignment_automations
+      set enabled=true,strategy='single',owner_ids=array[$1::uuid]
+      where rule_key='closed_won'`, [counselorId]);
+    await db.query("update public.leads set stage_id=$1 where id=$2", [stage["Closed Won"], websiteLeadIds[0]]);
+    assert.equal((await db.query("select assignee_id from public.leads where id=$1", [websiteLeadIds[0]])).rows[0].assignee_id, counselorId);
+  } finally {
+    await db.exec("rollback");
+  }
 });
 
 test("profile hierarchy rejects cycles and preserves the last active Super Admin", async () => {

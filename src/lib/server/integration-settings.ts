@@ -51,6 +51,17 @@ export function validateIntegrationConfig(provider: IntegrationProvider, values:
     if (value.length > 8192 || (field.multiline ? /\0/ : /[\r\n\0]/).test(value)) throw new HttpError(400, `${field.label} contains invalid characters or is too long.`);
     if ((field.required || (provider === "gmail" && gmailRequiredFields(values).includes(field.key))) && !value.trim()) throw new HttpError(400, `${field.label} is required.`);
   }
+  if (provider === "telecmi") {
+    if ((values.TELECMI_PRODUCT ?? "").length > 150) throw new HttpError(400, "TeleCMI product / plan must be at most 150 characters.");
+    if (values.TELECMI_DEVICE_ROUTING_CONFIRMED && !["true", "false"].includes(values.TELECMI_DEVICE_ROUTING_CONFIRMED))
+      throw new HttpError(400, "TeleCMI device routing confirmation must be true or false.");
+    if (values.TELECMI_API_DOCS_URL) {
+      const parsed = z.string().url().max(2048).safeParse(values.TELECMI_API_DOCS_URL);
+      if (!parsed.success) throw new HttpError(400, "Enter a valid public HTTPS documentation URL without credentials.");
+      const url = new URL(parsed.data);
+      if (url.protocol !== "https:" || url.username || url.password) throw new HttpError(400, "Enter a valid public HTTPS documentation URL without credentials.");
+    }
+  }
   if (provider === "smtp") {
     if (!/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(values.SMTP_HOST) || values.SMTP_HOST.length > 253) throw new HttpError(400, "Use a public SMTP hostname, not an IP address or URL.");
     if (!["465", "587", "2525"].includes(values.SMTP_PORT)) throw new HttpError(400, "SMTP port must be 465, 587 or 2525.");

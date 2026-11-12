@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Play, Workflow } from "lucide-react";
 import { LeadOption, LeadSelect, OperationFeedback, formValues, useOperationalData } from "../integrations/operational-ui";
 import { SectionLoading } from "@/components/section-loading";
+import { LeadAssignmentAutomations } from "@/components/lead-assignment-automations";
 
 type Rule = { id: string; name: string; trigger_config: { type: string }; actions_json: { type: string; days: number }[]; is_active: boolean };
 type Log = { id: string; automation_id: string; lead_id: string; result: string; created_at: string; details: { action?: string } };
@@ -18,7 +19,8 @@ export default function AutomationsPage() {
   return <>
     <div className="page-heading"><div><h1>Automations</h1><p>Organize follow-up rules and review their execution history.</p></div><div className="heading-actions"><button className="button button-secondary" onClick={() => void state.refresh()}>Refresh</button>{data?.canManage && <button className="button button-primary" onClick={() => setShowForm(!showForm)}>Create rule</button>}</div></div>
     <OperationFeedback {...state} />
-    <div className="helper-banner">Supported execution: operator-triggered rules for one selected lead, or an overdue-follow-up batch of up to 100 accessible leads. Actions: notify the operator in-app, or set a follow-up date (requires lead edit permission). No scheduler, background stage triggers, round-robin assignment or provider simulation. Each rule/lead/operator executes at most once per database day; actions and logs commit together.</div>
+    <div className="helper-banner">Standard rules run when an operator selects one lead or an overdue-follow-up batch. Automatic assignment is configured below: Facebook and website/chatbot leads can go to one user or rotate among selected users; Junk, Not Interested and Closed Won stage changes can assign to a selected user. Website assignments appear in in-app notifications. Overdue follow-ups are not scheduled automatically.</div>
+    <LeadAssignmentAutomations />
     {showForm && data?.canManage && <section className="panel"><div className="panel-heading"><div><h2>Create automation rule</h2><p>Configure a supported trigger and action.</p></div><button type="button" className="button button-secondary button-small" onClick={() => setShowForm(false)}>Cancel</button></div><form className="operational-form" onSubmit={async (event) => {
       event.preventDefault();
       const input = formValues(event.currentTarget);

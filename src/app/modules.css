@@ -70,6 +70,24 @@
 .operational-form > .button { justify-self: start; align-self: end; }
 .operational-form > :where(h2, p) { grid-column: 1 / -1; }
 .form-input { width: 100%; }
+.assignment-automations { margin-bottom: 20px; }
+.assignment-automations > .panel-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+.assignment-automations > .panel-heading p { max-width: 720px; margin: 6px 0 0; color: #68768b; line-height: 1.6; }
+.assignment-automation-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); gap: 14px; padding: 0 20px 20px; }
+.assignment-automation-card { min-width: 0; padding: 18px; border: 1px solid #e3eaf3; border-radius: 10px; background: #fbfcfe; }
+.assignment-automation-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
+.assignment-automation-heading h3 { margin: 0; color: #24344c; font-size: 15px; }
+.assignment-automation-heading p { margin: 6px 0 0; color: #68768b; font-size: 12px; line-height: 1.55; }
+.assignment-automation-status { flex: 0 0 auto; padding: 4px 8px; border-radius: 999px; background: #eef1f5; color: #657185; font-size: 11px; font-weight: 600; }
+.assignment-automation-status.is-enabled { background: #e8f7ef; color: #247449; }
+.assignment-automation-strategy { display: grid; gap: 7px; margin: 12px 0; color: #526071; font-size: 12px; }
+.assignment-automation-users { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 2px 12px; max-height: 180px; overflow: auto; margin: 12px 0; padding: 10px 12px; border: 1px solid #e2e8f1; border-radius: 7px; }
+.assignment-automation-users legend { padding: 0 5px; color: #526071; font-size: 12px; }
+.assignment-automation-users .checkbox-field { min-height: 32px; font-size: 12px; }
+.assignment-automation-card > small { color: #68768b; font-size: 11px; }
+.assignment-automation-actions { display: flex; justify-content: flex-end; margin-top: 12px; }
+.assignment-automations > [role="alert"], .assignment-automations > [role="status"], .assignment-automations > p { margin: 12px 20px; }
+.assignment-automation-card button { display: inline-flex; align-items: center; gap: 7px; }
 .live-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 8px 0; min-width: 0; }
 .live-toolbar > :where(input:not([type="checkbox"]), select, textarea) { flex: 1 1 180px; }
 .live-panel, .live-filter-editor { padding: 20px; margin-bottom: 20px; }
@@ -1033,6 +1051,8 @@ textarea.zf-input { resize: vertical; }
 .invoice-external-payment .zf-hint { grid-column: 1 / -1; }
 .invoice-external-payment summary { cursor: pointer; margin-top: 12px; font-weight: 600; }
 .email-signature-preview { display: block; width: 100%; height: 380px; border: 0; background: #fff; }
+.telecmi-setup-body { min-width: 0; padding: 18px 20px; }
+.telecmi-setup-body > p { line-height: 1.6; margin-bottom: 14px; }
 .user-email-signature { grid-column: 1 / -1; min-width: 0; }
 .user-email-signature textarea { font-family: monospace; }
 .user-email-signature small { font-size: 12px; color: #667085; line-height: 1.5; }

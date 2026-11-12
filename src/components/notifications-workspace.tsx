@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { ArrowUpRight, Bell, BellRing, Check, CheckCheck, Clock3, Phone } from "lucide-react";
+import { ArrowUpRight, Bell, BellRing, Check, CheckCheck, Clock3, Phone, UserRound } from "lucide-react";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { apiRequest, errorMessage, formatDateTime, getCachedApiRead, subscribeApiWrites } from "@/lib/crm-data";
 import { notificationLeadPath, type NotificationData, type NotificationRow } from "@/lib/notifications";
@@ -46,19 +46,21 @@ export function NotificationsWorkspace() {
     } catch (failure) { setError(errorMessage(failure, "Could not mark notification as read.")); }
     finally { setBusy(""); }
   }
-  return <div className="notifications-workspace"><header className="page-heading notifications-heading"><span className="notifications-heading-icon" aria-hidden="true"><Bell size={23} /></span><div><h1>Notifications</h1><p>Your unread scheduled-call reminders. Select a reminder to open its lead.</p></div><span className="notifications-summary"><span aria-hidden="true" />{data ? `${data.unread} unread` : "Checking reminders"}</span></header>
+  return <div className="notifications-workspace"><header className="page-heading notifications-heading"><span className="notifications-heading-icon" aria-hidden="true"><Bell size={23} /></span><div><h1>Notifications</h1><p>Lead assignments and scheduled-call reminders. Select a notification to open its lead.</p></div><span className="notifications-summary"><span aria-hidden="true" />{data ? `${data.unread} unread` : "Checking notifications"}</span></header>
     {error && <p className="form-error" role="alert">{error}</p>}
-    <section className="panel notifications-panel" aria-labelledby="notifications-list-title"><div className="panel-heading"><div><h2 id="notifications-list-title">Recent notifications{data ? ` (${data.unread} unread)` : ""}</h2><p>Stay on top of your scheduled follow-ups.</p></div><span className="notifications-scope"><Phone size={13} aria-hidden="true" />Scheduled calls only</span></div>
+    <section className="panel notifications-panel" aria-labelledby="notifications-list-title"><div className="panel-heading"><div><h2 id="notifications-list-title">Recent notifications{data ? ` (${data.unread} unread)` : ""}</h2><p>Stay up to date on new lead assignments and scheduled follow-ups.</p></div><span className="notifications-scope"><Bell size={13} aria-hidden="true" />Lead assignments and calls</span></div>
       {!data && !error && <div className="notifications-loading" role="status"><BellRing size={24} aria-hidden="true" /><p>Loading notifications...</p></div>}
       {Boolean(data?.notifications.length) && <ul className="notification-list">{data?.notifications.map(row => {
         const href = notificationLeadPath(row);
-        const content = <><span className="notification-call-icon" aria-hidden="true"><Phone size={18} /></span><div className="notification-copy"><span className="notification-kind">Scheduled call · Unread</span><strong>{typeof row.payload?.message === "string" ? row.payload.message : "Scheduled call reminder"}</strong><time dateTime={row.created_at}><Clock3 size={12} aria-hidden="true" />{formatDateTime(row.created_at)}</time></div>{href && <ArrowUpRight className="notification-open-icon" size={17} aria-hidden="true" />}</>;
+        const isAssignment = row.type === "lead_assigned";
+        const fallback = isAssignment ? "A lead was assigned to you." : "Scheduled call reminder";
+        const content = <><span className="notification-call-icon" aria-hidden="true">{isAssignment ? <UserRound size={18} /> : <Phone size={18} />}</span><div className="notification-copy"><span className="notification-kind">{isAssignment ? "Lead assignment · Unread" : "Scheduled call · Unread"}</span><strong>{typeof row.payload?.message === "string" ? row.payload.message : fallback}</strong><time dateTime={row.created_at}><Clock3 size={12} aria-hidden="true" />{formatDateTime(row.created_at)}</time></div>{href && <ArrowUpRight className="notification-open-icon" size={17} aria-hidden="true" />}</>;
         return <li key={row.id} className={row.is_read ? "" : "notification-unread"}>
           {href ? <Link href={href} prefetch={false}>{content}</Link> : <div>{content}</div>}
           {!row.is_read && <button className="button button-secondary button-small" disabled={Boolean(busy)} onClick={() => void markRead(row)} aria-label={`Mark reminder as read: ${typeof row.payload?.message === "string" ? row.payload.message : "Scheduled call reminder"}`}><Check size={14} aria-hidden="true" />{busy === row.id ? "Saving..." : "Mark read"}</button>}
         </li>;
       })}</ul>}
-      {data && !data.notifications.length && <div className="notifications-empty"><span className="notifications-empty-icon" aria-hidden="true"><CheckCheck size={32} /></span><h3>You&apos;re all caught up</h3><p>No unread scheduled-call reminders.</p><span>When a scheduled call is due, its reminder will appear here.</span></div>}
-      <footer className="notifications-footer"><Bell size={14} aria-hidden="true" /><span>Reminders clear when marked as read or when the related lead is updated.</span></footer>
+      {data && !data.notifications.length && <div className="notifications-empty"><span className="notifications-empty-icon" aria-hidden="true"><CheckCheck size={32} /></span><h3>You&apos;re all caught up</h3><p>No unread lead assignments or scheduled-call reminders.</p><span>New assignment notifications appear when a website lead is routed to you.</span></div>}
+      <footer className="notifications-footer"><Bell size={14} aria-hidden="true" /><span>Mark a notification as read to clear it. Call reminders also clear when the related lead is updated.</span></footer>
     </section></div>;
 }

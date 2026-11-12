@@ -1,8 +1,16 @@
-export type IntegrationProvider = "zoom" | "razorpay" | "stripe" | "smtp" | "gmail" | "intake" | "facebook";
+export type IntegrationProvider = "zoom" | "razorpay" | "stripe" | "smtp" | "gmail" | "intake" | "facebook" | "telecmi";
 export type IntegrationField = { key: string; label: string; secret?: boolean; required?: boolean; placeholder?: string; multiline?: boolean };
 export type IntegrationDefinition = { id: IntegrationProvider; name: string; category: string; detail: string; fields: IntegrationField[]; endpoint?: string; help: string };
 
 export const integrationDefinitions: IntegrationDefinition[] = [
+  { id: "telecmi", name: "TeleCMI", category: "Calling", detail: "Call leads through the TeleCMI India admin click-to-call API using each user's mapped agent.",
+    fields: [
+      { key: "TELECMI_PRODUCT", label: "TeleCMI product / plan", placeholder: "Unconfirmed - ask TeleCMI support" },
+      { key: "TELECMI_API_DOCS_URL", label: "Official account API documentation URL", placeholder: "https://doc.telecmi.com/..." },
+      { key: "TELECMI_APP_ID", label: "App ID (reference only; not required by adminConnect)" },
+      { key: "TELECMI_APP_SECRET", label: "App secret (admin click-to-call token)", secret: true, required: true },
+      { key: "TELECMI_DEVICE_ROUTING_CONFIRMED", label: "Agent device routing confirmed by TeleCMI" },
+    ], help: "Uses https://piopiy.telecmi.com/v1/adminConnect for TeleCMI India accounts. Map each CRM user to their own TeleCMI agent ID below. TeleCMI controls agent device ringing. Never enter an agent login password. The setup check is local only; verify credentials by calling a consented test number." },
   { id: "zoom", name: "Zoom", category: "Meetings", detail: "Create and manage real Zoom meetings from CRM.", endpoint: "/api/webhooks/zoom",
     fields: [
       { key: "ZOOM_ACCOUNT_ID", label: "Account ID", required: true }, { key: "ZOOM_CLIENT_ID", label: "Client ID", required: true },

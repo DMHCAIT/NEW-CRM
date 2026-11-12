@@ -18,7 +18,7 @@ function csvCell(value: string) {
 export async function parseLeadSpreadsheet(file: Pick<File, "name" | "text" | "arrayBuffer">, customFields: string[] = []) {
   if (file.name.toLowerCase().endsWith(".csv")) return parseLeadCsv(await file.text(), customFields);
   if (!file.name.toLowerCase().endsWith(".xlsx")) throw new Error("Choose a CSV or Excel .xlsx file.");
-  const rows = await readSheet(await file.arrayBuffer(), 0);
+  const rows = await readSheet(await file.arrayBuffer(), 1);
   if (rows.length > MAX_LEAD_IMPORT_ROWS + 1) throw new Error(`Import at most ${MAX_LEAD_IMPORT_ROWS.toLocaleString()} leads at a time.`);
   return mapLeadRecords(rows, customFields);
 }
@@ -71,7 +71,14 @@ function mapLeadRecords(records: unknown[][], customFields: string[]): Record<st
     expectedclosurefee: "closureFee", expectedclosuredate: "expectedClosureDate", billingaddress: "billingAddress", note: "note", notes: "note",
   };
   const cellText = (value: unknown) => value === null || value === undefined ? "" : value instanceof Date ? value.toISOString() : String(value);
-  const headers = records[0].map((cell) => {
+  const unnamedColumns = records[0].flatMap((cell, index) => cellText(cell).trim() ? [] : [index]);
+  if (unnamedColumns.some(index => records.slice(1).some(row => cellText(row[index]).trim()))) {
+    throw new Error("CSV contains values under an unnamed column. Add a header or remove that column.");
+  }
+  const normalizedRecords = unnamedColumns.length
+    ? records.map(row => row.filter((_, index) => !unnamedColumns.includes(index)))
+    : records;
+  const headers = normalizedRecords[0].map((cell) => {
     const value = cellText(cell).trim();
     if (value.startsWith("custom:") && customFields.includes(value.slice(7))) return value;
     const key = aliases[value.toLowerCase().replace(/\s*\(required\)\s*$/, "").replace(/[\s_-]/g, "")];
@@ -80,7 +87,7 @@ function mapLeadRecords(records: unknown[][], customFields: string[]): Record<st
   });
   if (new Set(headers).size !== headers.length) throw new Error("CSV contains duplicate headers.");
   if (!headers.includes("name") || !headers.includes("phone")) throw new Error("CSV requires name and phone columns.");
-  return records.slice(1).map((cells, i) => {
+  return normalizedRecords.slice(1).map((cells, i) => {
     if (cells.length !== headers.length) throw new Error(`Row ${i + 2} has ${cells.length} values; expected ${headers.length}.`);
     return Object.fromEntries(headers.map((key, index) => [key, cellText(cells[index]).trim()]));
   });

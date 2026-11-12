@@ -38,8 +38,8 @@ export default function LoginPage() {
     finally { setBusy(false); }
   }
   return <main className={styles.page}>
-    <aside className={styles.story} aria-label="DMHCA admissions workspace">
-      <div className={styles.brand}><span>DMHCA<span className={styles.brandCaption}>ADMISSIONS CRM</span></span></div>
+    <aside className={styles.story} aria-label="IBMP admissions workspace">
+      <div className={styles.brand}><span>IBMP<span className={styles.brandCaption}>ADMISSIONS CRM</span></span></div>
       <div className={styles.storyBody}>
         <span className={styles.eyebrow}><span /> YOUR TEAM. ONE WORKSPACE.</span>
         <h2>Every connection.<br />{" "}A new <span>possibility.</span></h2>
@@ -65,7 +65,7 @@ export default function LoginPage() {
         </ol>
         <div className={styles.formIcon}>{step === "password" ? <Fingerprint size={27} strokeWidth={1.5} /> : <Mail size={26} strokeWidth={1.5} />}</div>
         <h1 id="login-heading">{step === "password" ? "Welcome back." : "Check your inbox."}</h1>
-        <p className={styles.intro}>{step === "password" ? "Sign in to your DMHCA workspace. Your next opportunity starts here." : <>We sent a verification code to <strong>{email}</strong>. Enter it below to securely sign in.</>}</p>
+        <p className={styles.intro}>{step === "password" ? "Sign in to your IBMP workspace. Your next opportunity starts here." : <>We sent a verification code to <strong>{email}</strong>. Enter it below to securely sign in.</>}</p>
         {notice && <p className={styles.notice} role="status"><Check size={16} />{notice}</p>}
         <form onSubmit={submit} className={styles.form} aria-busy={busy}>
           <fieldset disabled={busy} className={styles.fields} aria-label={step === "password" ? "Account credentials" : "Email verification"}>
@@ -95,7 +95,7 @@ export default function LoginPage() {
         <div className={styles.securityNote}><ShieldCheck size={18} /><p>{step === "password" ? "An email verification code adds an extra layer of protection after your password." : "Never share your verification code. Only enter a code you requested."}</p></div>
         <div className={styles.help}><span>{step === "password" ? "Having trouble signing in?" : "Didn't receive your code?"}</span><p>{step === "password" ? "Contact your CRM administrator for account access or a password reset." : "Check your spam folder, or go back to sign in to request a new code."}</p></div>
       </div>
-      <footer className={styles.footer}><span>DMHCA Admissions CRM</span><span><span /> Secure access</span></footer>
+      <footer className={styles.footer}><span>IBMP Admissions CRM</span><span><span /> Secure access</span></footer>
     </section>
   </main>;
 }

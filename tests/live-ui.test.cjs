@@ -123,6 +123,7 @@ const operations = {
   "/api/automations": { automations: [{ id: "rule-1", name: "Follow-up reminder", trigger_config: { type: "manual" }, actions_json: [{ type: "notify_me", days: 1 }], is_active: true }], logs: [], leads: [lead], canManage: true, canEditLeads: true },
   "/api/integrations": { integrations: integrationDefinitions.map(definition => ({ ...configured, id: definition.id, name: definition.name, detail: definition.detail })), unsupported: [], note: "Saved configuration is not proof of a working connection." },
   "/api/integrations/settings": { canManage: true, settings: integrationSettings, appUrl: "https://crm.example" },
+  "/api/integrations/telecmi": { canManage: true, users: [{ id, full_name: profile.fullName, email: profile.email, status: "active" }], mappings: [] },
   "/api/integrations/facebook-pages": { pages: [{ page_id: "12345678", page_name: "Admissions India", is_active: true, tokenConfigured: true, tokenMask: "********", created_at: "2026-10-23T09:00:00Z", updated_at: "2026-10-23T09:00:00Z" }] },
   "/api/integrations/sources": { sources: [{ id: "source-1", name: "Website enquiry", is_active: true, allowed_origins: [], intake_source_settings: { channel: "website", owner_id: id, stage_id: "stage-1", facebook_page_id: null, facebook_form_id: null } }], owners: [{ id, full_name: profile.fullName }], stages, canManage: true },
   "/api/integrations/gmail": { connection: null, messages: [], canSync: true, canConnect: true },
@@ -373,10 +374,11 @@ test("shared sidebar preserves permitted navigation and profile for every role",
     const roleUser = { ...user, profile: { ...profile, role }, permissions: DEFAULT_ROLE_PERMISSIONS[role] };
     const html = renderToStaticMarkup(React.createElement(shell, { user: roleUser }, "Workspace"));
     const sidebar = html.match(/<aside[\s\S]*?<\/aside>/)[0];
-    const expected = navigationItems.filter(item => roleUser.permissions.includes(item.permission)
+    const expected = navigationItems.filter(item => (!item.permission || roleUser.permissions.includes(item.permission))
       && (item.href !== "/admin/login-activity" || ["admin", "super_admin"].includes(role)));
     assert.deepEqual([...sidebar.matchAll(/class="nav-link[^"]*" href="([^"]+)"/g)].map(match => match[1]), expected.map(item => item.href), role);
-    assert.match(sidebar, /class="brand-mark"/);
+    assert.match(sidebar, /class="brand-name">IBMP<\/div>/);
+    assert.doesNotMatch(sidebar, /brand-mark|>DMHCA</);
     assert.match(sidebar, /class="profile-card"/);
     assert.ok(sidebar.includes(role.replaceAll("_", " ")));
     assert.equal(sidebar.includes(">MANAGE<"), expected.some(item => item.group === "manage"), role);
@@ -389,6 +391,7 @@ test("shared sidebar preserves permitted navigation and profile for every role",
   const restricted = { ...user, permissions: ["dashboard.view"] };
   const html = renderToStaticMarkup(React.createElement(shell, { user: restricted }, "Workspace"));
   assert.doesNotMatch(html, />MANAGE<|href="\/users"|href="\/settings"/);
+  assert.match(html, /href="\/courses"/, "every signed-in user can access the course catalog");
 });
 
 test("shared CRM actions retain visible borders and keyboard focus", () => {
@@ -1380,6 +1383,21 @@ test("course catalog searches all records, paginates, omits company setup and pr
   assert.equal(invoiceOpens, 1);
 });
 
+test("non-admin course catalog users can browse but do not get course editing controls", () => {
+  const states = [];
+  let index = 0;
+  const data = { ...operations["/api/courses"], canManage: false };
+  const { CourseCatalog } = load("src\\components\\course-catalog.tsx", {
+    react: { ...React, useEffect() {}, useState(initial) { const key = index++; if (!(key in states)) states[key] = initial; return [states[key], value => { states[key] = value; }]; } },
+    "@/app/integrations/operational-ui": { ...op, useOperationalData: () => operational(data) },
+  });
+  const nodes = elements(CourseCatalog({}));
+  assert.ok(nodes.some(node => node.type === "tbody"));
+  index = 0;
+  assert.doesNotMatch(renderToStaticMarkup(CourseCatalog({})), /Add course|>Edit</);
+  assert.ok(!nodes.some(node => node.type === "form"));
+});
+
 test("course editor groups details and pricing, preserves values and closes only after a confirmed save", async () => {
   const states = [], submissions = [];
   let index = 0, success = false, busy = false;
@@ -1874,17 +1892,6 @@ test("integration setup exposes masked credentials, login warnings and separate 
     assert.equal((form.match(/>Create source<\/button>/g) ?? []).length, 1);
   });
 
-  test("connected mailbox with no stored messages shows an inbox empty state", async () => {
-    const data = { ...emptyIntegrationOperations, "/api/integrations/gmail": { ...operations["/api/integrations/gmail"], connection: {
-      email: "admin@example.com", last_synced_at: null, last_error: null, initialSync: false, hasPendingPage: false, syncInProgress: false,
-    } } };
-    const mock = { ...op, useOperationalData: url => operational(data[url]) };
-    const html = await renderPage("src\\app\\integrations\\page.tsx", { overrides: { "./operational-ui": mock, "@/app/integrations/operational-ui": mock } });
-    assert.match(html, /No inbox messages stored yet/);
-    assert.match(html, /Sync inbox/);
-    assert.doesNotMatch(html, /Your mailbox is not connected|<table/);
-  });
-
   test("lead editors can sync their mailbox while integration viewers are not required", async () => {
     const mailbox = { ...operations["/api/integrations/gmail"], canConnect: false, canSync: true, connection: {
       email: "counselor@example.com", last_synced_at: null, last_error: null, initialSync: false, hasPendingPage: false, syncInProgress: false,
@@ -1971,6 +1978,18 @@ test("integration setup exposes masked credentials, login warnings and separate 
   assert.doesNotMatch(html, /<form[^>]*>[\s\S]*?integration-smtp-test[\s\S]*?<\/form>/);
 });
 
+test("connected mailbox hides the general inbox and directs users to lead conversations", async () => {
+  const data = { ...emptyIntegrationOperations, "/api/integrations/gmail": { ...operations["/api/integrations/gmail"], connection: {
+    email: "admin@example.com", last_synced_at: null, last_error: null, initialSync: false, hasPendingPage: false, syncInProgress: false,
+  } } };
+  const mock = { ...op, useOperationalData: url => operational(data[url]) };
+  const html = await renderPage("src\\app\\integrations\\page.tsx", { overrides: { "./operational-ui": mock, "@/app/integrations/operational-ui": mock } });
+  assert.match(html, /Your full inbox is not displayed in CRM/);
+  assert.match(html, /Open a lead&#x27;s Emails tab/);
+  assert.match(html, /Sync inbox/);
+  assert.doesNotMatch(html, /Your mailbox is not connected|No accessible sender match|<table|>Read</);
+});
+
 test("integration credential actions preserve secrets, block draft testing and show failures without clearing input", async () => {
   const states = [], requests = [];
   let index = 0, failed = false, resets = 0, changes = 0;
@@ -2042,6 +2061,33 @@ test("read-only integration viewers receive setup guidance without credential fo
   assert.doesNotMatch(html, /<form|name="GOOGLE_CLIENT_SECRET"/);
 });
 
+test("Meta Page checks display ten instant forms with explicit routing and delivery guidance", () => {
+  const forms = Array.from({ length: 10 }, (_, index) => ({ id: String(100 + index), name: `Meta form ${index + 1}`, status: "ACTIVE" }));
+  for (const formsTruncated of [false, true]) {
+    const { FacebookPageConnections } = load("src\\components\\facebook-page-connections.tsx", {
+      react: hookStates([null, {
+        page: { id: "1", name: "Admissions" }, forms, formsTruncated, subscriptionVerified: true,
+        message: "Read-only checks only.",
+      }]),
+      "@/app/integrations/operational-ui": {
+        ...opMock, useOperationalData: () => operational({ pages: [] }),
+      },
+    });
+    const html = renderToStaticMarkup(FacebookPageConnections({ canManage: true }));
+    assert.match(html, /10 forms returned/);
+    for (const form of forms) {
+      assert.ok(html.includes(form.name));
+      assert.ok(html.includes(`<code>${form.id}</code>`));
+    }
+    assert.match(html, /Listed forms are not automatically routed/);
+    assert.match(html, /href="#integration-sources"/);
+    assert.match(html, /Meta.*Lead Ads Testing Tool/);
+    assert.match(html, /Forms on the same Page share its token/);
+    assert.equal(html.includes("Only the first page of forms is displayed"), formsTruncated);
+    assert.equal(FacebookPageConnections({ canManage: false }), null);
+  }
+});
+
 test("Facebook form creation distinguishes Page fallback from exact form routing and masks Page tokens", async () => {
   const html = await renderPage("src\\app\\integrations\\page.tsx", {
     states: [true, "facebook", "", "stage-1", "", "", null, false, "", null, null, "", null, false, "", "", false, "", "", "All integrations", ""],
@@ -2067,7 +2113,7 @@ test("integration catalog searches, filters, restores selection and confirms uns
   const cards = () => render().filter(node => node.props?.className?.includes("panel integration-card"));
   const click = text => render().find(node => node.type === "button" && node.props.children === text).props.onClick();
   const search = value => render().find(node => node.props?.["aria-label"] === "Search integrations").props.onChange({ target: { value } });
-  assert.equal(cards().length, 7);
+  assert.equal(cards().length, integrationDefinitions.length);
   click("Email");
   assert.equal(cards().length, 2);
   search("  GMAIL ");
@@ -2088,7 +2134,7 @@ test("integration catalog searches, filters, restores selection and confirms uns
   click("SMTP");
   assert.ok(render().some(node => node.props?.["aria-label"] === "SMTP configuration"));
   render().find(node => node.props?.["aria-label"] === "Close integration settings").props.onClick();
-  assert.equal(cards().length, 7);
+  assert.equal(cards().length, integrationDefinitions.length);
 });
 
 test("every provider has actionable setup, field guidance, verification and troubleshooting", () => {
@@ -2103,6 +2149,31 @@ test("every provider has actionable setup, field guidance, verification and trou
     for (const field of provider.fields) assert.ok(integrationFieldHelp[field.key], field.key);
     const html = renderToStaticMarkup(React.createElement(IntegrationSetupGuide, { provider: provider.id, appUrl: "https://crm.example" }));
     for (const title of ["What you will need", "Verify the complete workflow", "Troubleshooting"]) assert.ok(html.includes(title), `${provider.id}: ${title}`);
+  }
+});
+
+test("TeleCMI setup shows a local-only connection check and admin-only agent mapping form", () => {
+  const { IntegrationConnections } = load("src\\components\\integration-connections.tsx", {
+    react: hookStates(["telecmi"]), "@/app/integrations/operational-ui": opMock,
+  });
+  const tree = IntegrationConnections({ integrations: operations["/api/integrations"].integrations, onChange() {} });
+  const testButton = elements(tree).find(node => node.type === "button" && node.props.children === "Check saved setup");
+  assert.ok(testButton);
+  assert.equal(testButton.props.disabled, false);
+  assert.match(renderToStaticMarkup(tree), /Click to call rings your mapped TeleCMI agent first/);
+  for (const canManage of [true, false]) {
+    const { TelecmiAgentMappings } = load("src\\components\\telecmi-agent-mappings.tsx", {
+      react: hookStates([]), "@/app/integrations/operational-ui": { ...opMock, useOperationalData: () => operational({ ...operations["/api/integrations/telecmi"], canManage }) },
+    });
+    const markup = renderToStaticMarkup(TelecmiAgentMappings());
+    assert.match(markup, /TeleCMI agent mapping/);
+    assert.match(markup, /TeleCMI controls whether its Windows\/desktop app, mobile app/);
+    assert.match(markup, /Click to call rings your mapped TeleCMI agent first/);
+    if (canManage) {
+      assert.match(markup, /aria-label="Save TeleCMI agent mapping"/);
+      assert.ok(markup.includes(profile.email));
+    }
+    else assert.doesNotMatch(markup, /<form|Save agent mapping/);
   }
 });
 
@@ -2837,7 +2908,7 @@ test("duplicate View reveals owners without a broad lead fetch and merges only t
   }
 });
 
-test("lead detail offers safe phone actions and displays saved call appointments", async () => {
+test("lead detail enables TeleCMI click-to-call while retaining saved call appointments", async () => {
   const data = { ...live, lead, notes: [], activities: [], emails: [], scheduledCalls: [
     { id: "future-call", user_id: id, scheduled_at: "2099-12-01T10:00:00Z", status: "scheduled" },
     { id: "past-call", user_id: id, scheduled_at: "2020-01-01T10:00:00Z", status: "scheduled" },
@@ -2846,13 +2917,70 @@ test("lead detail offers safe phone actions and displays saved call appointments
   const html = await renderPage("src\\app\\leads\\[id]\\page.tsx", {
     overrides: { "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({ data, loading: false, error: "", reload() {}, setError() {} }) } },
   });
-  assert.match(html, /href="tel:\+919876543210"/);
+  assert.doesNotMatch(html, /href="tel:/);
+  assert.match(html, /class="button lead-call-button"/);
+  assert.doesNotMatch(html, /class="button lead-call-button" disabled=""/);
+  assert.match(html, /TeleCMI rings your mapped agent first/);
   assert.match(html, /Click to call/);
   assert.match(html, /Schedule a call/);
   assert.match(html, /Next scheduled call/);
   assert.match(html, /1 past due/);
   assert.match(html, /2099/);
   assert.doesNotMatch(html, /2098/);
+});
+
+test("TeleCMI counsellor clicks submit only a request ID and block double-clicks without integration permissions", async () => {
+  for (const refreshFails of [false, true]) {
+    const states = [], requests = [], errors = [];
+    let index = 0, release, reloads = 0;
+    const counselor = { ...user, profile: { ...profile, role: "counselor" }, permissions: ["leads.view", "leads.edit"] };
+    const data = { ...live, user: counselor, lead, notes: [], activities: [], emails: [], scheduledCalls: [] };
+    const Component = load("src\\app\\leads\\[id]\\page.tsx", {
+      react: { ...React, useEffect() {}, useRef: initial => ({ current: initial }),
+        useState(initial) { const key = index++; states[key] = typeof initial === "function" ? initial() : initial; return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }]; },
+      },
+      "@/lib/crm-data": { ...crm, apiRequest: (url, init) => {
+        requests.push({ url, ...init });
+        return new Promise(resolve => { release = resolve; });
+      } },
+      "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({
+        data, loading: false, error: "", setError: value => errors.push(value),
+        async reload() { reloads++; if (refreshFails) throw new Error("Refresh failed"); },
+      }) },
+    }).default;
+    const button = elements(Component()).find(node => node.type === "button" && node.props.className === "button lead-call-button");
+    assert.equal(button.props.disabled, false);
+    button.props.onClick();
+    button.props.onClick();
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].method, "POST");
+    assert.deepEqual(Object.keys(requests[0].body).sort(), ["action", "requestId"]);
+    assert.equal(requests[0].body.action, "telecmi_call");
+    assert.match(requests[0].body.requestId, /^[0-9a-f-]{36}$/);
+    release({ message: "TeleCMI accepted the call request." });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(reloads, 1);
+    assert.equal(states[5], "TeleCMI accepted the call request.");
+    if (refreshFails) assert.match(errors.at(-1), /call request was accepted.*before retrying/);
+    else assert.equal(errors.at(-1), "");
+    assert.equal(requests.length, 1, "refresh failures must not resend a call");
+  }
+});
+
+test("TeleCMI Calls timeline shows the actual counsellor, mapped agent and provider request", async () => {
+  const data = { ...live, lead, notes: [], emails: [], scheduledCalls: [], activities: [{
+    id: "telecmi-activity", type: "call", user_id: id, created_at: "2026-11-11T10:00:00Z",
+    description: "TeleCMI accepted call request; connection not confirmed",
+    meta: { provider: "telecmi", actor_name: "Counsellor One", agent_id: "agent-one", provider_request_id: "provider-one" },
+  }] };
+  const html = await renderPage("src\\app\\leads\\[id]\\page.tsx", {
+    states: [false, false, "", "", "", "", false, false, "", "", "calls", false, "", "", false, Date.now(), "", "timeline"],
+    overrides: { "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({ data, loading: false, error: "", reload() {}, setError() {} }) } },
+  });
+  assert.match(html, /Counsellor One/);
+  assert.match(html, /TeleCMI agent: agent-one/);
+  assert.match(html, /Request: provider-one/);
+  assert.match(html, /connection not confirmed/);
 });
 
 test("many appointments keep the overview compact and all calls appear sorted in the Calls workspace", async () => {
@@ -3037,7 +3165,7 @@ test("lead email composer displays the connected sender alongside existing email
     overrides: { "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({ data, loading: false, error: "", reload() {}, setError() {} }) } },
   });
   assert.match(html, /counselor@gmail.com/);
-  for (const label of ["Email timeline", "Accepted by provider", "Your course information"]) assert.ok(html.includes(label), label);
+  for (const label of ["Email timeline", "Messages sent to this lead and replies from them", "Sync Gmail to check for new replies.", "Accepted by provider", "Your course information"]) assert.ok(html.includes(label), label);
   assert.match(html, /Your Google Workspace mailbox is connected/);
   assert.doesNotMatch(html, /Overview timeline|Notes timeline|Sent through your configured SMTP/);
 });

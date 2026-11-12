@@ -8,7 +8,7 @@ import { getCurrentUser } from "@/lib/server/auth";
 const inter = Inter({ subsets: ["latin"], display: "swap" });
 
 export const metadata: Metadata = {
-  title: "DMHCA CRM",
+  title: "IBMP CRM",
   description: "Role-aware lead management for admissions teams.",
 };
 

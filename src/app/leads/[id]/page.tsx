@@ -18,13 +18,14 @@ import { LeadEmailComposer } from "@/components/lead-email-composer";
 import { LeadNoteComposer } from "@/components/lead-note-composer";
 import { NoteImageAttachments } from "@/components/note-image-attachments";
 import type { NoteImage, NoteImageInput } from "@/lib/note-images";
+import { TELECMI_CALL_MESSAGE } from "@/lib/telecmi";
 
 const loadInvoiceWorkspace = () => import("@/components/invoice-workspace").then(module => module.InvoiceWorkspace);
 const loadCourseCatalog = () => import("@/components/course-catalog").then(module => module.CourseCatalog);
 const InvoiceWorkspace = dynamic(loadInvoiceWorkspace, { loading: () => <SectionLoading title="Invoices" /> });
 const CourseCatalog = dynamic(loadCourseCatalog, { loading: () => <SectionLoading title="Courses" /> });
 
-type Timeline = { id: string; content?: string; images?: NoteImage[]; description?: string; type?: string; created_at: string; user_id: string | null; meta?: { actor_name?: string; changes?: Record<string, { before: unknown; after: unknown; before_label?: string; after_label?: string }> } };
+type Timeline = { id: string; content?: string; images?: NoteImage[]; description?: string; type?: string; created_at: string; user_id: string | null; meta?: { actor_name?: string; provider?: string; agent_id?: string; provider_request_id?: string | null; changes?: Record<string, { before: unknown; after: unknown; before_label?: string; after_label?: string }> } };
 type DuplicateOwner = { assignee: string; merge_target_id: string | null };
 type DetailData = {
   lead: Lead & { customFields: Record<string, string> }; stages: StageRow[]; profiles: Profile[]; user: CurrentUser; configuration: LeadConfiguration;
@@ -43,6 +44,7 @@ export default function LeadDetailPage() {
   const pendingSaves = useRef(0);
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState(false);
+  const callPending = useRef(false);
   const [noteContent, setNoteContent] = useState("");
   const [emailContent, setEmailContent] = useState("");
   const [subject, setSubject] = useState("");
@@ -115,6 +117,22 @@ export default function LeadDetailPage() {
   async function act(callback: () => Promise<void>) {
     setBusy(true); setError(""); setNotice("");
     try { await callback(); } catch (e) { setError(e instanceof Error ? e.message : "Action failed."); } finally { setBusy(false); }
+  }
+  async function callLead() {
+    if (callPending.current || busy || saving || scheduling) return;
+    callPending.current = true;
+    try {
+      await act(async () => {
+        const result = await apiRequest<{ message: string }>(`/api/leads/${id}/actions`, {
+          method: "POST", body: { action: "telecmi_call", requestId: crypto.randomUUID() },
+        });
+        if (activeLeadId.current !== id) return;
+        setNotice(result.message);
+        try { await reload(); } catch {
+          throw new Error("The call request was accepted, but CRM history could not be refreshed. Check your TeleCMI agent and call history before retrying.");
+        }
+      });
+    } finally { callPending.current = false; }
   }
   async function save(patch: Partial<LeadDraft>) {
     pendingSaves.current++; setSaving(true);
@@ -194,6 +212,7 @@ export default function LeadDetailPage() {
       <article className={`timeline-item lead-event-${row.type ?? (row.content !== undefined ? "note" : "activity")}`}><span className="timeline-dot" /><div className="lead-event-card">
       <div className="lead-event-heading"><div className="lead-event-summary"><strong className="timeline-title">{row.meta?.actor_name || data.profiles.find(profile => profile.id === row.user_id)?.fullName || (row.user_id ? "User name unavailable (legacy record)" : "System")}</strong><span className="lead-event-category">{row.content !== undefined ? "Note" : row.type === "call" ? "Call activity" : "Record activity"}</span></div><time dateTime={row.created_at}>{formatDateTime(row.created_at)}</time></div>
       <p>{row.content !== undefined ? "Added a note" : row.description}</p>{row.content && <p>{row.content}</p>}
+      {row.type === "call" && row.meta?.provider === "telecmi" && <p className="field-help">TeleCMI agent: {row.meta.agent_id}{row.meta.provider_request_id && <> | Request: {row.meta.provider_request_id}</>}</p>}
       {row.images && row.images.length > 0 && <NoteImageAttachments key={`${id}-${row.id}`} leadId={id} images={row.images} />}
       {row.meta?.changes && <ul className="lead-change-list">{Object.entries(row.meta.changes).filter(([, change]) => JSON.stringify(change.before) !== JSON.stringify(change.after)).flatMap(([key, change]) => {
         if (key === "custom_fields") {
@@ -226,13 +245,10 @@ export default function LeadDetailPage() {
       </>}
     </div></div><div className="lead-record-actionbar"><div className="lead-communication-actions">
       {can("leads.edit") && <>
-        {callNumber ? <a className="button lead-call-button" href={`tel:${callNumber}`} title={`Open your phone app to call ${callNumber}`} onClick={() => void act(async () => {
-          await apiRequest(`/api/leads/${id}/actions`, { body: { action: "call_started" } });
-          setNotice("Call attempt recorded. Your phone app controls the call; connection is not confirmed.");
-        })}><Phone size={16} />Click to call</a> : <button className="button lead-call-button" disabled title="Add a valid phone number to call this lead."><Phone size={16} />Click to call</button>}
+        <button type="button" className="button lead-call-button" disabled={busy || saving || scheduling || !callNumber} onClick={() => void callLead()} title={callNumber ? TELECMI_CALL_MESSAGE : "Add a valid phone number to call this lead."} aria-describedby="telecmi-call-status"><Phone size={16} />Click to call</button>
         <button className="button lead-schedule-button" disabled={busy || saving || scheduling || scheduleLocked} title={scheduleLocked ? scheduleLockMessage : undefined} onClick={openSchedule}><CalendarClock size={16} />Schedule a call</button>
       </>}
-    </div><span className="lead-call-caption">{scheduleLocked ? scheduleLockMessage : "Calls open in your device's phone app"}</span></div><div className="lead-contact-row"><span><Phone size={13} /><strong>Phone</strong> {callNumber || lead.phone}</span><span><Mail size={13} /><strong>Email</strong> {lead.email || "Not provided"}</span><span><strong>Source</strong> {lead.source}</span></div></section>
+    </div><span className="lead-call-caption" id="telecmi-call-status">TeleCMI rings your mapped agent first. Answer to connect the lead.{scheduleLocked && ` ${scheduleLockMessage}`}</span></div><div className="lead-contact-row"><span><Phone size={13} /><strong>Phone</strong> {callNumber || lead.phone}</span><span><Mail size={13} /><strong>Email</strong> {lead.email || "Not provided"}</span><span><strong>Source</strong> {lead.source}</span></div></section>
     {error && <p className="helper-banner" role="alert">{error}</p>}{notice && <div className="helper-banner lead-record-notice"><span role="status">{notice}</span><button type="button" aria-label="Dismiss notification" onClick={() => setNotice("")}><X size={15} /></button></div>}
     {scheduledCalls.length > 0 && <section className="panel lead-call-summary" aria-label="Call summary"><span className="lead-call-card-icon"><CalendarClock size={18} /></span><div className="lead-next-call"><span>Next scheduled call</span>{nextCall ? <><time dateTime={nextCall.scheduled_at}>{formatDateTime(nextCall.scheduled_at)}</time><span>{data.profiles.find(profile => profile.id === nextCall.user_id)?.fullName ?? "CRM user"}</span></> : <strong>No upcoming calls</strong>}</div><div className="lead-call-summary-counts"><span>{upcomingCalls.length} upcoming</span>{pastDueCalls.length > 0 && <span className="is-overdue">{pastDueCalls.length} past due</span>}</div><button type="button" className="button button-secondary" onClick={() => selectTab("calls")}>View all calls ({scheduledCalls.length})</button></section>}
     {viewDuplicates && duplicates.length > 0 && <section id="lead-duplicate-owners" className="panel live-panel lead-duplicates-panel" aria-label="Duplicate assignees"><div className="detail-section-heading"><div><h2>Duplicate leads</h2><p>A phone number or email matches. Only the existing assignee names are shown.</p></div><button className="button button-secondary" aria-label="Close duplicates" onClick={() => { setViewDuplicates(false); setMergeOpen(false); }}><X size={16} /></button></div>
@@ -320,7 +336,7 @@ export default function LeadDetailPage() {
     }} /></section>}
     {tab === "note" && <section aria-label="Notes timeline" className="lead-section-history"><div className="detail-history-heading">{sectionIntro("Notes timeline", "Notes and conversations, newest first", FileText)}</div>{history(data.notes, "No notes yet. Open Notes to add your first note.")}</section>}
     {<>
-    {tab === "email" && <section aria-label="Email timeline" className="lead-section-history"><div className="detail-history-heading">{sectionIntro("Email timeline", "Incoming and outgoing messages, newest first", Mail)}</div><div className="timeline-list">
+    {tab === "email" && <section aria-label="Email timeline" className="lead-section-history"><div className="detail-history-heading">{sectionIntro("Email timeline", "Messages sent to this lead and replies from them, newest first", Mail)}</div><p className="gmail-compose-hint">Only this lead&apos;s email conversation is shown. Sync Gmail to check for new replies.</p><div className="timeline-list">
       {!data.emails.length && <p className="empty-notes">No email history yet.</p>}
       {data.emails.slice(0, historyLimit).map((email, index) => <div className="lead-timeline-entry" key={email.id}>
         {(index === 0 || new Date(email.created_at).toDateString() !== new Date(data.emails[index - 1].created_at).toDateString()) && <div className="lead-timeline-day">{new Intl.DateTimeFormat("en-IN", { dateStyle: "full" }).format(new Date(email.created_at))}</div>}

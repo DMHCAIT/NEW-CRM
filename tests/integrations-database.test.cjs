@@ -34,6 +34,25 @@ before(async () => {
 });
 after(async () => { if (db) await db.close(); });
 async function service(callback) { return db.transaction(async (tx) => { await tx.exec("set local role service_role"); return callback(tx); }); }
+test("TeleCMI setup supports encrypted credentials and service-only unique agent mappings", async () => {
+  await service(tx => tx.query("insert into public.integration_credentials(provider,encrypted_values,updated_by) values('telecmi','test-ciphertext',$1)", [admin]));
+  const result = await service(tx => tx.query("insert into public.telecmi_agent_mappings(user_id,agent_id,updated_by) values($1,'101_test_agent',$2) returning revision", [owner, admin]));
+  assert.match(result.rows[0].revision, /^[0-9a-f-]{36}$/);
+  await assert.rejects(service(tx => tx.query("insert into public.telecmi_agent_mappings(user_id,agent_id) values($1,'101_test_agent')", [hidden])), /unique/);
+  await assert.rejects(service(tx => tx.query("insert into public.telecmi_agent_mappings(user_id,agent_id) values($1,'other_agent')", [owner])), /unique/);
+  await assert.rejects(service(tx => tx.query("insert into public.telecmi_agent_mappings(user_id,agent_id) values($1,'bad agent')", [hidden])), /check constraint/);
+  for (const role of ["anon", "authenticated"]) {
+    for (const sql of [
+      "select * from public.telecmi_agent_mappings",
+      `insert into public.telecmi_agent_mappings(user_id,agent_id) values('${hidden}','unauthorized')`,
+      "update public.telecmi_agent_mappings set agent_id='unauthorized'",
+      "delete from public.telecmi_agent_mappings",
+    ]) await assert.rejects(db.transaction(async tx => { await tx.exec(`set local role ${role}`); return tx.exec(sql); }), /permission denied/);
+  }
+  const revision = result.rows[0].revision;
+  assert.equal((await service(tx => tx.query("update public.telecmi_agent_mappings set agent_id='replacement' where user_id=$1 and revision=$2 returning user_id", [owner, admin]))).rows.length, 0);
+  assert.equal((await service(tx => tx.query("delete from public.telecmi_agent_mappings where user_id=$1 and revision=$2 returning user_id", [owner, revision]))).rows.length, 1);
+});
 async function asUser(callback, verified = true) {
   return db.transaction(async (tx) => {
     await tx.exec("set local role authenticated");
@@ -41,6 +60,45 @@ async function asUser(callback, verified = true) {
     return callback(tx);
   });
 }
+test("TeleCMI reservations retain counsellor identity and provider IDs with idempotency and per-user cooldowns", async () => {
+  const callId = "55000000-0000-4000-8000-000000000001";
+  const secondId = "55000000-0000-4000-8000-000000000002";
+  const leadId = "55000000-0000-4000-8000-000000000003";
+  await db.query("insert into public.leads(id,name,phone,created_by,assignee_id) values($1,'Call test','+919876543210',$2,$2)", [leadId, owner]);
+  const claim = (id, actor, name, agent) => service(async tx =>
+    (await tx.query("select public.claim_telecmi_call($1,$2,$3,$4,$5,'919876543210') as result", [id, actor, leadId, name, agent])).rows[0].result);
+  const first = await claim(callId, owner, "Counsellor One", "agent-one");
+  assert.deepEqual(first, { claimed: true, id: callId, status: "requesting", provider_request_id: null });
+  assert.equal((await claim(callId, owner, "Counsellor One", "agent-one")).claimed, false);
+  assert.equal(await claim(secondId, owner, "Counsellor One", "agent-one"), null);
+  await assert.rejects(claim(callId, hidden, "Counsellor Two", "agent-two"), /another request/);
+  assert.equal((await claim(secondId, hidden, "Counsellor Two", "agent-two")).claimed, true);
+  assert.equal((await service(tx => tx.query("select public.finish_telecmi_call($1,'accepted','provider-one') as result", [callId]))).rows[0].result, true);
+  assert.deepEqual(await claim(callId, owner, "Counsellor One", "agent-one"), {
+    claimed: false, id: callId, status: "accepted", provider_request_id: "provider-one",
+  });
+  assert.equal((await service(tx => tx.query("select public.finish_telecmi_call($1,'rejected',null) as result", [callId]))).rows[0].result, false);
+  await service(tx => tx.query("select public.finish_telecmi_call($1,'unknown',null)", [secondId]));
+  const activities = (await db.query("select user_id,description,meta from public.activities where lead_id=$1 and meta->>'provider'='telecmi' order by meta->>'agent_id'", [leadId])).rows;
+  assert.equal(activities.length, 2);
+  assert.equal(activities[0].user_id, owner);
+  assert.equal(activities[0].meta.actor_name, "Counsellor One");
+  assert.equal(activities[0].meta.agent_id, "agent-one");
+  assert.equal(activities[0].meta.provider_request_id, "provider-one");
+  assert.equal(activities[0].meta.status, "accepted");
+  assert.match(activities[0].description, /connection not confirmed/);
+  assert.equal(activities[1].user_id, hidden);
+  assert.equal(activities[1].meta.actor_name, "Counsellor Two");
+  assert.equal(activities[1].meta.agent_id, "agent-two");
+  assert.equal(activities[1].meta.status, "unknown");
+  for (const role of ["anon", "authenticated"]) {
+    for (const query of [
+      "select * from public.telecmi_call_attempts",
+      `select public.claim_telecmi_call('${callId}','${owner}','${leadId}','Spoof','agent-one','919876543210')`,
+      `select public.finish_telecmi_call('${callId}','accepted','spoof')`,
+    ]) await assert.rejects(db.transaction(async tx => { await tx.exec(`set local role ${role}`); return tx.exec(query); }), /permission denied/);
+  }
+});
 async function intake(event, lead = { name: "Enquiry", phone: "9876543210", email: "new@example.com" }) {
   return (await service((tx) => tx.query("select public.integration_intake($1,$2,$3::jsonb,$4::jsonb) as result", [source, event, JSON.stringify(lead), JSON.stringify([{ role: "user", content: "Actual chatbot enquiry" }])]))).rows[0].result;
 }

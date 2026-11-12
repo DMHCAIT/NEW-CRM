@@ -9,21 +9,18 @@ import { oauthMailboxDomain, oauthMailboxEligible, workspaceMailboxEligible, wor
 
 export async function GET() {
   try {
-    const { supabase, user } = await requireUser();
+    const { user } = await requireUser();
     canSyncMailbox(user.permissions);
     const admin = getSupabaseAdminClient();
     const config = await getIntegrationConfig("gmail");
     const managed = workspaceManaged(config);
     const eligible = managed ? workspaceMailboxEligible(config, user.email) : oauthMailboxEligible(user.email);
-    const [{ data: connection, error }, { data: messages, error: messageError }] = await Promise.all([
-      admin.from("gmail_connections").select("email,auth_mode,history_id,sync_state,last_synced_at,last_error,sync_lock_at").eq("user_id", user.id).maybeSingle(),
-      supabase.from("gmail_messages").select("id,gmail_message_id,lead_id,from_email,to_email,subject,body,received_at").eq("user_id", user.id).eq("in_inbox", true).eq("is_deleted", false).order("received_at", { ascending: false }).limit(50),
-    ]);
-    databaseError(error); databaseError(messageError);
+    const { data: connection, error } = await admin.from("gmail_connections").select("email,auth_mode,history_id,sync_state,last_synced_at,last_error,sync_lock_at").eq("user_id", user.id).maybeSingle();
+    databaseError(error);
     const usable = eligible && connection && (managed || connection.auth_mode !== "workspace") && connection.email.toLowerCase() === user.email.toLowerCase() ? connection : null;
     return NextResponse.json({ managed, unavailableReason: eligible ? null : managed ? "Your CRM login is outside the configured Workspace domain. Managed Gmail is unavailable for this account." : `Gmail is available only for CRM login mailboxes under @${oauthMailboxDomain}.`, connection: usable ? { email: usable.email, last_synced_at: usable.last_synced_at, last_error: usable.last_error,
       initialSync: usable.sync_state?.mode === "bootstrap", hasPendingPage: Boolean(usable.sync_state?.queue?.length || usable.sync_state?.pageToken), syncInProgress: usable.sync_lock_at ? Date.now() - new Date(usable.sync_lock_at).getTime() < 15 * 60_000 : false } : managed && eligible ? { email: user.email, last_synced_at: null, last_error: null, initialSync: true, hasPendingPage: false, syncInProgress: false } : null,
-      messages: usable ? messages ?? [] : [], canSync: eligible, canConnect: !managed && eligible && (user.permissions.includes("leads.edit") || user.permissions.includes("integrations.manage")) });
+      canSync: eligible, canConnect: !managed && eligible && (user.permissions.includes("leads.edit") || user.permissions.includes("integrations.manage")) });
   } catch (error) { return jsonError(error); }
 }
 export async function DELETE(request: Request) {

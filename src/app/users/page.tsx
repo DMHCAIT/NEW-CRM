@@ -50,10 +50,10 @@ export default function UsersPage() {
         const signature = form.emailSignatureHtml?.trim()
           ? await preparePastedSignature(form.emailSignatureHtml, [], uploadSignatureFile) : "";
         const profile = { ...form, emailSignatureHtml: signature };
-        const pdf = editing === "new" && downloadCredentials ? await createCredentialPdf(form.email.trim(), password) : null;
+        const pdf = editing === "new" && downloadCredentials ? await createCredentialPdf(form.fullName.trim(), form.email.trim(), password) : null;
         await apiRequest("/api/users", { method: editing === "new" ? "POST" : "PATCH", body: editing === "new" ? { ...profile, password } : { action: "update", id: editing, profile } });
         if (pdf) {
-          try { downloadCredentialPdf(pdf); }
+          try { downloadCredentialPdf(pdf, form.fullName.trim()); }
           catch (error) { setError(`User was created, but the credential PDF could not be downloaded. Do not create the user again. ${errorMessage(error, "Check browser download permissions.")}`); }
         }
       }, editing === "new" ? "User created. Share the password through a secure channel; email verification is required at login." : "User saved.");

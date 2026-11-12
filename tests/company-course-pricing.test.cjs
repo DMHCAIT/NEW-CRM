@@ -61,6 +61,41 @@ test("course API persists the independent IBMP USD fee and supports explicitly c
   }
 });
 
+test("course catalog is readable by signed-in users while only admins can manage courses", async () => {
+  class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
+  let queriedCompanies = false;
+  const route = load("src\\app\\api\\courses\\route.ts", {
+    "next/server": { NextResponse: { json: data => data } },
+    "@/lib/server/login": { checkOrigin() {} },
+    "@/lib/server/auth": {
+      HttpError,
+      requireUser: async () => ({
+        user: { profile: { role: "counselor" }, permissions: [] },
+        supabase: { from: table => {
+          if (table === "invoice_companies") {
+            queriedCompanies = true;
+            return { select: () => ({ order: async () => ({ data: [], error: null }) }) };
+          }
+          return { select: () => ({ order: () => ({ limit: async () => ({ data: [{ id: "course-1" }], error: null }) }) }) };
+        } },
+      }),
+      readJson: request => request.json(),
+      jsonError: error => ({ status: error.status ?? 500, error: error.message }),
+    },
+    "@/lib/server/operational": { databaseError: error => { if (error) throw error; } },
+  });
+  const catalog = await route.GET();
+  assert.deepEqual(catalog.courses, [{ id: "course-1" }]);
+  assert.deepEqual(catalog.companies, []);
+  assert.equal(catalog.canManage, false);
+  assert.equal(queriedCompanies, false, "billing company details are not loaded for non-admin users");
+  const denied = await route.POST(new Request("https://crm.example/api/courses", {
+    method: "POST",
+    body: JSON.stringify({ kind: "course", values: {} }),
+  }));
+  assert.equal(denied.status, 403);
+});
+
 test("Razorpay creates fixed-amount INR and USD links in their own subunits", async () => {
   const calls = [];
   const { createInvoicePaymentLink } = load("src\\lib\\server\\razorpay.ts",{

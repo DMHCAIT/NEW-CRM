@@ -54,6 +54,36 @@ function fixture({ role = "admin", permission = true, failRead = false } = {}) {
   return { rows, requests, settings, route, post, setCheckFailure: () => { checkFailure = true; }, setRace: () => { race = true; } };
 }
 const smtp = { SMTP_HOST: "smtp.example.com", SMTP_PORT: "587", SMTP_USER: "finance@example.com", SMTP_PASSWORD: "top-secret-password", SMTP_FROM: "Finance <finance@example.com>", SMTP_SECURE: "false" };
+test("TeleCMI setup saves encrypted secrets and performs a local-only connection check", async () => {
+  const f = fixture();
+  const values = { TELECMI_PRODUCT: "Account API awaiting confirmation", TELECMI_APP_ID: "test-app", TELECMI_APP_SECRET: "test-only-app-secret", TELECMI_API_DOCS_URL: "https://doc.telecmi.com/chub-india/docs/click-to-call-admin/", TELECMI_DEVICE_ROUTING_CONFIRMED: "true" };
+  const saved = await f.post({ provider: "telecmi", action: "save", values, revision: null });
+  assert.equal(saved.status, 200);
+  assert.match(saved.data.message, /Credentials saved encrypted/);
+  const row = f.rows.get("telecmi");
+  assert.ok(!row.encrypted_values.includes(values.TELECMI_APP_SECRET));
+  assert.deepEqual(f.settings.decryptIntegrationValues(row.encrypted_values), values);
+  const metadata = (await f.route.GET()).data.settings.find(item => item.provider === "telecmi");
+  assert.equal(metadata.saved.TELECMI_APP_SECRET, true);
+  assert.equal(metadata.values.TELECMI_APP_SECRET, undefined);
+  assert.ok(!JSON.stringify(metadata).includes(values.TELECMI_APP_SECRET));
+  assert.deepEqual(await f.settings.integrationStatus("telecmi"), { configured: true, required: ["TELECMI_APP_SECRET"], missing: [] });
+  const check = await f.post({ provider: "telecmi", action: "test", revision: row.revision });
+  assert.equal(check.status, 200);
+  assert.equal(check.data.message, "Provider check passed; delivery not proven.");
+  assert.equal(f.requests.filter(Array.isArray).length, 1);
+  assert.equal(f.requests.find(Array.isArray)[0], "telecmi");
+  assert.equal(f.rows.get("telecmi").test_status, "passed");
+  assert.equal((await f.post({ provider: "telecmi", action: "test_email", revision: row.revision })).status, 400);
+  assert.equal((await f.post({ provider: "telecmi", action: "save", values: { TELECMI_ENABLED: "true" }, revision: row.revision })).status, 400);
+  for (const invalid of [
+    { TELECMI_DEVICE_ROUTING_CONFIRMED: "yes" }, { TELECMI_PRODUCT: "x".repeat(151) },
+    { TELECMI_API_DOCS_URL: "javascript:alert(1)" }, { TELECMI_API_DOCS_URL: "http://example.test/docs" },
+    { TELECMI_API_DOCS_URL: "https://user:password@example.test/docs" },
+  ]) assert.equal((await f.post({ provider: "telecmi", action: "save", values: invalid, revision: row.revision })).status, 400);
+  assert.equal((await f.post({ provider: "telecmi", action: "save", values: {}, revision: null })).status, 409);
+  assert.equal((await fixture({ role: "counselor" }).post({ provider: "telecmi", action: "save", values: {}, revision: null })).status, 403);
+});
 test("pasting a service account automatically enables Workspace and verifies before activating", async () => {
   const { privateKey } = require("node:crypto").generateKeyPairSync("rsa", { modulusLength: 2048 });
   const json = JSON.stringify({ type: "service_account", client_email: "crm@project.iam.gserviceaccount.com", client_id: "123456789", private_key: privateKey.export({ type: "pkcs8", format: "pem" }) });
@@ -252,6 +282,8 @@ test("provider checks use fixed endpoints, bounded requests and never create mee
   }
   assert.ok(requests.slice(1).every(({ init }) => !init.method || init.method === "GET"));
   const before = requests.length;
+  assert.match(await checkIntegration("telecmi", { TELECMI_APP_SECRET: "test-only-secret", TELECMI_DEVICE_ROUTING_CONFIRMED: "true" }), /local check only/);
+  assert.equal(requests.length, before, "TeleCMI must not contact a guessed API");
   assert.match(await checkIntegration("gmail", { GOOGLE_CLIENT_ID: "client", GOOGLE_CLIENT_SECRET: "secret", GOOGLE_REDIRECT_URI: "https://crm.example/api/auth/gmail/callback" }), /local check only/);
   assert.match(await checkIntegration("intake", { LEAD_INTAKE_SIGNING_KEY: "x".repeat(32) }), /No external website was contacted/);
   assert.equal(requests.length, before, "local checks do not pretend to authenticate external providers");

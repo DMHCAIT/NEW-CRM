@@ -27,7 +27,7 @@ export function CourseCatalog({ leadCourse, onOpenInvoices }: { leadCourse?: str
   const price = (value: number, currency: keyof typeof prices) => prices[currency].format(value);
   if (state.loading && !state.data) return <SectionLoading title="Courses" />;
   return <div className={`invoice-workspace course-workspace${embedded ? " invoice-embedded" : ""}`}>
-    <header className={embedded ? "invoice-section-heading" : "page-heading invoice-page-heading"}><span className="invoice-heading-icon"><BookOpen size={23} /></span><div><div className="invoice-eyebrow">{embedded ? "RELATED RECORDS" : "PRODUCTS & PRICING"}</div><Heading>{embedded ? "Available courses" : "Courses"}</Heading><p>Manage your course catalog and standard fees. INR and USD prices are maintained separately.</p></div><div className="heading-actions">
+    <header className={embedded ? "invoice-section-heading" : "page-heading invoice-page-heading"}><span className="invoice-heading-icon"><BookOpen size={23} /></span><div><div className="invoice-eyebrow">{embedded ? "RELATED RECORDS" : "PRODUCTS & PRICING"}</div><Heading>{embedded ? "Available courses" : "Courses"}</Heading><p>{canManage ? "Manage your course catalog and standard fees." : "View course catalog and standard fees."} INR and USD prices are maintained separately.</p></div><div className="heading-actions">
       <button className="button button-secondary" disabled={state.loading || state.busy} onClick={() => void state.refresh()}><RefreshCw size={14} />Refresh</button>
       {canManage && <button className="button button-primary" onClick={() => setEditing("new")}><Plus size={16} />Add course</button>}
       {embedded && <button className="button button-primary" onClick={onOpenInvoices}>Open lead invoices</button>}</div>

@@ -324,6 +324,17 @@ test("expected closure date validates real calendar days without timezone conver
   assert.equal(csv.parseLeadCsv("name,phone,closureFee\nNew lead,9876543210,1250")[0].closureFee, "1250");
 });
 
+test("lead CSV import ignores unnamed empty columns but rejects data without a header", () => {
+  const parsed = csv.parseLeadCsv("name,phone,email,\nMina,9876543210,mina@example.test,\n");
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].name, "Mina");
+  assert.equal(parsed[0].email, "mina@example.test");
+  assert.throws(
+    () => csv.parseLeadCsv("name,,phone,email\nMina,unexpected,9876543210,mina@example.test"),
+    /values under an unnamed column/,
+  );
+});
+
 test("sample lead CSV marks required columns and includes two parseable examples for every field", () => {
   const sample = csv.createLeadCsvSample({
     picklists: { countryCode: ["India (+91)"], country: ["India", "UAE"], qualification: ["MBBS"], category: ["Fellowship"], course: ["Cardiology"], source: ["Website"] },
@@ -348,7 +359,7 @@ test("sample lead CSV marks required columns and includes two parseable examples
   }
 });
 
-test("Excel workbook rows use the same CSV header mapping and validation", async () => {
+test("Excel workbook imports the first one-based worksheet through the CSV header mapping", async () => {
   let sheetIndex = -1;
   const workbookCsv = load("src\\lib\\live-leads-csv.ts", {
     "read-excel-file/browser": {
@@ -367,7 +378,7 @@ test("Excel workbook rows use the same CSV header mapping and validation", async
     text: async () => "",
     arrayBuffer: async () => new ArrayBuffer(8),
   });
-  assert.equal(sheetIndex, 0);
+  assert.equal(sheetIndex, 1);
   assert.equal(rows[0].email, "student@example.test");
   assert.equal(rows[0].note, "Asked about admissions");
   await assert.rejects(() => workbookCsv.parseLeadSpreadsheet({

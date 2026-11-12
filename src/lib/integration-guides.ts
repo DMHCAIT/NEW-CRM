@@ -11,6 +11,22 @@ type IntegrationGuide = {
 };
 
 export const integrationGuides: Record<IntegrationProvider, IntegrationGuide> = {
+  telecmi: {
+    needs: ["A TeleCMI India account with admin click-to-call API access and its app secret", "An individual TeleCMI agent ID for each CRM user", "TeleCMI-configured device routing and an approved outbound caller ID"],
+    steps: [
+      { title: "Confirm the account API", detail: "This integration uses the India admin click-to-call endpoint https://piopiy.telecmi.com/v1/adminConnect. Confirm your plan supports it. Other products and regions are not interchangeable. CRM sends destination digits with the lead's country calling code and no plus sign." },
+      { title: "Save the app secret", detail: "Enter the account app secret used as the API token, not an agent password. App ID is optional reference information and is not sent by this endpoint. Secrets are encrypted and never returned to the browser. You may instead configure TELECMI_APP_SECRET in the server environment before saving CRM credentials." },
+      { title: "Map each CRM user", detail: "Use TeleCMI agent mapping below. Assign each active CRM user their own TeleCMI agent ID, not their phone number or CRM user ID. One agent cannot be shared across CRM users." },
+      { title: "Configure answering devices with TeleCMI", detail: "Log in to the correct agent account in the supported Windows/desktop or mobile app. TeleCMI controls agent availability, registered mobile fallback and which device rings. CRM does not inspect installed apps or automatically choose a device." },
+    ],
+    verify: "Check saved setup validates local configuration only; it does not authenticate or place a call. On a consented test lead, use Click to call and answer your mapped agent device. Confirm both ends connect. CRM records provider acceptance, rejection or an unknown outcome, not connected status or duration. Requests are limited to one per user per 60 seconds.",
+    problems: [
+      { title: "Call rejected or no agent mapping", detail: "Verify the app secret and the signed-in CRM user's exact agent ID in TeleCMI agents. Saved CRM credentials replace environment values. Check the lead's phone and country code, account balance and outbound permissions." },
+      { title: "Desktop or mobile app does not ring", detail: "TeleCMI must confirm API compatibility with that app and configure the mapped agent's answering devices. Installing an app or sharing a login does not configure CRM mapping." },
+    ],
+    docs: { label: "TeleCMI India admin click-to-call documentation", url: "https://doc.telecmi.com/chub-india/docs/click-to-call-admin/" },
+    next: { label: "Manage TeleCMI agent mapping", href: "#integration-telecmi" },
+  },
   stripe: {
     needs: ["A Stripe account enabled for USD payments", "A test/live secret API key", "A matching webhook endpoint signing secret"],
     steps: [
@@ -48,7 +64,7 @@ export const integrationGuides: Record<IntegrationProvider, IntegrationGuide> = 
       { title: "Prepare your Meta app", detail: "Use your business's Meta developer app. Copy its App ID and App secret, and choose a Graph API version supported by that app. Complete the permissions/app review required for leads_retrieval and Page access. A token must be authorized for the Page and its leads." },
       { title: "Save app settings and register the webhook", detail: "Enter the app details here and choose your own private webhook verification token. In Meta's Page webhook configuration, paste the endpoint below and the identical verification token. Enable leadgen events. Saving in CRM does not create the Meta subscription." },
       { title: "Connect each Facebook Page", detail: "Use Meta's access-token tools for your app to generate a Page access token as a person/system user authorized for that Page, with the approved lead and Page permissions. Copy the Page's numeric ID (not the App ID). Open Pages & forms below and add that ID/token. CRM verifies identity before saving. Check forms & subscription to discover Form IDs and confirm this app's leadgen subscription. Renew expired/revoked tokens." },
-      { title: "Route forms to counselors", detail: "Create a Facebook Lead Ads source for each Page + Form ID and select its counselor/stage. Leave Form ID blank only for a Page-wide fallback. One fallback is allowed per Page. Exact form routes take precedence, even when disabled. Forms must collect name and phone." },
+      { title: "Route all your Meta forms to counselors", detail: "For 10 or more forms, use one Meta app setup and one saved token per Page, not separate environment credentials per form. Page checks request up to 100 forms and mark truncated results. Create a Facebook Lead Ads source for each Page + Form ID, name it after the form, and select its counselor/stage. Repeat for every form, including forms on other Pages. Leave Form ID blank only for a Page-wide fallback. One fallback is allowed per Page. Exact form routes take precedence, even when disabled. Forms must collect name and phone." },
     ],
     verify: "Use Meta's Lead Ads Testing Tool to submit a test lead for each routed form. Confirm webhook delivery and the assigned CRM lead. App and Page checks do not prove lead retrieval permission or end-to-end delivery.",
     problems: [
@@ -121,6 +137,11 @@ export const integrationGuides: Record<IntegrationProvider, IntegrationGuide> = 
 };
 
 export const integrationFieldHelp: Record<string, string> = {
+  TELECMI_PRODUCT: "Account product, region or plan as confirmed by TeleCMI. Leave blank if not yet known.",
+  TELECMI_API_DOCS_URL: "Public HTTPS documentation supplied for your account. Stored for reference only; CRM does not fetch this URL.",
+  TELECMI_APP_ID: "Optional account reference. The India adminConnect API authenticates with the app secret and agent ID, not this field.",
+  TELECMI_APP_SECRET: "Required server-side account app secret, sent as the adminConnect token. Never enter an agent's app login password.",
+  TELECMI_DEVICE_ROUTING_CONFIRMED: "Provider-side setup reference only. TeleCMI controls desktop/mobile ringing; this field does not verify connectivity.",
   STRIPE_SECRET_KEY: "Server-only sk_test_ or sk_live_ API key. Never a publishable key.",
   STRIPE_WEBHOOK_SECRET: "whsec_ signing secret for the deployed Stripe webhook endpoint.",
   ZOOM_ACCOUNT_ID: "From the Zoom Server-to-Server OAuth app credentials.",

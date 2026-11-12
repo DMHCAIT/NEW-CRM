@@ -19,6 +19,8 @@ const requiredColumns = [
   "invoice_companies.invoice_profile", "invoices.document_details",
   "notifications.lead_id", "notifications.event_key", "notification_email_queue.claim_token",
   "profiles.email_signature_html", "emails.body_html",
+  "telecmi_agent_mappings.agent_id", "telecmi_agent_mappings.revision",
+  "telecmi_call_attempts.status", "telecmi_call_attempts.provider_request_id",
 ];
 
 function databaseOptions(env, projectRoot = root) {

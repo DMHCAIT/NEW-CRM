@@ -4,6 +4,7 @@ import { HttpError } from "@/lib/server/auth";
 import { MAX_SIGNATURE_IMAGE_BYTES } from "@/lib/signature-images";
 
 export const signatureImageBucket = "email-signatures";
+let bucketInitialization: Promise<void> | null = null;
 
 export function signatureImageFormat(bytes: Buffer) {
   if (bytes.length > MAX_SIGNATURE_IMAGE_BYTES) throw new HttpError(400, "Signature images must be no larger than 1 MB.");
@@ -21,19 +22,29 @@ export function signatureImageFormat(bytes: Buffer) {
 export async function uploadSignatureImage(admin: SupabaseClient, bytes: Buffer, declaredType: string, actorId: string) {
   const format = signatureImageFormat(bytes);
   if (format.type !== declaredType) throw new HttpError(400, "The image contents do not match its file type.");
-  const { data: bucket, error: bucketError } = await admin.storage.getBucket(signatureImageBucket);
-  if (bucketError) {
-    if (!["404", "400"].includes(String(bucketError.statusCode)) || !/not found/i.test(bucketError.message))
-      throw new HttpError(503, "Signature image storage could not be checked. Contact your administrator.");
-    const { error: createError } = await admin.storage.createBucket(signatureImageBucket, {
-      public: true, fileSizeLimit: MAX_SIGNATURE_IMAGE_BYTES, allowedMimeTypes: ["image/png", "image/jpeg", "image/gif", "image/webp"],
-    });
-    if (createError) {
-      // Another upload may have created the bucket concurrently.
-      const { data: existing, error } = await admin.storage.getBucket(signatureImageBucket);
-      if (error || !existing?.public) throw new HttpError(503, "Signature image storage could not be initialized. Contact your administrator.");
-    }
-  } else if (!bucket?.public) throw new HttpError(503, "The email-signatures storage bucket must allow public image reads for email recipients.");
+  if (!bucketInitialization) {
+    bucketInitialization = (async () => {
+      const { data: bucket, error: bucketError } = await admin.storage.getBucket(signatureImageBucket);
+      if (bucketError) {
+        if (!["404", "400"].includes(String(bucketError.statusCode)) || !/not found/i.test(bucketError.message))
+          throw new HttpError(503, "Signature image storage could not be checked. Contact your administrator.");
+        const { error: createError } = await admin.storage.createBucket(signatureImageBucket, {
+          public: true, fileSizeLimit: MAX_SIGNATURE_IMAGE_BYTES, allowedMimeTypes: ["image/png", "image/jpeg", "image/gif", "image/webp"],
+        });
+        if (createError) {
+          const { data: existing, error } = await admin.storage.getBucket(signatureImageBucket);
+          if (error || !existing?.public) throw new HttpError(503, "Signature image storage could not be initialized. Contact your administrator.");
+        }
+      } else if (!bucket?.public) {
+        throw new HttpError(503, "The email-signatures storage bucket must allow public image reads for email recipients.");
+      }
+    })();
+  }
+  try { await bucketInitialization; }
+  catch (error) {
+    bucketInitialization = null;
+    throw error;
+  }
   const path = `${actorId}/${randomUUID()}.${format.extension}`;
   const { error } = await admin.storage.from(signatureImageBucket).upload(path, bytes, {
     contentType: format.type, cacheControl: "31536000", upsert: false,

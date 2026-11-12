@@ -66,12 +66,23 @@ test("browser signature paste uploads embedded images once, preserves clickable 
       const large = `<a href="https://dmhca.in"><img src="${image}"></a><p>${"x".repeat(100000)}</p>`;
       const largeResult = await api.preparePastedSignature(large, [], upload);
       if (largeResult.length < 100000 || !largeResult.includes("https://dmhca.in")) throw Error("Large signature was truncated.");
-      return { html, uploads: uploads.length };
+      let activeUploads = 0, maximumActiveUploads = 0;
+      const alternateImage = image.replace(",", ", ");
+      await api.preparePastedSignature(`<img src="${image}"><img src="${alternateImage}">`, [], async () => {
+        activeUploads++;
+        maximumActiveUploads = Math.max(maximumActiveUploads, activeUploads);
+        await new Promise(resolve => setTimeout(resolve, 20));
+        activeUploads--;
+        return `https://storage.example.test/parallel-${activeUploads}.png`;
+      });
+      if (maximumActiveUploads !== 2) throw Error("Independent signature images were not uploaded concurrently.");
+      return { html, uploads: uploads.length, maximumActiveUploads };
     }, {
       policyCode: compile("src\\lib\\email-signature-policy.ts"),
       helperCode: compile("src\\lib\\signature-images.ts"),
     });
     assert.equal(result.uploads, 3);
+    assert.equal(result.maximumActiveUploads, 2);
     const sanitize = require("sanitize-html");
     const saved = sanitize(result.html, { allowedTags: ["table", "tbody", "tr", "td", "a", "img"], allowedAttributes: { a: ["href"], img: ["src", "width"] } });
     assert.match(saved, /href="https:\/\/dmhca.in\/admissions"><img src="https:\/\/storage.example.test/);

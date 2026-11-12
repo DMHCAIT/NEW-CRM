@@ -77,7 +77,7 @@ export async function testFacebookPage(pageId: string, token: string, config: Re
   const identity = await checkFacebookPage(pageId, token, config);
   // Read only: never subscribe the app, create a test lead, or retrieve a person's lead.
   const forms = parseInput(z.object({ data: z.array(z.object({ id: z.string(), name: z.string().optional(), status: z.string().optional() })), paging: z.object({ next: z.string().optional() }).optional() }),
-    await facebookGraph(`${pageId}/leadgen_forms`, token, config, "id,name,status"));
+    await facebookGraph(`${pageId}/leadgen_forms?limit=100`, token, config, "id,name,status"));
   const subscriptions = parseInput(z.object({ data: z.array(z.object({ id: z.string(), subscribed_fields: z.array(z.string()).optional() })), paging: z.object({ next: z.string().optional() }).optional() }),
     await facebookGraph(`${pageId}/subscribed_apps`, token, config, "id,subscribed_fields"));
   const appId = config.FACEBOOK_APP_ID;

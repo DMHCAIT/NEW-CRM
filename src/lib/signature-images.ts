@@ -54,8 +54,9 @@ export async function preparePastedSignature(html: string, files: File[], upload
     image.removeAttribute("sizes");
   }
   parsed.querySelectorAll("picture source").forEach(source => source.remove());
-  for (const [source, file] of replacements) {
-    const url = await upload(file);
+  const uploaded = await Promise.all(Array.from(replacements, async ([source, file]) =>
+    [source, await upload(file)] as const));
+  for (const [source, url] of uploaded) {
     signatureImageHtml(url, "", "");
     for (const image of images) {
       if ((image.getAttribute("src") ?? "").trim() === source) image.setAttribute("src", url);
