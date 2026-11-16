@@ -207,6 +207,28 @@ test("filtered first visits share metadata with subsequent scope changes and cle
   assert.equal(reads.at(-1), mine, "writes must invalidate reused metadata");
 });
 
+test("sidebar preparation and the lead workspace share the same in-flight and cached 100-lead request", async () => {
+  let release, reads = 0;
+  const result = { leads: [{ id: "lead" }], stages: [], profiles: [], configuration: {}, user: { id: "actor" } };
+  const api = client(async () => { reads++; return new Promise(resolve => { release = () => resolve(ok(result)); }); });
+  const helpers = loadModule("src\\lib\\live-leads-client.tsx", {
+    react: {}, "@/lib/crm-data": api, "lucide-react": {},
+    "@/components/searchable-dropdown": {}, "@/lib/lead-filters": {}, "@/lib/lead-picklists": {},
+  }, { window: {}, Intl });
+  const preparation = loadModule("src\\lib\\section-preparation.ts", { "@/lib/navigation": { navigationItems: [] } }, { Intl });
+  const preparedPath = preparation.sectionReadPaths("/leads", { permissions: [] })[0];
+  const workspacePath = helpers.leadQueryPath(helpers.emptyFilter(), { pageSize: 100 });
+  assert.equal(preparedPath, workspacePath);
+  const prefetched = api.apiRequest(preparedPath, { maxAgeMs: 30000 });
+  const opened = helpers.loadLeadListData(workspacePath, { maxAgeMs: 30000 });
+  assert.equal(reads, 1, "opening during preparation must not start another request");
+  release();
+  await Promise.all([prefetched, opened]);
+  assert.equal(helpers.getCachedLeadListData(workspacePath).leads[0].id, "lead");
+  await helpers.loadLeadListData(workspacePath, { maxAgeMs: 30000 });
+  assert.equal(reads, 1, "a completed preparation is reused immediately");
+});
+
 test("live searches settle after 120 ms and cancel obsolete typing timers without Enter", () => {
   const updates = [], effects = [], timers = new Map(), cleared = [];
   let id = 0;
@@ -671,6 +693,17 @@ test("1000 lead dates reuse one formatter without changing localized output", ()
   assert.equal(constructions, 1);
 });
 
+test("lead dates accept a stable server formatter without changing subsequent local-time formatting", () => {
+  const localFormatter = new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Kolkata" });
+  const utcFormatter = new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" });
+  const api = client(undefined, { intl: { DateTimeFormat: class { constructor() { return localFormatter; } } } });
+  const value = "2026-10-22T23:42:20Z";
+  assert.equal(api.formatDateTime(value, utcFormatter), utcFormatter.format(new Date(value)));
+  assert.equal(api.formatDateTime(value), localFormatter.format(new Date(value)));
+  assert.notEqual(api.formatDateTime(value, utcFormatter), api.formatDateTime(value));
+  assert.equal(api.formatDateTime("invalid", utcFormatter), "");
+});
+
 test("all dashboard chart targets use Next navigation and preserve their filter URLs", () => {
   const React = require("react");
   const { renderToStaticMarkup } = require("react-dom/server");
@@ -864,6 +897,7 @@ function loadModule(relative, dependencies, globals = {}) {
     exports, console, URL, URLSearchParams, process, ...globals,
     require: name => name in dependencies ? dependencies[name]
       : name === "@/components/notification-bell" ? { NotificationBell: () => null }
+      : name === "@/lib/server/lead-list" ? loadModule("src\\lib\\server\\lead-list.ts", dependencies, globals)
       : name === "@/lib/section-preparation" ? loadModule("src\\lib\\section-preparation.ts", { "@/lib/navigation": dependencies["@/lib/navigation"] ?? { navigationItems: [] } }, globals)
       : require(name),
   });
@@ -985,6 +1019,85 @@ test("a prefetched lead screen renders its cached data without a loading flash",
   assert.equal(updates.includes(true), false);
 });
 
+test("server-preloaded leads survive hydration replay, refresh from the server and never revive after changing filters", async () => {
+  const states = [], refs = [], effects = [], requests = [];
+  let stateIndex = 0, refIndex = 0, currentPath = "/api/leads", saved, now = Date.now();
+  const seed = { data: { leads: [{ id: "server-lead" }] }, updatedAt: now };
+  const oldCache = { leads: [{ id: "older-cache" }] };
+  const { useLiveLeadData } = loadModule("src\\lib\\live-leads-client.tsx", {
+    react: {
+      useState(initial) { const key = stateIndex++; if (!(key in states)) states[key] = typeof initial === "function" ? initial() : initial; return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }]; },
+      useRef(initial) { const key = refIndex++; return refs[key] ?? (refs[key] = { current: initial }); },
+      useCallback: callback => callback, useEffect: effect => effects.push(effect),
+    },
+    "@/lib/crm-data": {}, "lucide-react": {},
+    "@/components/searchable-dropdown": {}, "@/lib/lead-filters": {}, "@/lib/lead-picklists": {},
+  }, { Date: class extends Date { static now() { return now; } } });
+  const request = async (path, options) => {
+    requests.push({ path, maxAgeMs: options.maxAgeMs });
+    return { leads: [{ id: `updated-${requests.length}` }] };
+  };
+  const snapshot = () => saved;
+  const render = () => {
+    stateIndex = 0; refIndex = 0; effects.length = 0;
+    return useLiveLeadData(currentPath, request, snapshot, seed);
+  };
+  saved = oldCache;
+  assert.equal(render().data, seed.data, "fresh server records take precedence over an older browser cache");
+  saved = undefined;
+  const firstCleanup = effects[0]();
+  firstCleanup();
+  effects[0]();
+  assert.equal(render().data, seed.data, "AppShell cache invalidation must not clear preloaded records");
+  assert.equal(render().loading, false);
+  assert.equal(requests.length, 0, "hydration and Strict Mode replay must not repeat the list request");
+  await render().reload();
+  assert.equal(render().data.leads[0].id, "updated-1");
+  assert.equal(requests[0].maxAgeMs, 0);
+  currentPath = "/api/leads?filter=other";
+  render(); effects[0]();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(render().data.leads[0].id, "updated-2");
+  currentPath = "/api/leads";
+  render(); effects[0]();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(render().data.leads[0].id, "updated-3", "returning to the original filter must not resurrect its server seed");
+  assert.equal(requests.length, 3);
+  states.length = 0; refs.length = 0;
+  now += 30000;
+  assert.equal(render().data, seed.data, "expired route-prefetch records remain visible while revalidating");
+  effects[0]();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(render().data.leads[0].id, "updated-4", "server-prefetched data expires at the existing 30-second freshness boundary");
+});
+
+test("lead data is cleared when an update reports lost access", async () => {
+  class ApiError extends Error { constructor(status) { super("Access denied"); this.status = status; } }
+  for (const [status, initialData] of [
+    [401, undefined], [403, undefined],
+    [401, { data: { leads: [{ id: "server" }] }, updatedAt: Date.now() }],
+    [403, { data: { leads: [{ id: "server" }] }, updatedAt: Date.now() }],
+  ]) {
+    const states = [], refs = [];
+    let stateIndex = 0, refIndex = 0;
+    const { useLiveLeadData } = loadModule("src\\lib\\live-leads-client.tsx", {
+      react: {
+        useState(initial) { const key = stateIndex++; if (!(key in states)) states[key] = typeof initial === "function" ? initial() : initial; return [states[key], value => { states[key] = value; }]; },
+        useRef(initial) { const key = refIndex++; return refs[key] ?? (refs[key] = { current: initial }); },
+        useCallback: callback => callback, useEffect() {},
+      },
+      "@/lib/crm-data": { ApiError, getCachedApiRead: () => ({ leads: [{ id: "old" }] }), apiRequest: async () => { throw new ApiError(status); } },
+      "lucide-react": {}, "@/components/searchable-dropdown": {}, "@/lib/lead-filters": {}, "@/lib/lead-picklists": {},
+    }, { Error });
+    const render = () => { stateIndex = 0; refIndex = 0; return useLiveLeadData("/api/leads", undefined, undefined, initialData); };
+    await assert.rejects(render().reload(), /Access denied/);
+    const result = render();
+    assert.equal(result.data, null);
+    assert.equal(result.loading, false);
+    assert.equal(result.error, "Access denied");
+  }
+});
+
 test("a save completed after a section switch refreshes the current section instead of reviving an obsolete URL", async () => {
   const states = [], refs = [], requests = [];
   let stateIndex = 0, refIndex = 0;
@@ -1012,7 +1125,9 @@ test("sidebar intent explicitly prepares full routes once and keeps payment read
   const routes = [];
   const requests = [];
   const api = client(async path => { requests.push(path); return ok({ leads: [] }); });
-  const leadsPath = `/api/leads?${new URLSearchParams({ timezone: Intl.DateTimeFormat().resolvedOptions().timeZone })}`;
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const leadsPath = `/api/leads?${new URLSearchParams({ timezone, pageSize: "100" })}`;
+  const pipelinePath = `/api/leads?${new URLSearchParams({ timezone, view: "pipeline" })}`;
   const items = [
     { href: "/", permission: "dashboard.view" },
     { href: "/leads", permission: "leads.view" },
@@ -1065,7 +1180,7 @@ test("sidebar intent explicitly prepares full routes once and keeps payment read
   links.get("/invoices").onMouseEnter();
   links.get("/meetings").onFocus();
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(requests, [leadsPath, `${leadsPath}&view=pipeline`, "/api/invoices", "/api/meetings"]);
+  assert.deepEqual(requests, [leadsPath, pipelinePath, "/api/invoices", "/api/meetings"]);
   assert.equal(api.getCachedApiRead("/api/invoices"), undefined);
   assert.equal(api.getCachedApiRead("/api/meetings"), undefined);
   await api.apiRequest("/api/invoices", { usePrefetched: true });

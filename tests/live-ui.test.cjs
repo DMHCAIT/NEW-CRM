@@ -50,6 +50,8 @@ function load(relative, overrides = {}) {
     if (name in overrides) return name === "@/lib/server/auth"
       ? { ...overrides[name], requirePageUser: overrides[name].requirePageUser ?? overrides[name].requireUser }
       : overrides[name];
+    if (name === "@/lib/server/auth") return { ...server, requirePageUser: server.requireUser };
+    if (name === "@/lib/server/lead-list") return { fetchLeadListData: async () => ({ ...live, hasMore: false, nextCursor: null }) };
     if (name === "@/lib/server/dashboard-summary") return { fetchDashboardSummary: async () => {
       const source = overrides["@/lib/crm-data"] ?? crm;
       const actor = await (overrides["@/lib/server/auth"] ?? server).requireUser();
@@ -80,7 +82,11 @@ function hookStates(values) {
   let index = 0;
   return { ...React, useState: (initial) => [index < values.length ? values[index++] : typeof initial === "function" ? initial() : initial, () => {}], useRef: initial => ({ current: initial }), useEffect() {} };
 }
+class TestApiError extends Error {
+  constructor(message, status) { super(message); this.status = status; }
+}
 const crm = {
+  ApiError: TestApiError,
   formatDateTime: (value) => value ? new Date(value).toLocaleString("en-IN") : "",
   apiRequest: async () => ({}), errorMessage: (error) => error.message,
   getCachedApiRead: () => undefined,
@@ -106,10 +112,10 @@ const operational = (data) => ({ data, error: "", message: "", loading: false, b
 const shell = load("src\\components\\app-shell.tsx", { "@/lib/crm-data": crm }).AppShell;
 const baseline = { "@/lib/crm-data": crm };
 
-async function renderPage(file, { states, overrides = {}, shellUser = user } = {}) {
+async function renderPage(file, { states, overrides = {}, shellUser = user, searchParams = {} } = {}) {
   const all = { ...baseline, ...overrides, ...(states ? { react: hookStates(states) } : {}) };
   const Component = load(file, all).default;
-  const content = Component.constructor.name === "AsyncFunction" ? await Component({ searchParams: Promise.resolve({}) }) : React.createElement(Component);
+  const content = Component.constructor.name === "AsyncFunction" ? await Component({ searchParams: Promise.resolve(searchParams) }) : React.createElement(Component);
   return renderToStaticMarkup(React.createElement(shell, { user: shellUser }, content));
 }
 
@@ -367,6 +373,69 @@ test("sidebar removes Help and support and keeps scrollable responsive navigatio
   assert.match(css, /\.sidebar\.sidebar-open \{[^}]*visibility: visible/);
 });
 
+test("desktop sidebar can close and reopen without changing the mobile drawer or page access", async t => {
+  const states = [];
+  let index = 0;
+  const previousPath = currentPath;
+  t.after(() => { currentPath = previousPath; });
+  const { AppShell } = load("src\\components\\app-shell.tsx", {
+    react: { ...hookStates([]), useLayoutEffect() {}, useTransition: () => [false, callback => callback()],
+      useState(initial) { const key = index++; if (!(key in states)) states[key] = typeof initial === "function" ? initial() : initial; return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }]; },
+    },
+    "@/lib/crm-data": crm,
+  });
+  const render = () => { index = 0; return AppShell({ user, children: React.createElement("p", null, "Workspace content") }); };
+  const toggle = tree => elements(tree).find(node => node.props.className === "icon-button sidebar-toggle");
+  const css = readFileSync(path.join(root, "src", "app", "globals.css"), "utf8");
+  const { chromium } = require("playwright-core");
+  const browser = await chromium.launch({ channel: "msedge", headless: true });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+    const display = async tree => page.setContent(`<style>${css}</style>${renderToStaticMarkup(tree)}`);
+    let tree = render();
+    assert.equal(toggle(tree).props["aria-expanded"], true);
+    await display(tree);
+    assert.equal(await page.locator("#workspace-sidebar").isVisible(), true);
+    const expandedLeft = await page.locator(".main-column").evaluate(node => node.getBoundingClientRect().left);
+    assert.equal(expandedLeft, 232);
+    toggle(tree).props.onClick();
+    tree = render();
+    assert.equal(toggle(tree).props["aria-label"], "Open sidebar");
+    assert.equal(toggle(tree).props["aria-expanded"], false);
+    await display(tree);
+    assert.equal(await page.locator("#workspace-sidebar").isVisible(), false);
+    assert.equal(await page.locator(".main-column").evaluate(node => node.getBoundingClientRect().left), 0);
+    assert.equal(await page.locator(".sidebar-toggle").isVisible(), true, "the reopen control must remain reachable");
+    currentPath = "/reports";
+    tree = render();
+    assert.equal(toggle(tree).props["aria-expanded"], false, "keep the chosen state across in-app navigation");
+    await page.setViewportSize({ width: 390, height: 700 });
+    await display(tree);
+    assert.equal(await page.locator(".sidebar-toggle").isVisible(), false);
+    assert.equal(await page.locator(".mobile-menu").isVisible(), true);
+    elements(tree).find(node => node.props.className === "icon-button mobile-menu").props.onClick();
+    tree = render();
+    await display(tree);
+    assert.equal(await page.locator("#workspace-sidebar").isVisible(), true, "desktop collapse must not block opening the mobile drawer");
+    assert.equal(await page.locator(".mobile-scrim").isVisible(), true);
+    elements(tree).find(node => node.props.className === "icon-button sidebar-close").props.onClick();
+    tree = render();
+    await display(tree);
+    assert.equal(await page.locator("#workspace-sidebar").isVisible(), false);
+    await page.setViewportSize({ width: 900, height: 700 });
+    await display(tree);
+    assert.equal(await page.locator("#workspace-sidebar").isVisible(), false);
+    assert.equal(await page.locator(".main-column").evaluate(node => node.getBoundingClientRect().left), 0);
+    toggle(tree).props.onClick();
+    tree = render();
+    await display(tree);
+    assert.equal(await page.locator("#workspace-sidebar").isVisible(), true);
+    assert.equal(await page.locator(".main-column").evaluate(node => node.getBoundingClientRect().left), 220);
+    assert.equal(await page.getByText("Workspace content", { exact: true }).isVisible(), true);
+    assert.equal(await page.locator('a[href="/reports"]').isVisible(), true);
+  } finally { await browser.close(); }
+});
+
 test("shared sidebar preserves permitted navigation and profile for every role", () => {
   const { DEFAULT_ROLE_PERMISSIONS } = load("src\\lib\\permissions.ts");
   const { navigationItems } = load("src\\lib\\navigation.ts");
@@ -414,6 +483,68 @@ test("decorative surfaces are borderless while form controls keep their boundari
   assert.match(leadsCss, /\.filter-value-input \{[^}]*border: 1px solid/);
 });
 
+test("initial Leads HTML contains server-loaded records without a client loading screen or list request", async () => {
+  const client = {};
+  const reads = [];
+  const data = { ...live, hasMore: false, nextCursor: null };
+  const html = await renderPage("src\\app\\leads\\page.tsx", {
+    searchParams: { q: "Alex" },
+    overrides: {
+      "@/lib/server/auth": { requirePageUser: async permission => {
+        assert.equal(permission, "leads.view");
+        return { supabase: client, user };
+      } },
+      "@/lib/server/lead-list": { fetchLeadListData: async (supabase, actor, query, size) => {
+        reads.push(query);
+        assert.equal(supabase, client);
+        assert.equal(actor, user);
+        assert.equal(query.filter.query, "Alex");
+        assert.equal(size, 100);
+        return data;
+      } },
+      "@/lib/live-leads-client": actualLeads,
+    },
+  });
+  assert.equal(reads.length, 1);
+  assert.match(html, /Alex Morgan/);
+  assert.match(html, /aria-label="Lead results"/);
+  assert.doesNotMatch(html, /Loading leads/);
+});
+
+test("server-preloaded leads cannot flash through a different retained filter", async () => {
+  const html = await renderPage("src\\app\\leads\\page.tsx", {
+    overrides: {
+      "@/lib/live-leads-client": actualLeads,
+      "@/components/lead-filter-state": {
+        useLeadFilterState: () => ({ get: () => ({ ...filter, query: "Another student" }) }),
+        useLeadNavigation: () => null,
+      },
+    },
+  });
+  assert.doesNotMatch(html, /Alex Morgan/);
+});
+
+test("Leads server preload preserves authentication failures and database errors", async () => {
+  let reads = 0;
+  const dependencies = {
+    "@/lib/server/auth": { requirePageUser: async () => { throw new Error("Permission denied"); } },
+    "@/lib/server/lead-list": { fetchLeadListData: async () => { reads++; throw new Error("Database unavailable"); } },
+  };
+  await assert.rejects(renderPage("src\\app\\leads\\page.tsx", { overrides: dependencies }), /Permission denied/);
+  assert.equal(reads, 0);
+  dependencies["@/lib/server/auth"] = { requirePageUser: async () => ({ supabase: {}, user }) };
+  await assert.rejects(renderPage("src\\app\\leads\\page.tsx", { overrides: dependencies }), /Database unavailable/);
+  assert.equal(reads, 1);
+});
+
+test("legacy create-lead links redirect without preloading the list", async () => {
+  const Component = load("src\\app\\leads\\page.tsx", {
+    "next/navigation": { redirect: destination => { throw new Error(`Redirect: ${destination}`); } },
+    "@/lib/server/lead-list": { fetchLeadListData: () => assert.fail("Creation links must not query the lead list") },
+  }).default;
+  await assert.rejects(Component({ searchParams: Promise.resolve({ create: "1" }) }), /Redirect: \/leads\/new/);
+});
+
 test("lead filters use the retained compact sidebar with columns in the results toolbar", async () => {
   const html = await renderPage("src\\app\\leads\\page.tsx", { overrides: { "@/lib/live-leads-client": liveMock } });
   const sidebar = html.match(/<aside class="lead-filter-sidebar"[\s\S]*?<\/aside>/)?.[0];
@@ -450,6 +581,238 @@ test("lead page-size selector defaults to 50 and offers all supported sizes", as
   assert.match(selector, /<option value="all">All matching<\/option>/);
 });
 
+test("lead totals are exact and page-size independent while All matching publishes rows once", async () => {
+  const records = Array.from({ length: 200 }, (_, index) => ({ ...lead, id: `lead-${index}`, name: `Lead ${index}` }));
+  const data = { ...live, leads: records.slice(0, 100), hasMore: true, nextCursor: { id: records[99].id, createdAt: records[99].createdAt } };
+  const states = [], refs = [], effects = [], countPaths = [];
+  let index = 0, refIndex = 0, finishAll, allOptions;
+  const api = load("src\\components\\leads-workspace.tsx", {
+    "@/components/lead-filter-state": { useLeadFilterState: () => null, useLeadNavigation: () => null },
+    "@/lib/crm-data": { ...crm, subscribeApiWrites: () => () => {} },
+    react: { ...React, useEffect: effect => effects.push(effect), useLayoutEffect() {}, useMemo: factory => factory(),
+      useRef(initial) { const key = refIndex++; return refs[key] ?? (refs[key] = { current: initial }); },
+      useState(initial) {
+        const key = index++;
+        if (!(key in states)) states[key] = typeof initial === "function" ? initial() : initial;
+        return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }];
+      },
+    },
+    "@/lib/live-leads-client": { ...liveMock,
+      useLiveLeadData(path) {
+        if (new URL(path, "https://crm.test").searchParams.has("count")) {
+          countPaths.push(path);
+          return { data: { leads: [], total: 200 }, loading: false, error: "", reload() {} };
+        }
+        return { data, loading: false, error: "", reload() {}, setError() {} };
+      },
+      loadAllLeadRows(filter, dashboard, options) {
+        allOptions = options;
+        return new Promise(resolve => { finishAll = resolve; });
+      },
+    },
+  });
+  let headerKey;
+  const render = () => {
+    index = 0; refIndex = 0;
+    const nodes = elements(api.default());
+    const header = nodes.find(node => node.type === api.LeadViewBar);
+    headerKey ??= header.key;
+    assert.equal(header.key, headerKey, "do not restart the count query when page size changes");
+    const summary = elements(api.LeadViewBar(header.props));
+    assert.equal(summary.find(node => node.props?.className === "leads-view-count").props.children, "200");
+    assert.equal(summary.find(node => node.props?.className === "result-count").props.children, "200 leads");
+    return nodes;
+  };
+  for (const size of [10, 20, 50, 100, "all"]) {
+    render().find(node => node.props?.["aria-label"] === "Leads per page").props.onChange({ target: { value: String(size) } });
+    const nodes = render();
+    assert.equal(nodes.filter(node => node.props?.className === "lead-cell").length, size === "all" ? 100 : size);
+  }
+  const cleanup = effects.filter(effect => effect.toString().includes("loadAllLeadRows")).at(-1)();
+  assert.equal(allOptions.onPage, undefined, "do not publish a partial list on each batch");
+  assert.equal(render().filter(node => node.props?.className === "lead-cell").length, 100);
+  finishAll(records);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(render().filter(node => node.props?.className === "lead-cell").length, 200);
+  cleanup();
+  assert.equal(new Set(countPaths).size, 1);
+  const params = new URL(countPaths[0], "https://crm.test").searchParams;
+  assert.equal(params.get("count"), "1");
+  assert.equal(params.has("cursor"), false);
+});
+
+test("matching count uses the filtered database total and exposes loading and errors without row-count fallbacks", () => {
+  const selected = { ...filter, query: "Alex", quickView: "My Leads", criteria: [{ id: "stage", field: "stage", operator: "is", value: stages[0].name }] };
+  for (const result of [
+    { data: { total: 123456 }, loading: false, error: "" },
+    { data: { total: 0 }, loading: false, error: "" },
+    { data: null, loading: true, error: "" },
+    { data: null, loading: false, error: "Count query failed" },
+  ]) {
+    let path, subscribed, reloads = 0;
+    const { LeadViewBar } = load("src\\components\\leads-workspace.tsx", {
+      react: { ...React, useEffect: effect => effect() },
+      "@/lib/crm-data": { ...crm, subscribeApiWrites: (callback, phase) => { assert.equal(phase, "completed"); subscribed = callback; return () => {}; } },
+      "@/lib/live-leads-client": { ...liveMock, useLiveLeadData(value) { path = value; return { ...result, reload: async () => { reloads++; } }; } },
+    });
+    const nodes = elements(LeadViewBar({ filter: selected, dashboard: true, title: "My Leads", children: null }));
+    const params = new URL(path, "https://crm.test").searchParams;
+    assert.deepEqual(JSON.parse(params.get("filter")), selected);
+    assert.equal(params.get("dashboard"), "1");
+    assert.equal(params.get("count"), "1");
+    const count = nodes.find(node => node.props?.className === "leads-view-count").props.children;
+    assert.equal(count, result.data ? result.data.total.toLocaleString() : result.error ? "Unavailable" : "Counting...");
+    assert.equal(nodes.some(node => node.props?.role === "alert"), Boolean(result.error));
+    subscribed();
+    assert.equal(reloads, 1, "refresh totals after writes");
+  }
+});
+
+test("lead column widths stay compact and stable with long values and additional rows", async () => {
+  const { chromium } = require("playwright-core");
+  const browser = await chromium.launch({ channel: "msedge", headless: true });
+  const css = ["globals.css", path.join("leads", "leads.css")].map(file => readFileSync(path.join(root, "src", "app", file), "utf8")).join("\n");
+  const longCourse = "Fellowship in clinical medicine and advanced specialties ".repeat(20);
+  const columns = ["name", "email", "course", "stage", "source", "createdAt", "custom:Counselor note"];
+  try {
+    for (const viewport of [{ width: 1400, height: 768 }, { width: 390, height: 640 }]) {
+      const page = await browser.newPage({ viewport });
+      try {
+        let firstWidths;
+        for (const expanded of [false, true]) {
+          const records = expanded ? Array.from({ length: 50 }, (_, index) => ({ ...lead, id: `long-record-${index}`, name: "Long lead name ".repeat(30), email: `${"long".repeat(60)}@example.test`, course: longCourse, customFields: { "Counselor note": "note ".repeat(200) } })) : [lead];
+          const html = await renderPage("src\\components\\leads-workspace.tsx", {
+            overrides: { "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: path => ({
+              data: new URL(path, "https://crm.test").searchParams.has("count") ? { total: records.length } : { ...live, columns, leads: records },
+              loading: false, error: "", reload() {}, setError() {},
+            }) } },
+          });
+          await page.setContent(`<style>${css}</style>${html}`);
+          const result = await page.evaluate(() => ({
+            widths: [...document.querySelectorAll(".leads-table th")].map(cell => cell.getBoundingClientRect().width),
+            tableWidth: document.querySelector(".leads-table").getBoundingClientRect().width,
+            lastCourse: document.querySelector(".leads-table tbody tr:last-child td:nth-child(4)").title,
+            overflow: getComputedStyle(document.querySelector(".leads-table td:nth-child(4)")).textOverflow,
+          }));
+          assert.ok(result.widths.every(width => width <= 280), JSON.stringify({ viewport, result }));
+          assert.equal(result.overflow, "ellipsis");
+          if (expanded) {
+            assert.deepEqual(result.widths, firstWidths, "more rows and long text must not widen columns");
+            assert.equal(result.lastCourse, longCourse, "keep the full value available on hover");
+          } else firstWidths = result.widths;
+          assert.ok(result.tableWidth < 1600, JSON.stringify({ viewport, result }));
+          const selection = await page.evaluate(() => [...document.querySelectorAll(".lead-selection-cell")].every(cell => {
+            const checkbox = cell.querySelector("input").getBoundingClientRect();
+            const bounds = cell.getBoundingClientRect();
+            return getComputedStyle(cell).textOverflow === "clip" && checkbox.left >= bounds.left && checkbox.right <= bounds.right;
+          }));
+          assert.ok(selection, "checkboxes must fit without clipping or ellipsis");
+          if (expanded) {
+            await page.locator(".leads-panel .table-wrap").scrollIntoViewIfNeeded();
+            for (const scrollTop of [125, 640, 60, 0]) {
+              const header = await page.evaluate(async scrollTop => {
+                const scroller = document.querySelector(".leads-panel .table-wrap");
+                scroller.scrollTop = scrollTop;
+                await new Promise(resolve => requestAnimationFrame(resolve));
+                const bounds = scroller.getBoundingClientRect();
+                const heading = document.querySelector(".leads-table thead").getBoundingClientRect();
+                const x = bounds.left + 60;
+                const coverage = [1, 5, heading.height - 1].every(offset =>
+                  Boolean(document.elementFromPoint(x, bounds.top + offset)?.closest("thead")));
+                return { top: heading.top, scrollerTop: bounds.top, coverage };
+              }, scrollTop);
+              assert.ok(Math.abs(header.top - header.scrollerTop) < 1, JSON.stringify({ viewport, scrollTop, header }));
+              assert.ok(header.coverage, "the header must cover rows beneath it without gaps");
+            }
+          }
+        }
+      } finally {
+        await page.close();
+      }
+    }
+  } finally {
+    await browser.close();
+  }
+});
+
+test("lead Back and Next buttons are visible navy controls on desktop and mobile", async () => {
+  const { chromium } = require("playwright-core");
+  const browser = await chromium.launch({ channel: "msedge", headless: true });
+  const css = ["globals.css", path.join("leads", "leads.css")].map(file => readFileSync(path.join(root, "src", "app", file), "utf8")).join("\n");
+  const html = await renderPage("src\\app\\leads\\[id]\\page.tsx", {
+    overrides: {
+      "next/navigation": { useParams: () => ({ id: lead.id }), useRouter: () => ({ push() {} }) },
+      "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({ data: { ...live, lead, notes: [], activities: [], emails: [] }, loading: false, error: "", reload() {}, setError() {} }) },
+    },
+  });
+  try {
+    for (const viewport of [{ width: 1400, height: 768 }, { width: 390, height: 640 }]) {
+      const page = await browser.newPage({ viewport });
+      try {
+        await page.setContent(`<style>${css}</style>${html}`);
+        const buttons = await page.evaluate(() => [...document.querySelectorAll(".lead-detail-navigation .lead-navigation-button")].map(button => {
+          const bounds = button.getBoundingClientRect();
+          const style = getComputedStyle(button);
+          return { text: button.textContent, background: style.backgroundColor, color: style.color, height: bounds.height, left: bounds.left, right: bounds.right, bottom: bounds.bottom };
+        }));
+        assert.equal(buttons.length, 2);
+        for (const button of buttons) {
+          assert.equal(button.background, "rgb(20, 49, 95)");
+          assert.equal(button.color, "rgb(255, 255, 255)");
+          assert.ok(button.height >= 38 && button.left >= 0 && button.right <= viewport.width && button.bottom <= viewport.height, JSON.stringify({ viewport, button }));
+        }
+        assert.ok(buttons[0].left < buttons[1].left, "Back is on the left and Next is on the right");
+      } finally {
+        await page.close();
+      }
+    }
+  } finally {
+    await browser.close();
+  }
+});
+
+test("page sizes use the same 100-lead page immediately and advance at the selected boundary", () => {
+  const records = Array.from({ length: 100 }, (_, i) => ({
+    ...lead, id: `lead-${i}`, name: `Lead ${i}`, createdAt: `2026-10-21T09:${String(Math.floor(i / 60)).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}Z`,
+  }));
+  const states = [];
+  let index = 0, requestPath = "";
+  const { default: Workspace } = load("src\\components\\leads-workspace.tsx", {
+    "@/components/lead-filter-state": { useLeadFilterState: () => null, useLeadNavigation: () => null },
+    react: { ...React, useEffect() {}, useLayoutEffect() {}, useMemo: factory => factory(), useRef: initial => ({ current: initial }),
+      useState(initial) {
+        const key = index++;
+        if (!(key in states)) states[key] = typeof initial === "function" ? initial() : initial;
+        return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }];
+      },
+    },
+    "@/lib/live-leads-client": {
+      ...liveMock,
+      useLiveLeadData(path) {
+        requestPath = path;
+        return { data: { ...live, leads: records, hasMore: true, nextCursor: { id: records[99].id, createdAt: records[99].createdAt } }, loading: false, error: "", reload() {}, setError() {} };
+      },
+    },
+  });
+  const render = () => { index = 0; return elements(Workspace()); };
+  let nodes = render();
+  const initialPath = requestPath;
+  assert.equal(new URL(initialPath, "http://crm.local").searchParams.get("pageSize"), "100");
+  for (const size of [10, 20, 50, 100]) {
+    nodes.find(node => node.props?.["aria-label"] === "Leads per page").props.onChange({ target: { value: String(size) } });
+    nodes = render();
+    assert.equal(requestPath, initialPath, "changing size does not fetch another page");
+    assert.equal(nodes.filter(node => node.type === "input" && node.props?.["aria-label"]?.startsWith("Select Lead ")).length, size);
+  }
+  nodes.find(node => node.props?.["aria-label"] === "Leads per page").props.onChange({ target: { value: "20" } });
+  nodes = render();
+  nodes.find(node => node.type === "button" && node.props.children === "Next").props.onClick();
+  render();
+  assert.deepEqual(JSON.parse(new URL(requestPath, "http://crm.local").searchParams.get("cursor")), {
+    id: records[19].id, createdAt: records[19].createdAt,
+  });
+});
+
 test("unfinished lead conditions stay in the sidebar without filtering or hiding leads", async () => {
   const pendingFilter = { ...filter, criteria: [{ id: "condition", field: "stage", operator: "is", value: "" }] };
   let requestPath = "";
@@ -468,12 +831,134 @@ test("unfinished lead conditions stay in the sidebar without filtering or hiding
   assert.equal(new URL(requestPath, "http://crm.local").searchParams.has("filter"), false);
 });
 
+test("lead filters survive leaving and remounting the list until edited or reset", () => {
+  const retainedFilters = new Map();
+  const navigation = { current: null };
+  let states = [], index = 0, requestPath;
+  const { default: Workspace } = load("src\\components\\leads-workspace.tsx", {
+    react: { ...React, useEffect() {}, useLayoutEffect() {}, useMemo: factory => factory(), useRef: initial => ({ current: initial }),
+      useState(initial) {
+        const key = index++;
+        if (!(key in states)) states[key] = typeof initial === "function" ? initial() : initial;
+        return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }];
+      },
+    },
+    "@/components/lead-filter-state": { useLeadFilterState: () => retainedFilters, useLeadNavigation: () => navigation },
+    "@/lib/live-leads-client": { ...liveMock,
+      useLiveLeadData(path) {
+        requestPath = path;
+        return { data: live, loading: false, error: "", reload() {}, setError() {} };
+      },
+    },
+  });
+  let nodes;
+  const render = props => { index = 0; nodes = elements(Workspace(props)); return nodes.find(node => node.type === actualLeads.LiveFilterEditor); };
+  const remount = props => { states = []; return render(props); };
+  const initialFilter = actualLeads.emptyFilter();
+  const applied = { ...initialFilter, query: "Alex", matchMode: "any", quickView: "My Leads", criteria: [
+    { id: "stage", field: "stage", operator: "is", value: stages[0].name },
+    { id: "unfinished", field: "assignee", operator: "is", value: "" },
+  ] };
+  render({ initialFilter }).props.onChange(applied);
+  assert.deepEqual(remount({ initialFilter }).props.filter, applied);
+  const requested = JSON.parse(new URL(requestPath, "https://crm.test").searchParams.get("filter"));
+  assert.equal(requested.query, "Alex");
+  assert.equal(requested.quickView, "My Leads");
+  assert.deepEqual(requested.criteria, applied.criteria.slice(0, 1));
+  nodes.find(node => node.props?.className === "lead-cell").props.onClick();
+  assert.deepEqual(navigation.current, { filter: requested, dashboard: false });
+  assert.deepEqual(remount({ initialFilter, dashboard: true }).props.filter, initialFilter);
+  const searchEntry = { ...initialFilter, query: "another search" };
+  assert.deepEqual(remount({ initialFilter: searchEntry }).props.filter, searchEntry);
+  const restored = remount({ initialFilter });
+  restored.props.onChange({ ...applied, criteria: applied.criteria.slice(1) });
+  assert.deepEqual(remount({ initialFilter }).props.filter.criteria, applied.criteria.slice(1));
+  remount({ initialFilter }).props.onChange(initialFilter);
+  assert.deepEqual(remount({ initialFilter }).props.filter, initialFilter);
+  assert.equal(new URL(requestPath, "https://crm.test").searchParams.has("filter"), false);
+  retainedFilters.clear();
+  assert.deepEqual(remount({ initialFilter }).props.filter, initialFilter);
+});
+
+test("Next lead uses active filters and the current cursor across page boundaries, with safe end and error states", async () => {
+  const selected = { ...filter, query: "Alex", quickView: "My Leads", criteria: [
+    { id: "stage", field: "stage", operator: "is", value: stages[0].name },
+  ] };
+  for (const outcome of ["next", "end", "error", "assignment-error", "saving", "disabled", "missing-date", "saving-during-request", "unmounted"]) {
+    const states = [], refs = [], effects = [], paths = [], destinations = [], assignments = [];
+    let index = 0, refIndex = 0, saving = outcome === "saving", complete;
+    const navigation = { current: { filter: selected, dashboard: true } };
+    const { NextLeadButton } = load("src\\components\\next-lead-button.tsx", {
+      "@/components/lead-filter-state": { useLeadNavigation: () => navigation },
+      "@/components/call-reminder-popups": { useCallReminders: () => null },
+      "@/lib/lead-stage-assignment": { finishLeavingLeadAssignments: async path => {
+        assignments.push(path);
+        assert.equal(destinations.length, 0, "finish assignment before opening the next lead");
+        if (outcome === "assignment-error") throw new Error("Assignment rule needs an active assignee");
+      } },
+      "next/navigation": { useRouter: () => ({ push: path => destinations.push(path) }) },
+      react: { ...React, useEffect: effect => effects.push(effect),
+        useRef(initial) { const key = refIndex++; return refs[key] ?? (refs[key] = { current: initial }); },
+        useState(initial) {
+          const key = index++;
+          if (!(key in states)) states[key] = initial;
+          return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }];
+        },
+      },
+      "@/lib/crm-data": { ...crm, apiRequest: async (path, options) => {
+        paths.push({ path, options });
+        if (outcome === "error") throw new Error("Lead query unavailable");
+        if (["saving-during-request", "unmounted"].includes(outcome)) await new Promise(resolve => { complete = resolve; });
+        return { leads: outcome === "end" ? [] : [{ ...lead, id: "next-matching-lead" }], hasMore: false, nextCursor: null };
+      } },
+    });
+    const render = () => {
+      index = 0; refIndex = 0;
+      return elements(NextLeadButton({
+        lead: outcome === "missing-date" ? { ...lead, createdAt: undefined } : lead,
+        disabled: outcome === "disabled", isSaving: () => saving,
+      }));
+    };
+    const button = () => render().find(node => node.props?.["aria-label"] === "Next lead");
+    button().props.onClick();
+    if (["saving-during-request", "unmounted"].includes(outcome)) {
+      button().props.onClick();
+      assert.equal(paths.length, 1, "ignore double clicks while the next-lead query is pending");
+      if (outcome === "saving-during-request") saving = true;
+      else effects[0]()();
+      complete();
+    }
+    await new Promise(resolve => setImmediate(resolve));
+    if (["saving", "disabled", "missing-date"].includes(outcome)) assert.equal(paths.length, 0);
+    else {
+      const params = new URL(paths[0].path, "https://crm.test").searchParams;
+      assert.deepEqual(JSON.parse(params.get("filter")), selected);
+      assert.deepEqual(JSON.parse(params.get("cursor")), { id: lead.id, createdAt: lead.createdAt });
+      assert.equal(params.get("dashboard"), "1");
+      assert.equal(params.get("metadata"), "0");
+      assert.equal(params.get("pageSize"), "10", "fetch a bounded page after the current record, not only the already displayed page");
+      assert.equal(paths[0].options.maxAgeMs, 0, "recheck live matching leads rather than stale list data");
+    }
+    assert.deepEqual(destinations, outcome === "next" ? ["/leads/next-matching-lead"] : []);
+    assert.equal(assignments.length, ["next", "assignment-error"].includes(outcome) ? 1 : 0, "do not transfer if there is no next lead or a save is in flight");
+    if (outcome === "end") {
+      assert.equal(button().props.disabled, true);
+      assert.ok(render().some(node => node.props?.role === "status" && node.props.children === "No more leads match these filters."));
+    }
+    if (["error", "assignment-error", "saving", "missing-date", "saving-during-request"].includes(outcome)) {
+      assert.ok(render().some(node => node.props?.role === "alert"), outcome);
+      assert.equal(button().props.disabled, false, "allow retry after an error");
+    }
+  }
+});
+
 test("My Leads switches on one click without debounce and clears the previous page cursor", () => {
   const states = [];
   let index = 0, settledKey, requestPath, pending = false;
   const mine = { ...lead, id: "my-lead", name: "My assigned lead" };
   const nextCursor = { id: lead.id, createdAt: lead.createdAt };
   const { default: Workspace } = load("src\\components\\leads-workspace.tsx", {
+    "@/components/lead-filter-state": { useLeadFilterState: () => null, useLeadNavigation: () => null },
     react: { ...React, useEffect() {}, useLayoutEffect() {}, useMemo: factory => factory(), useRef: initial => ({ current: initial }),
       useState(initial) {
         const key = index++;
@@ -507,8 +992,10 @@ test("My Leads switches on one click without debounce and clears the previous pa
   const params = new URL(requestPath, "http://crm.local").searchParams;
   assert.equal(JSON.parse(params.get("filter")).quickView, "My Leads", "issue the selected view request before the debounce settles");
   assert.equal(params.has("cursor"), false, "start the selected view on its first page");
-  assert.ok(!nodes.some(node => node.type === Link && node.props.children === lead.name), "do not show the old view under the new heading");
-  assert.ok(nodes.some(node => node.type === "strong" && node.props.children === "Loading leads..."));
+  assert.ok(nodes.some(node => node.type === Link && node.props.children === lead.name), "retain the previous view while the new query runs");
+  assert.ok(nodes.some(node => node.type === "p" && node.props.role === "status" && String(node.props.children).includes("Previous results shown")));
+  assert.equal(nodes.find(node => node.props?.["aria-label"] === "Select page").props.disabled, true);
+  assert.ok(!nodes.some(node => node.type === "strong" && node.props.children === "Loading leads..."));
   pending = false;
   nodes = render();
   assert.ok(nodes.some(node => node.type === Link && node.props.children === mine.name), "show the result without another click");
@@ -535,11 +1022,11 @@ function elements(node) {
   return [node, ...elements(node.props?.children)];
 }
 
-function importHarness({ unassigned = false, failFirstBatch = false, failPdf = false, allDuplicates = false } = {}) {
-  const states = [], requests = [], downloads = [], reference = { current: null };
+function importHarness({ unassigned = false, failFirstBatch = false, failPdf = false, allDuplicates = false, parsedRows, timeoutAbove, loseResponseAt, transientResponseAt, alwaysTransient = false, checkTimeoutAbove, duplicateEmail, deleteTimeoutAbove, deleteFailureAt, deleteTransientAt } = {}) {
+  const states = [], requests = [], downloads = [], reference = { current: null }, completedBatches = new Map();
   states[14] = false;
-  let stateIndex = 0, currentError = "", saved = [], failed = false;
-  const parsed = [
+  let stateIndex = 0, currentError = "", saved = [], failed = false, deleted = 0, deleteFailed = false;
+  const parsed = parsedRows ?? [
     { name: "First student", phone: "880987650001", email: "first@example.test", assignee: unassigned ? "" : user.email },
     { name: "Repeated student", phone: "880987650001", email: "first@example.test", assignee: unassigned ? "" : user.email },
     { name: "Second student", phone: "880987650002", email: "second@example.test", assignee: unassigned ? "" : user.email },
@@ -568,12 +1055,39 @@ function importHarness({ unassigned = false, failFirstBatch = false, failPdf = f
         saved = [sheet];
         return { sheet };
       }
-      if (init.method === "DELETE") { saved = []; return { deleted: 2 }; }
+      if (init.method === "DELETE") {
+        if (!saved.length) return { deleted, done: true };
+        const size = Number(new URL(url, "http://localhost").searchParams.get("batchSize"));
+        if (deleteTimeoutAbove && size > deleteTimeoutAbove) throw new Error("canceling statement due to statement timeout");
+        if (deleteFailureAt !== undefined && deleted >= deleteFailureAt && !deleteFailed) { deleteFailed = true; throw new Error("Deletion interrupted"); }
+        deleted = Math.min(saved[0].imported_rows, deleted + size);
+        const done = deleted === saved[0].imported_rows;
+        saved = done ? [] : saved.map(sheet => ({ ...sheet, status: "deleting" }));
+        if (deleted === deleteTransientAt && !deleteFailed) { deleteFailed = true; throw new TestApiError("Connection interrupted", 503); }
+        return { deleted, done };
+      }
       assert.equal(url, "/api/leads/import");
-      if (init.body.checkOnly) return { duplicates: allDuplicates ? [0, 1] : [] };
+      if (init.body.checkOnly) {
+        if (checkTimeoutAbove && init.body.rows.length > checkTimeoutAbove) throw new Error("canceling statement due to statement timeout");
+        return { duplicates: init.body.rows.flatMap((row, index) => allDuplicates || row.email === duplicateEmail ? [index] : []) };
+      }
       if (failFirstBatch && !failed) { failed = true; throw new Error("Connection interrupted"); }
-      saved = saved.map(sheet => ({ ...sheet, imported_rows: init.body.rows.length, status: "completed" }));
-      return { imported: init.body.rows.length, skipped: 0 };
+      if (alwaysTransient) throw new TestApiError("The database service is temporarily unavailable. Please retry.", 503);
+      if (timeoutAbove && init.body.rows.length > timeoutAbove) throw new Error("canceling statement due to statement timeout");
+      const previous = completedBatches.get(init.body.batchIndex);
+      if (previous) {
+        assert.deepEqual(init.body.rows, previous.rows);
+        return previous.result;
+      }
+      const result = { imported: init.body.rows.length, skipped: 0 };
+      completedBatches.set(init.body.batchIndex, { rows: init.body.rows, result });
+      saved = saved.map(sheet => {
+        const imported_rows = sheet.imported_rows + result.imported;
+        return { ...sheet, imported_rows, status: imported_rows + sheet.duplicate_rows === sheet.total_rows ? "completed" : "importing" };
+      });
+      if (init.body.batchIndex === transientResponseAt && !failed) { failed = true; throw new TestApiError("The database service is temporarily unavailable. Please retry.", 503); }
+      if (init.body.batchIndex === loseResponseAt && !failed) { failed = true; throw new Error("Connection interrupted"); }
+      return result;
     } },
   }).default;
   return {
@@ -610,6 +1124,32 @@ test("import review compactly assigns owners and shows normalized phones without
   assert.equal(elements(tree).find(node => node.type === "button" && node.props.children === "Import validated leads").props.disabled, false);
 });
 
+test("import skips rows missing phone or email @ and accepts any non-empty email containing @", async () => {
+  const ui = importHarness({ parsedRows: [
+    { name: "Missing phone", phone: "", email: "missing-phone@example.test", assignee: user.email },
+    { name: "Missing email", phone: "880987650002", email: "", assignee: user.email },
+    { name: "No email marker", phone: "880987650003", email: "no-email-marker", assignee: user.email },
+    { name: "Complete student", phone: "880987650004", email: "schy_74@yahoo.com", course: "", altPhone: "", assignee: user.email },
+    { name: "Unusual email", phone: "880987650005", email: "unusual @ format", assignee: user.email },
+  ] });
+  await ui.read();
+  let tree = ui.render();
+  let html = renderToStaticMarkup(tree);
+  assert.match(html, /3 rows skipped \(3 with a blank phone\/email or an email without @\)/);
+  assert.match(html, /2 of 2 leads/);
+  assert.doesNotMatch(html, /Missing phone|Missing email|No email marker/);
+  const check = ui.requests.find(request => request.body?.checkOnly);
+  assert.deepEqual(check.body.rows.map(row => row.email), ["schy_74@yahoo.com", "unusual @ format"]);
+  await elements(tree).find(node => node.type === "button" && node.props.children === "Import validated leads").props.onClick();
+  const batch = ui.requests.find(request => request.body?.importId);
+  assert.equal(batch.body.rows.length, 2);
+  assert.equal(batch.body.rows[0].course, "");
+  assert.equal(batch.body.rows[0].altPhone, "");
+  assert.equal(ui.downloads[0].total_rows, 5);
+  assert.equal(ui.downloads[0].imported_rows, 2);
+  assert.equal(ui.downloads[0].duplicate_rows, 3);
+});
+
 test("import completion automatically downloads exact sheet counts and confirms before deleting its leads", async () => {
   const ui = importHarness();
   await ui.read();
@@ -637,6 +1177,53 @@ test("import completion automatically downloads exact sheet counts and confirms 
   assert.doesNotMatch(renderToStaticMarkup(ui.render()), />2 imported<|Delete sheet and leads/);
 });
 
+test("duplicate checks split on timeout and retain local and database duplicate row mapping", async () => {
+  const parsedRows = Array.from({ length: 7 }, (_, index) => ({
+    name: `Lead ${index}`, phone: String(880100000000 + index), email: `lead-${index}@example.test`, assignee: user.email,
+  }));
+  parsedRows[5].email = parsedRows[0].email;
+  const ui = importHarness({ parsedRows, checkTimeoutAbove: 2, duplicateEmail: "lead-4@example.test" });
+  await ui.read();
+  const checks = ui.requests.filter(request => request.body?.checkOnly);
+  assert.deepEqual(checks.slice(0, 3).map(request => request.body.rows.length), [6, 3, 1]);
+  assert.match(renderToStaticMarkup(ui.render()), /2 duplicates/);
+  await elements(ui.render()).find(node => node.type === "button" && node.props.children === "Import validated leads").props.onClick();
+  assert.deepEqual(ui.requests.find(request => request.body?.importId).body.rows.map(row => row.email),
+    ["lead-0@example.test", "lead-1@example.test", "lead-2@example.test", "lead-3@example.test", "lead-6@example.test"]);
+});
+
+test("sheet deletion splits timed-out batches and resumes after interruption", async () => {
+  const parsedRows = Array.from({ length: 5 }, (_, index) => ({
+    name: `Lead ${index}`, phone: String(880200000000 + index), email: `delete-${index}@example.test`, assignee: user.email,
+  }));
+  const ui = importHarness({ parsedRows, deleteTimeoutAbove: 2, deleteFailureAt: 2 });
+  await ui.read();
+  await elements(ui.render()).find(node => node.type === "button" && node.props.children === "Import validated leads").props.onClick();
+  elements(ui.render()).find(node => node.props?.["aria-label"] === "Delete November admissions.xlsx and its imported leads").props.onClick();
+  elements(ui.render()).find(node => node.type === "button" && node.props.children === "Delete sheet and leads").props.onClick();
+  await new Promise(setImmediate);
+  assert.match(renderToStaticMarkup(ui.render()), /Deletion interrupted/);
+  assert.match(renderToStaticMarkup(ui.render()), /Deletion incomplete/);
+  assert.match(renderToStaticMarkup(ui.render()), /Resume deletion/);
+  elements(ui.render()).find(node => node.type === "button" && node.props.children === "Delete sheet and leads").props.onClick();
+  await new Promise(setImmediate);
+  assert.match(renderToStaticMarkup(ui.render()), /removed 5 imported leads/);
+  assert.doesNotMatch(renderToStaticMarkup(ui.render()), /Deletion incomplete/);
+});
+
+test("sheet deletion retries a lost response using cumulative counts", async () => {
+  const parsedRows = Array.from({ length: 5 }, (_, index) => ({
+    name: `Lead ${index}`, phone: String(880300000000 + index), email: `lost-delete-${index}@example.test`, assignee: user.email,
+  }));
+  const ui = importHarness({ parsedRows, deleteTimeoutAbove: 2, deleteTransientAt: 2 });
+  await ui.read();
+  await elements(ui.render()).find(node => node.type === "button" && node.props.children === "Import validated leads").props.onClick();
+  elements(ui.render()).find(node => node.props?.["aria-label"] === "Delete November admissions.xlsx and its imported leads").props.onClick();
+  elements(ui.render()).find(node => node.type === "button" && node.props.children === "Delete sheet and leads").props.onClick();
+  await new Promise(resolve => setTimeout(resolve, 600));
+  assert.match(renderToStaticMarkup(ui.render()), /removed 5 imported leads/);
+});
+
 test("interrupted import retries the same sheet and batch, while PDF errors never claim download success", async () => {
   const ui = importHarness({ failFirstBatch: true });
   await ui.read();
@@ -656,10 +1243,76 @@ test("interrupted import retries the same sheet and batch, while PDF errors neve
   assert.match(html, /Download PDF for November admissions.xlsx/);
 });
 
+test("large imports split timed-out batches and replay an interrupted batch without duplicating leads", async () => {
+  const parsedRows = Array.from({ length: 4310 }, (_, index) => ({
+    name: `Lead ${index}`, phone: String(880100000000 + index), email: `lead-${index}@example.test`, assignee: user.email,
+  }));
+  const ui = importHarness({ parsedRows, timeoutAbove: 40, loseResponseAt: 3 });
+  await ui.read();
+  await elements(ui.render()).find(node => node.type === "button" && node.props.children === "Import validated leads").props.onClick();
+  let batches = ui.requests.filter(request => request.body?.importId);
+  assert.deepEqual(batches.slice(0, 5).map(request => request.body.rows.length), [500, 250, 125, 62, 31]);
+  assert.deepEqual(batches.slice(0, 5).map(request => request.body.batchIndex), [0, 0, 0, 0, 0]);
+  assert.match(renderToStaticMarkup(ui.render()), /93 leads confirmed imported/);
+  assert.equal(ui.downloads.length, 0);
+  await elements(ui.render()).find(node => node.type === "button" && node.props.children === "Retry import").props.onClick();
+  batches = ui.requests.filter(request => request.body?.importId);
+  const interrupted = batches.filter(request => request.body.batchIndex === 3);
+  assert.equal(interrupted.length, 2);
+  assert.deepEqual(interrupted[0].body, interrupted[1].body);
+  assert.equal(ui.requests.filter(request => request.url === "/api/leads/imports").length, 1);
+  assert.equal(ui.downloads[0].total_rows, 4310);
+  assert.equal(ui.downloads[0].imported_rows, 4310);
+  assert.equal(ui.downloads[0].duplicate_rows, 0);
+});
+
+test("fast imports grow batches up to the request limit to reduce round trips", async () => {
+  const parsedRows = Array.from({ length: 4310 }, (_, index) => ({
+    name: `Lead ${index}`, phone: String(880400000000 + index), email: `fast-${index}@example.test`, assignee: user.email,
+  }));
+  const ui = importHarness({ parsedRows });
+  await ui.read();
+  assert.deepEqual(ui.requests.filter(request => request.body?.checkOnly).map(request => request.body.rows.length), [2000, 2000, 310]);
+  await elements(ui.render()).find(node => node.type === "button" && node.props.children === "Import validated leads").props.onClick();
+  assert.deepEqual(ui.requests.filter(request => request.body?.importId).map(request => request.body.rows.length), [500, 1000, 2000, 810]);
+  assert.equal(ui.downloads[0].imported_rows, 4310);
+});
+
+test("import safely retries a transient provider failure after a batch committed", async () => {
+  const ui = importHarness({ transientResponseAt: 0 });
+  await ui.read();
+  await elements(ui.render()).find(node => node.type === "button" && node.props.children === "Import validated leads").props.onClick();
+  const batches = ui.requests.filter(request => request.body?.importId);
+  assert.equal(batches.length, 2);
+  assert.deepEqual(batches[0].body, batches[1].body);
+  assert.equal(ui.downloads[0].imported_rows, 2);
+  assert.equal(ui.downloads[0].duplicate_rows, 1);
+});
+
+test("import stops retrying and reports a persistent provider outage", async () => {
+  const ui = importHarness({ alwaysTransient: true });
+  await ui.read();
+  await elements(ui.render()).find(node => node.type === "button" && node.props.children === "Import validated leads").props.onClick();
+  const batches = ui.requests.filter(request => request.body?.importId);
+  assert.equal(batches.length, 4);
+  assert.ok(batches.every(request => JSON.stringify(request.body) === JSON.stringify(batches[0].body)));
+  assert.match(renderToStaticMarkup(ui.render()), /database service is temporarily unavailable/);
+  assert.equal(ui.downloads.length, 0);
+});
+
+test("import surfaces a timeout that persists for a single lead", async () => {
+  const ui = importHarness({ parsedRows: [{ name: "Lead", phone: "880987650001", email: "one@example.test", assignee: user.email }], timeoutAbove: -1 });
+  await ui.read();
+  await elements(ui.render()).find(node => node.type === "button" && node.props.children === "Import validated leads").props.onClick();
+  assert.match(renderToStaticMarkup(ui.render()), /canceling statement due to statement timeout/);
+  assert.equal(ui.requests.filter(request => request.body?.importId).length, 1);
+  assert.equal(ui.downloads.length, 0);
+});
+
 test("all-duplicate sheets still save history and automatically download a zero-import PDF", async () => {
   const ui = importHarness({ allDuplicates: true });
   await ui.read();
-  const button = elements(ui.render()).find(node => node.type === "button" && node.props.children === "Save duplicate report");
+  const button = elements(ui.render()).find(node => node.type === "button" && node.props.children === "Save skipped-row report");
   assert.equal(button.props.disabled, false);
   await button.props.onClick();
   assert.equal(ui.downloads.length, 1);
@@ -762,6 +1415,40 @@ test("IBMP invoices cannot be saved when their own USD catalog price is missing"
   assert.equal(save.props.disabled,true);
 });
 
+test("Super Admin invoice register checks for new approval requests even when initially empty", async () => {
+  const previous = { window: global.window, document: global.document };
+  const data = structuredClone(operations["/api/invoices"]);
+  const request = { ...data.invoices[0], discount_percent: 10 };
+  data.invoices = [];
+  data.canApproveDiscount = true;
+  const effects = [];
+  let tick, refreshes = 0, stopped = false;
+  global.window = {
+    setInterval(callback, delay) { assert.equal(delay, 15000); tick = callback; return 1; },
+    clearInterval() { stopped = true; }, addEventListener() {}, removeEventListener() {},
+  };
+  global.document = { visibilityState: "visible", addEventListener() {}, removeEventListener() {} };
+  let cleanup;
+  try {
+    const ui = invoiceHarness(data, [], {}, { refresh: async () => { refreshes++; data.invoices = [request]; } }, effects);
+    ui.render();
+    cleanup = effects[0]();
+    assert.equal(typeof tick, "function", "an empty Super Admin register must still poll for requests");
+    global.document.visibilityState = "hidden";
+    await tick();
+    assert.equal(refreshes, 0);
+    global.document.visibilityState = "visible";
+    await tick();
+    assert.equal(refreshes, 1);
+    assert.ok(elements(ui.render()).some(node => node.props?.["aria-label"] === `Approve and send invoice ${request.invoice_no}`));
+    cleanup(); cleanup = null;
+    assert.equal(stopped, true);
+  } finally {
+    cleanup?.();
+    global.window = previous.window; global.document = previous.document;
+  }
+});
+
 test("invoice form scopes to the lead, previews percentage discounts and submits the invoice contract", async () => {
   const payload = { lead_id: lead.id, course_id: "course-1", company_code: "DMHCA", currency: "INR", billing_address: "Lead address",
     tax_amount: "4410.00", discount_percent: "2", due_date: "2026-12-01", save_billing_address: "on" };
@@ -794,7 +1481,7 @@ test("invoice form scopes to the lead, previews percentage discounts and submits
   assert.equal(nodes.find(node=>node.props?.["aria-label"]==="Due Date").props.onChange,undefined);
   assert.equal(nodes.find(node=>node.props?.name==="discount_percent").props.readOnly,false);
   assert.equal(nodes.find(node => node.props?.name === "tax_amount").props.value, "4410.00");
-  assert.equal(field("Approver"), "Admin / Super Admin");
+  assert.equal(field("Approver"), "Super Admin");
   await nodes.find(node => node.type === "form").props.onSubmit({ preventDefault() {}, currentTarget: {} });
   assert.deepEqual(ui.requests, [["/api/invoices", "POST", {...payload,parent_invoice_id:"",discount_percent:2,tax_percent:18,save_billing_address:true,
     document_details: { student_id: "", billing_phone: "", place_of_supply: "", course_details: "", sac_code: "" },
@@ -890,6 +1577,26 @@ test("admin invoice register provides confirmed approval without opening details
   approval.props.onClick();
   assert.equal(ui.requests.length, 0);
   assert.match(message, /emailed automatically/);
+  global.confirm = () => true;
+  approval.props.onClick();
+  assert.deepEqual(ui.requests, [[`/api/invoices/${invoice.id}`, "PATCH", { action: "approve" }]]);
+});
+
+test("Super Admin sees submitted discount requests and can approve them from the invoice register", t => {
+  const previous = global.confirm;
+  t.after(() => { if (previous === undefined) delete global.confirm; else global.confirm = previous; });
+  const data = structuredClone(operations["/api/invoices"]);
+  data.canApproveDiscount = false;
+  const invoice = data.invoices[0];
+  invoice.discount_percent = 10;
+  const label = `Approve and send invoice ${invoice.invoice_no}`;
+  assert.ok(!elements(invoiceHarness(data).render()).some(node => node.props?.["aria-label"] === label));
+  data.canApproveDiscount = true;
+  const ui = invoiceHarness(data);
+  const nodes = elements(ui.render());
+  assert.ok(nodes.some(node => node.props?.children === "Awaiting approval"));
+  const approval = nodes.find(node => node.props?.["aria-label"] === label);
+  assert.ok(approval);
   global.confirm = () => true;
   approval.props.onClick();
   assert.deepEqual(ui.requests, [[`/api/invoices/${invoice.id}`, "PATCH", { action: "approve" }]]);
@@ -1365,8 +2072,10 @@ test("all lead selection loads every cursor page using bounded requests", async 
       },
     },
   });
-  const rows = await api.loadAllLeadRows(filter);
+  const progress = [];
+  const rows = await api.loadAllLeadRows(filter, false, { onPage: leads => progress.push(leads.map(row => row.id)) });
   assert.deepEqual(rows.map(row => row.id), ["first", "later"]);
+  assert.deepEqual(progress, [["first"], ["first", "later"]]);
   assert.equal(calls.length, 2);
   for (const call of calls) {
     const url = new URL(call.url, "http://crm.local");
@@ -1375,6 +2084,25 @@ test("all lead selection loads every cursor page using bounded requests", async 
     assert.equal(call.options.maxAgeMs, 0);
   }
   assert.equal(new URL(calls[1].url, "http://crm.local").searchParams.get("cursor"), JSON.stringify(firstCursor));
+});
+
+test("all lead selection continues from the already loaded first page", async () => {
+  const calls = [];
+  const api = load("src\\lib\\live-leads-client.tsx", {
+    "@/lib/crm-data": {
+      ...crm,
+      apiRequest: async url => {
+        calls.push(url);
+        return { leads: [{ id: "later" }], hasMore: false, nextCursor: null };
+      },
+    },
+  });
+  const rows = await api.loadAllLeadRows(filter, false, {
+    initialPage: { leads: [{ id: "first" }], hasMore: true, nextCursor: { id: "20000000-0000-4000-8000-000000000001", createdAt: "2026-10-21T09:00:00Z" } },
+  });
+  assert.deepEqual(rows.map(row => row.id), ["first", "later"]);
+  assert.equal(calls.length, 1, "do not refetch the already loaded first page");
+  assert.match(calls[0], /metadata=0/);
 });
 
 test("all lead selection rejects a repeated pagination cursor", async () => {
@@ -1386,6 +2114,31 @@ test("all lead selection rejects a repeated pagination cursor", async () => {
     },
   });
   await assert.rejects(api.loadAllLeadRows(filter), /page cursor did not advance/);
+});
+
+test("all lead loading stops scheduling pages when the filter changes", async () => {
+  let active = true, release, calls = 0;
+  const firstCursor = { id: "20000000-0000-4000-8000-000000000001", createdAt: "2026-10-21T09:00:00Z" };
+  const api = load("src\\lib\\live-leads-client.tsx", {
+    "@/lib/crm-data": {
+      ...crm,
+      apiRequest: () => {
+        calls++;
+        return new Promise(resolve => { release = resolve; });
+      },
+    },
+  });
+  const progress = [];
+  const pending = api.loadAllLeadRows(filter, false, {
+    initialPage: { leads: [{ id: "first" }], hasMore: true, nextCursor: firstCursor },
+    shouldContinue: () => active,
+    onPage: rows => progress.push(rows.map(row => row.id)),
+  });
+  active = false;
+  release({ leads: [{ id: "stale" }], hasMore: true, nextCursor: firstCursor });
+  await pending;
+  assert.equal(calls, 1);
+  assert.deepEqual(progress, [["first"]]);
 });
 
 test("invoice register filters by invoice month and inclusive invoice-date range", () => {
@@ -1794,11 +2547,12 @@ test("dashboard renders course/country analyses and linked metrics for each role
   }
 });
 
-test("dashboard links apply their filter on the first Leads request without flashing all leads", () => {
+test("dashboard links apply their filter on the first Leads request without flashing all leads", async () => {
   const dashboard = load("src\\lib\\dashboard.ts");
   const href = dashboard.dashboardLink([dashboard.dashboardCriterion("country", "is", "India")], "India leads");
   let search = new URL(href, "http://localhost").searchParams;
   const states = [], refs = [], paths = [];
+  const preloads = [];
   let index = 0, refIndex = 0, error = "";
   const records = [
     lead,
@@ -1806,6 +2560,8 @@ test("dashboard links apply their filter on the first Leads request without flas
     { ...lead, id: "other-owner", assigneeId: "other" },
   ];
   const Component = load("src\\app\\leads\\page.tsx", {
+    "@/lib/server/lead-list": { fetchLeadListData: async (_supabase, _user, query) => { preloads.push(query); return live; } },
+    "@/components/lead-filter-state": { useLeadFilterState: () => null, useLeadNavigation: () => null },
     "next/navigation": { useSearchParams: () => search, useRouter: () => ({ replace() {} }) },
     "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: path => {
       paths.push(path);
@@ -1823,18 +2579,23 @@ test("dashboard links apply their filter on the first Leads request without flas
       useState(initial) { const key = index++; if (!(key in states)) states[key] = typeof initial === "function" ? initial() : initial; return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }]; },
     },
   }).default;
-  const route = Component();
+  const renderRoute = () => Component({ searchParams: Promise.resolve(Object.fromEntries(search)) });
+  const route = await renderRoute();
+  assert.equal(preloads.length, 1);
+  assert.equal(preloads[0].dashboard, true);
+  assert.equal(preloads[0].filter.criteria[0].value, "India");
   const nodes = elements(route.type(route.props));
   const links = nodes.filter(node => node.props?.className === "lead-cell");
   assert.deepEqual(links.map(node => node.props.href), ["/leads/lead-1"]);
-  assert.ok(nodes.some(node => node.type === "h2" && node.props.children === "India leads"));
+  assert.ok(nodes.some(node => node.props?.title === "India leads" && node.props?.dashboard === true));
   assert.equal(paths.length, 1);
   assert.equal(new URL(paths[0], "http://localhost").searchParams.get("dashboard"), "1");
   search = new URLSearchParams("dashboard=invalid");
-  assert.match(renderToStaticMarkup(Component()), /role="alert"/);
+  assert.match(renderToStaticMarkup(await renderRoute()), /role="alert"/);
   assert.equal(paths.length, 1, "invalid filters must not request the unfiltered lead list");
+  assert.equal(preloads.length, 1, "invalid filters must not preload unfiltered leads on the server");
   search = new URLSearchParams();
-  assert.notEqual(Component().key, route.key, "returning to all leads resets the filter workspace");
+  assert.notEqual((await renderRoute()).key, route.key, "returning to all leads resets the filter workspace");
 });
 
 test("pipeline filters, sorts and moves records with permission and concurrent-save guards", async () => {
@@ -2411,7 +3172,7 @@ test("transfer dialog requires an assignee and defaults to keeping every lead's 
   assert.match(html, /disabled="">Confirm transfer<\/button>/);
 });
 
-test("bulk transfer sends assignee with an optional stage in one PATCH and retains failed selections", async () => {
+test("bulk transfer sends one batched request with an optional stage and retains leads not updated", async () => {
   for (const stageId of ["", stages[1].id]) {
     const states = [filter, "", [lead.id, "lead-2"], false, "", "", "", 0, 50, [], "", false, null, false, "", null, false, "", [null], null];
     const refs = [];
@@ -2419,14 +3180,14 @@ test("bulk transfer sends assignee with an optional stage in one PATCH and retai
     const requests = [];
     const data = { ...live, leads: [lead, { ...lead, id: "lead-2", stageId: stages[2].id }] };
     const Component = load("src\\components\\leads-workspace.tsx", {
+      "@/components/lead-filter-state": { useLeadFilterState: () => null, useLeadNavigation: () => null },
       react: { ...React, useEffect() {}, useLayoutEffect() {}, useMemo: factory => factory(),
         useRef(initial) { const key = refIndex++; return refs[key] ?? (refs[key] = { current: initial }); },
         useState(initial) { const key = index++; if (!(key in states)) states[key] = initial; return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }]; },
       },
       "@/lib/crm-data": { ...crm, apiRequest: async (url, options) => {
         requests.push({ url, ...options });
-        if (url.endsWith("lead-2")) throw new Error("Transfer denied");
-        return {};
+        return { updatedIds: [lead.id] };
       } },
       "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({ data, error, loading: false, reload: async () => {}, setError: value => { error = value; } }) },
     }).default;
@@ -2443,21 +3204,23 @@ test("bulk transfer sends assignee with an optional stage in one PATCH and retai
     stage.props.onChange(stageId);
     render().find(node => node.type === "form" && node.props.onSubmit).props.onSubmit({ preventDefault() {} });
     await new Promise(resolve => setImmediate(resolve));
-    assert.equal(requests.length, 2);
-    assert.equal(requests[0].method, "PATCH");
-    assert.deepEqual(requests[0].body, { assigneeId: profile.id, ...(stageId ? { stageId } : {}) });
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].url, "/api/leads/bulk");
+    assert.equal(requests[0].method, "POST");
+    assert.deepEqual(requests[0].body, { ids: [lead.id, "lead-2"], assigneeId: profile.id, ...(stageId ? { stageId } : {}) });
     assert.deepEqual(states[2], ["lead-2"]);
-    assert.match(error, /1 of 2 leads updated.*Transfer denied/);
+    assert.match(error, /1 of 2 leads updated.*unavailable or could not be updated/);
   }
 });
 
-test("bulk updates run at most three requests concurrently and settle in-flight changes before reporting failures", async () => {
+test("bulk deletion runs at most three requests concurrently and settles in-flight changes before reporting failures", async () => {
   for (const fail of [false, true]) {
     const records = Array.from({ length: 7 }, (_, index) => ({ ...lead, id: `bulk-${index}` }));
     const states = [filter, "", records.map(row => row.id), false, "", "", "", 0, 50, [], "", false, null, false, "", null, false, "", [null], null];
     const refs = [], pending = new Map(), requests = [];
     let index = 0, refIndex = 0, error = "", peak = 0, refreshed = false;
     const Component = load("src\\components\\leads-workspace.tsx", {
+      "@/components/lead-filter-state": { useLeadFilterState: () => null, useLeadNavigation: () => null },
       react: { ...React, useEffect() {}, useLayoutEffect() {}, useMemo: factory => factory(),
         useRef(initial) { const key = refIndex++; return refs[key] ?? (refs[key] = { current: initial }); },
         useState(initial) { const key = index++; if (!(key in states)) states[key] = initial; return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }]; },
@@ -2476,8 +3239,7 @@ test("bulk updates run at most three requests concurrently and settle in-flight 
       }) },
     }).default;
     const render = () => { index = 0; refIndex = 0; return elements(Component()); };
-    render().find(node => node.props?.["aria-label"] === "Transfer").props.onClick();
-    render().find(node => node.props?.ariaLabel === "Transfer assignee").props.onChange(profile.id);
+    render().find(node => node.props?.["aria-label"] === "Delete").props.onClick();
     render().find(node => node.type === "form" && node.props.onSubmit).props.onSubmit({ preventDefault() {} });
     assert.equal(pending.size, 3, "do not serialize the first batch");
     if (fail) {
@@ -2499,6 +3261,42 @@ test("bulk updates run at most three requests concurrently and settle in-flight 
   }
 });
 
+test("bulk status updates use bounded batches and retain failed and unattempted leads", async () => {
+  for (const fail of [false, true]) {
+    const records = Array.from({ length: 210 }, (_, index) => ({ ...lead, id: `stage-${index}` }));
+    const states = [filter, "", records.map(row => row.id), false, "", "", "", 0, "all", [], "", false, null, false, "", null, false, "", [null], null];
+    const refs = [], requests = [];
+    let index = 0, refIndex = 0, error = "", reloads = 0;
+    const Component = load("src\\components\\leads-workspace.tsx", {
+      "@/components/lead-filter-state": { useLeadFilterState: () => null, useLeadNavigation: () => null },
+      react: { ...React, useEffect() {}, useLayoutEffect() {}, useMemo: factory => factory(),
+        useRef(initial) { const key = refIndex++; return refs[key] ?? (refs[key] = { current: initial }); },
+        useState(initial) { const key = index++; if (!(key in states)) states[key] = initial; return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }]; },
+      },
+      "@/lib/crm-data": { ...crm, apiRequest: async (url, options) => {
+        requests.push({ url, ...options });
+        if (fail && requests.length === 2) throw new Error("Write failed");
+        return { updatedIds: options.body.ids };
+      } },
+      "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({
+        data: { ...live, leads: records }, error, loading: false,
+        reload: async () => { reloads++; }, setError: value => { error = value; },
+      }) },
+    }).default;
+    const render = () => { index = 0; refIndex = 0; return elements(Component()); };
+    render().find(node => node.props?.["aria-label"] === "Update status").props.onClick();
+    render().find(node => node.props?.ariaLabel === "Bulk stage").props.onChange(stages[1].id);
+    render().find(node => node.type === "form" && node.props.onSubmit).props.onSubmit({ preventDefault() {} });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(requests.map(request => request.body.ids.length), fail ? [100, 100] : [100, 100, 10]);
+    assert.ok(requests.every(request => request.url === "/api/leads/bulk" && request.body.action === "stage"));
+    assert.equal(states[2].length, fail ? 110 : 0);
+    assert.equal(reloads, 1);
+    if (fail) assert.match(error, /100 of 210 leads updated.*Write failed/);
+    else assert.equal(error, "");
+  }
+});
+
 test("assignment automations use collapsed searchable selectors for single owners and rotation pools", async () => {
   const users = [
     { id: "owner-a", full_name: "Assignee Alpha", active: true },
@@ -2511,6 +3309,7 @@ test("assignment automations use collapsed searchable selectors for single owner
       canManage, users, rules: [
         { rule_key: "facebook", enabled: true, strategy: "round_robin", owner_ids: ["owner-a", "inactive"], next_owner_index: 0 },
         { rule_key: "website", enabled: false, strategy: "single", owner_ids: ["owner-b"], next_owner_index: 0 },
+        { rule_key: "cold", enabled: false, strategy: "single", owner_ids: [], next_owner_index: 0 },
       ],
     }, "", "", false, null];
     let index = 0;
@@ -2527,11 +3326,14 @@ test("assignment automations use collapsed searchable selectors for single owner
     const render = () => { index = 0; return elements(LeadAssignmentAutomations()); };
     let nodes = render();
     const selectors = nodes.filter(node => node.type === selector);
-    assert.equal(selectors.length, 5);
+    assert.equal(selectors.length, 6);
     assert.ok(selectors.every(node => node.props.disabled === !canManage));
     assert.ok(!nodes.some(node => node.type === "input" && node.props.type === "radio"));
     const rotation = selectors.find(node => node.props.id === "assignment-facebook");
     const single = selectors.find(node => node.props.id === "assignment-website");
+    const cold = selectors.find(node => node.props.id === "assignment-cold");
+    assert.equal(cold.props.ariaLabel, "Cold stage: Select an assignee");
+    assert.equal(cold.props.multiple, undefined);
     assert.equal(rotation.props.multiple, true);
     assert.deepEqual(rotation.props.value, ["owner-a", "inactive"]);
     assert.equal(rotation.props.options.find(option => option.value === "inactive").disabled, false, "allow removing an inactive rotation member");
@@ -2548,6 +3350,12 @@ test("assignment automations use collapsed searchable selectors for single owner
     await save.props.onClick();
     await new Promise(resolve => setImmediate(resolve));
     assert.deepEqual(requests[0].body, { rule_key: "facebook", enabled: true, strategy: "round_robin", owner_ids: ["owner-b"] });
+    cold.props.onChange("owner-a");
+    const coldCard = () => render().find(node => node.type === "article" && elements(node).some(child => child.props.id === "assignment-cold"));
+    elements(coldCard()).find(node => node.type === "input" && node.props.type === "checkbox").props.onChange({ target: { checked: true } });
+    elements(coldCard()).find(node => node.type === "button").props.onClick();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(requests[1].body, { rule_key: "cold", enabled: true, strategy: "single", owner_ids: ["owner-a"] });
   }
 });
 
@@ -2601,6 +3409,7 @@ test("lead columns float without layout shifts and save each checkbox change aut
     else global.document = previousDocument;
   });
   const Component = load("src\\components\\leads-workspace.tsx", {
+    "@/components/lead-filter-state": { useLeadFilterState: () => null, useLeadNavigation: () => null },
     "@/lib/live-leads-client": liveMock,
     "react-dom": { createPortal: (content) => content },
     "@/lib/crm-data": { ...crm, apiRequest: (...args) => {
@@ -2694,6 +3503,69 @@ test("lead columns float without layout shifts and save each checkbox change aut
   assert.match(css, /\.lead-column-list \{[^}]*max-height: 140px;[^}]*overflow-y: auto/);
   assert.match(css, /\.lead-column-option \{[^}]*display: flex/);
   assert.match(css, /\.lead-column-options \{[^}]*position: fixed/);
+});
+
+test("many lead conditions scroll without a scrollbar while saved filters remain visible", async () => {
+  let current = { ...filter, criteria: [] };
+  const props = () => ({ filter: current, leads: [], stages, profiles: [profile], onChange: next => { current = next; } });
+  for (let index = 0; index < 30; index++) {
+    elements(actualLeads.LiveFilterEditor(props())).find(node => node.props?.className === "text-link").props.onClick();
+  }
+  assert.equal(current.criteria.length, 30);
+  assert.equal(new Set(current.criteria.map(criterion => criterion.id)).size, 30);
+  const menus = elements(actualLeads.LiveFilterEditor(props())).filter(node => node.props?.ariaLabel === "Filter value");
+  menus.at(-1).props.onChange(stages[1].name);
+  assert.equal(current.criteria.at(-1).value, stages[1].name);
+  assert.equal(current.criteria[0].value, "");
+
+  const html = renderToStaticMarkup(React.createElement(actualLeads.LiveFilterEditor, props()));
+  const css = readFileSync(path.join(root, "src", "app", "leads", "leads.css"), "utf8");
+  const { chromium } = require("playwright-core");
+  const browser = await chromium.launch({ channel: "msedge", headless: true });
+  try {
+    for (const viewport of [{ width: 1400, height: 768 }, { width: 800, height: 640 }, { width: 390, height: 640 }]) {
+      const page = await browser.newPage({ viewport });
+      try {
+        await page.setContent(`<style>body { margin: 0; } ${css}</style><div class="page-content leads-workspace"><div class="leads-layout"><aside class="lead-filter-sidebar">${html}<section class="panel saved-filter-panel"><div class="panel-heading"><h2>Saved filters</h2></div><div class="saved-filter-controls"><button>Choose saved filter</button><input aria-label="Filter name"><button>Save filter</button><button>Delete filter</button></div></section></aside></div></div>`);
+        const result = await page.evaluate(() => {
+          const sidebar = document.querySelector(".lead-filter-sidebar");
+          const editor = document.querySelector(".filter-panel");
+          const saved = document.querySelector(".saved-filter-panel");
+          const savedVisible = () => {
+            const bounds = sidebar.getBoundingClientRect();
+            const savedBounds = saved.getBoundingClientRect();
+            return savedBounds.top >= bounds.top && savedBounds.bottom <= bounds.bottom && savedBounds.bottom <= window.innerHeight;
+          };
+          const savedVisibleAtTop = savedVisible();
+          const lastCondition = document.querySelector(".filter-criterion:last-child");
+          lastCondition.scrollIntoView({ block: "center" });
+          const bounds = editor.getBoundingClientRect();
+          const conditionBounds = lastCondition.getBoundingClientRect();
+          const conditionVisible = conditionBounds.top >= bounds.top && conditionBounds.bottom <= bounds.bottom;
+          const conditionScroll = editor.scrollTop;
+          const savedVisibleAtBottom = savedVisible();
+          editor.scrollTop = 0;
+          return {
+            count: document.querySelectorAll(".filter-criterion").length,
+            conditionVisible, conditionScroll,
+            savedVisibleAtTop, savedVisibleAtBottom, savedVisibleAfterScrollUp: savedVisible(),
+            scrollbarHidden: getComputedStyle(editor).scrollbarWidth === "none" && getComputedStyle(editor, "::-webkit-scrollbar").display === "none",
+            scrollable: editor.scrollHeight > editor.clientHeight,
+            bounded: sidebar.clientHeight < window.innerHeight,
+          };
+        });
+        assert.equal(result.count, 30);
+        assert.ok(result.scrollable && result.bounded, JSON.stringify({ viewport, result }));
+        assert.ok(result.conditionVisible && result.conditionScroll > 0, JSON.stringify({ viewport, result }));
+        assert.ok(result.savedVisibleAtTop && result.savedVisibleAtBottom && result.savedVisibleAfterScrollUp, JSON.stringify({ viewport, result }));
+        assert.ok(result.scrollbarHidden, JSON.stringify({ viewport, result }));
+      } finally {
+        await page.close();
+      }
+    }
+  } finally {
+    await browser.close();
+  }
 });
 
 test("live filter menus use real configuration, multi-select values and safe field changes", () => {
@@ -2844,6 +3716,81 @@ test("lead workspace keeps notes separate from overview and email history", asyn
   assert.doesNotMatch(html, /No records yet/);
 });
 
+test("note saves unlock after database confirmation without waiting for the timeline refresh", async () => {
+  const states = [], refs = [], writes = [];
+  let stateIndex = 0, refIndex = 0, confirmSave, finishRefresh, refreshes = 0, settled = false;
+  const data = { ...live, lead, notes: [], activities: [], emails: [] };
+  const Component = load("src\\app\\leads\\[id]\\page.tsx", {
+    react: { ...React, useEffect() {},
+      useRef(initial) { const key = refIndex++; return refs[key] ?? (refs[key] = { current: initial }); },
+      useState(initial) { const key = stateIndex++; if (!(key in states)) states[key] = typeof initial === "function" ? initial() : initial; return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }]; },
+    },
+    "next/navigation": { useParams: () => ({ id: lead.id }), useRouter: () => ({}) },
+    "@/lib/crm-data": { ...crm, apiRequest: (url, options) => {
+      writes.push({ url, options }); return new Promise(resolve => { confirmSave = resolve; });
+    } },
+    "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({
+      data, error: "", loading: false, setError() {},
+      reload: () => { refreshes++; return new Promise(resolve => { finishRefresh = resolve; }); },
+    }) },
+  }).default;
+  const render = () => { stateIndex = 0; refIndex = 0; return elements(Component()); };
+  render().find(node => node.props.id === "lead-section-note").props.onClick();
+  const composer = () => render().find(node => node.type?.name === "LeadNoteComposer");
+  const saving = composer().props.onSave("Confirmed note", []).then(() => { settled = true; });
+  assert.equal(composer().props.disabled, true);
+  assert.equal(settled, false);
+  assert.equal(refreshes, 0, "do not refresh or report success before persistence");
+  confirmSave({ ok: true });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled, true, "a pending timeline request must not keep the note in Saving");
+  assert.equal(composer().props.disabled, false);
+  assert.equal(refreshes, 1);
+  assert.equal(writes.length, 1);
+  assert.deepEqual(writes[0].options.body, { action: "note", content: "Confirmed note", images: [] });
+  await saving;
+  finishRefresh();
+  await new Promise(resolve => setImmediate(resolve));
+});
+
+test("note save failures preserve the save error while refresh failures never ask users to resend", async () => {
+  for (const outcome of ["save-failure", "refresh-failure", "navigated"]) {
+    const states = [], refs = [], errors = [];
+    let stateIndex = 0, refIndex = 0, refreshes = 0, rejectRefresh, currentId = lead.id;
+    const data = { ...live, lead, notes: [], activities: [], emails: [] };
+    const Component = load("src\\app\\leads\\[id]\\page.tsx", {
+      react: { ...React, useEffect() {},
+        useRef(initial) { const key = refIndex++; return refs[key] ?? (refs[key] = { current: initial }); },
+        useState(initial) { const key = stateIndex++; if (!(key in states)) states[key] = typeof initial === "function" ? initial() : initial; return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }]; },
+      },
+      "next/navigation": { useParams: () => ({ id: currentId }), useRouter: () => ({}) },
+      "@/lib/crm-data": { ...crm, apiRequest: async () => {
+        if (outcome === "save-failure") throw new Error("Database rejected the note");
+        return { ok: true };
+      } },
+      "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({
+        data, error: "", loading: false, setError: error => errors.push(error),
+        reload: () => { refreshes++; return new Promise((resolve, reject) => { rejectRefresh = reject; }); },
+      }) },
+    }).default;
+    const render = () => { stateIndex = 0; refIndex = 0; return elements(Component()); };
+    render().find(node => node.props.id === "lead-section-note").props.onClick();
+    const save = render().find(node => node.type?.name === "LeadNoteComposer").props.onSave("Keep this note", []);
+    if (outcome === "save-failure") {
+      await assert.rejects(save, /Database rejected the note/);
+      assert.equal(refreshes, 0);
+    } else {
+      await new Promise(resolve => setImmediate(resolve));
+      if (outcome === "navigated") { currentId = "another-lead"; render(); }
+      rejectRefresh(new Error("Timeline unavailable"));
+      await save;
+      await new Promise(resolve => setImmediate(resolve));
+      if (outcome === "refresh-failure") assert.match(errors.at(-1), /Note saved.*Do not resend.*Timeline unavailable/);
+      else assert.deepEqual(errors, [""], "a previous lead's refresh error must not appear on the next lead");
+    }
+  }
+});
+
 test("image-only notes render compact attachments without loading full timeline images", async () => {
   const html = await renderPage("src\\app\\leads\\[id]\\page.tsx", {
     states: [false,false,"","","","",false,false,"","","note"],
@@ -2932,6 +3879,176 @@ test("inline lead saves accept the server record without a second full detail re
   assert.equal(data.lead.email, "new@example.test");
   assert.equal(data.canScheduleCall, true);
   assert.equal(reloads, 0);
+});
+
+test("deferred stage assignment waits for saved edits and departure, retaining failed requests for retry", async t => {
+  const previousWindow = global.window;
+  const storage = new Map(), writes = [];
+  global.window = { sessionStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) } };
+  t.after(() => { if (previousWindow === undefined) delete global.window; else global.window = previousWindow; });
+  let failure = false, finishSave, confirmation;
+  const module = load("src\\lib\\lead-stage-assignment.ts", {
+    "@/lib/crm-data": { ...crm, apiRequest: async (path, options) => {
+      writes.push({ path, options });
+      if (failure) throw new Error("Assignment unavailable");
+      if (confirmation) await confirmation;
+      return { completed: true };
+    } },
+  });
+  const leadId = "30000000-0000-4000-8000-000000000001";
+  const token = "40000000-0000-4000-8000-000000000001";
+  module.initializeStageAssignments(id);
+  const saved = new Promise(resolve => { finishSave = resolve; });
+  const cleanup = module.registerLeadSaveQueue({ leadId, wait: () => saved, isSaving: () => true });
+  const leaving = module.finishLeavingLeadAssignments("/leads");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(writes.length, 0);
+  module.rememberStageAssignment(id, leadId, token);
+  finishSave();
+  await leaving;
+  cleanup();
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].path, `/api/leads/${leadId}/assignment`);
+  assert.deepEqual(writes[0].options.body, { token });
+  module.rememberStageAssignment(id, leadId, token);
+  await module.finishLeavingLeadAssignments(`/leads/${leadId}`);
+  assert.equal(writes.length, 1, "staying on the lead must never transfer it");
+  failure = true;
+  await assert.rejects(module.finishLeavingLeadAssignments("/pipeline"), /Assignment unavailable/);
+  assert.match(storage.get(`crm-stage-assignments:${id}`), new RegExp(token));
+  failure = false;
+  await module.finishLeavingLeadAssignments("/pipeline");
+  assert.equal(storage.get(`crm-stage-assignments:${id}`), "[]");
+  let confirm;
+  confirmation = new Promise(resolve => { confirm = resolve; });
+  module.rememberStageAssignment(id, leadId, token);
+  const firstDeparture = module.finishLeavingLeadAssignments("/leads");
+  await new Promise(resolve => setImmediate(resolve));
+  const newer = "40000000-0000-4000-8000-000000000002";
+  module.rememberStageAssignment(id, leadId, newer);
+  confirm();
+  await firstDeparture;
+  assert.match(storage.get(`crm-stage-assignments:${id}`), new RegExp(newer), "an earlier departure must not discard a newer saved stage");
+  confirmation = null;
+  await module.finishLeavingLeadAssignments("/leads");
+  assert.equal(storage.get(`crm-stage-assignments:${id}`), "[]");
+});
+
+test("deferred stage assignment restores pending departures and uses keepalive on page exit", async t => {
+  const previousWindow = global.window, previousFetch = global.fetch;
+  const leadId = "30000000-0000-4000-8000-000000000001";
+  const token = "40000000-0000-4000-8000-000000000001";
+  const storage = new Map([[`crm-stage-assignments:${id}`, JSON.stringify([[leadId, token]])]]);
+  const writes = [];
+  global.window = { sessionStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) } };
+  global.fetch = async (path, options) => { writes.push({ path, options }); return Response.json({ completed: true }); };
+  t.after(() => {
+    if (previousWindow === undefined) delete global.window; else global.window = previousWindow;
+    global.fetch = previousFetch;
+  });
+  const module = load("src\\lib\\lead-stage-assignment.ts", { "@/lib/crm-data": { ...crm, clearApiReadCache() {} } });
+  module.initializeStageAssignments(id);
+  assert.equal(module.hasLeavingLeadWork(`/leads/${leadId}`), false);
+  assert.equal(module.hasLeavingLeadWork("/leads"), true);
+  module.finishStageAssignmentsOnUnload();
+  assert.equal(writes[0].options.keepalive, true);
+  assert.deepEqual(JSON.parse(writes[0].options.body), { token });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(storage.get(`crm-stage-assignments:${id}`), "[]");
+  module.rememberStageAssignment(id, leadId, token);
+  module.initializeStageAssignments("different-user");
+  assert.equal(module.hasLeavingLeadWork("/leads"), false, "never replay another user's pending requests");
+});
+
+test("sidebar and Back links complete assignment before routing and show errors without leaving", async t => {
+  const previousWindow = global.window, previousElement = global.Element;
+  const href = "https://crm.test/leads";
+  global.window = { location: { href: "https://crm.test/leads/current", origin: "https://crm.test", pathname: "/leads/current", search: "" } };
+  global.Element = class {
+    closest() { return { href, target: "", hasAttribute: () => false }; }
+  };
+  t.after(() => {
+    if (previousWindow === undefined) delete global.window; else global.window = previousWindow;
+    if (previousElement === undefined) delete global.Element; else global.Element = previousElement;
+  });
+  const states = [], refs = [], destinations = [], assignments = [];
+  let index = 0, refIndex = 0, fail = true;
+  const { AppShell } = load("src\\components\\app-shell.tsx", {
+    react: { ...hookStates([]), useLayoutEffect() {}, useTransition: () => [false, callback => callback()],
+      useRef(initial) { const key = refIndex++; return refs[key] ?? (refs[key] = { current: initial }); },
+      useState(initial) { const key = index++; if (!(key in states)) states[key] = initial; return [states[key], value => { states[key] = value; }]; } },
+    "next/navigation": { usePathname: () => "/leads/current", useRouter: () => ({ push: path => destinations.push(path), prefetch() {} }) },
+    "@/lib/crm-data": crm,
+    "@/lib/lead-stage-assignment": {
+      hasLeavingLeadWork: () => true,
+      finishLeavingLeadAssignments: async path => {
+        assignments.push(path);
+        assert.equal(destinations.length, 0);
+        if (fail) throw new Error("Choose an active assignee before leaving");
+      },
+    },
+  });
+  const render = () => { index = 0; refIndex = 0; return elements(AppShell({ user, children: null })); };
+  const event = () => ({ defaultPrevented: false, button: 0, target: new global.Element(), preventDefault() {} });
+  await render().find(node => node.props.className === "app-layout").props.onClickCapture(event());
+  assert.deepEqual(destinations, []);
+  assert.ok(render().some(node => node.props.role === "alert" && renderToStaticMarkup(node).includes("Choose an active assignee")));
+  fail = false;
+  render().find(node => node.type === "button" && node.props.children === "Retry assignment").props.onClick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(destinations, ["/leads"]);
+  assert.deepEqual(assignments, ["/leads", "/leads"]);
+});
+
+test("stage saves keep the lead open and register pending assignment without navigation", async () => {
+  const registered = [], destinations = [];
+  let data = { ...live, lead, notes: [], activities: [], emails: [] };
+  const token = "40000000-0000-4000-8000-000000000001";
+  const Component = load("src\\app\\leads\\[id]\\page.tsx", {
+    react: hookStates([]),
+    "next/navigation": { useParams: () => ({ id: lead.id }), useRouter: () => ({ push: path => destinations.push(path) }) },
+    "@/lib/crm-data": { ...crm, apiRequest: async () => ({
+      lead: { ...lead, stage: "Cold", stageId: "cold-stage" }, assignmentPendingId: token, scheduleUnlocked: true,
+    }) },
+    "@/lib/lead-stage-assignment": { rememberStageAssignment: (...args) => registered.push(args) },
+    "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({
+      data, error: "", loading: false, reload() {}, setError() {}, acceptData: update => { data = update(data); },
+    }) },
+  }).default;
+  await elements(Component()).find(node => node.props.label === "Stage").props.onSave("cold-stage");
+  assert.equal(data.lead.stage, "Cold");
+  assert.equal(data.lead.assigneeId, lead.assigneeId);
+  assert.equal(data.assignmentPendingId, token);
+  assert.deepEqual(destinations, []);
+  assert.deepEqual(registered, [[id, lead.id, token]]);
+});
+
+test("stage automation redirects out-of-scope leads without retrying a successful save", async () => {
+  const destinations = [], writes = [];
+  const data = { ...live, lead, notes: [], activities: [], emails: [] };
+  const Component = load("src\\app\\leads\\[id]\\page.tsx", {
+    react: hookStates([]),
+    "next/navigation": { useParams: () => ({ id: lead.id }), useRouter: () => ({ push: path => destinations.push(path) }) },
+    "@/lib/crm-data": { ...crm, apiRequest: async (path, options) => {
+      writes.push({ path, options }); return { id: lead.id, reassigned: true };
+    } },
+    "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({
+      data, error: "", loading: false, reload: () => assert.fail("Do not reload a transferred lead"),
+      setError() {}, acceptData: () => assert.fail("Do not replace lead data with an inaccessible record"),
+    }) },
+  }).default;
+  const field = elements(Component()).find(node => node.props.label === "Stage");
+  assert.ok(field);
+  await field.props.onSave("junk-stage");
+  assert.deepEqual(destinations, ["/leads?reassigned=1"]);
+  assert.equal(writes.length, 1);
+  assert.deepEqual(writes[0].options.body, { stageId: "junk-stage" });
+  const LeadsPage = load("src\\app\\leads\\page.tsx", {
+    "next/navigation": { useSearchParams: () => new URLSearchParams("reassigned=1"), useRouter: () => ({}) },
+    "@/components/leads-workspace": { __esModule: true, default: () => null },
+    react: hookStates([]),
+  }).default;
+  assert.match(renderToStaticMarkup(await LeadsPage({ searchParams: Promise.resolve({ reassigned: "1" }) })), /Stage saved.*reassigned/);
 });
 
 test("lead overview exposes inline fields with no separate edit or save button", async () => {
@@ -3306,6 +4423,31 @@ test("invalid phone disables dialing and lead viewers cannot call or schedule", 
   }
 });
 
+test("preloaded lead timestamp columns hydrate consistently before switching to local time", () => {
+  const states = [], refs = [];
+  let stateIndex = 0, refIndex = 0, hydrate;
+  const value = "2026-10-22T23:42:20Z";
+  const options = { dateStyle: "medium", timeStyle: "short" };
+  const utc = new Intl.DateTimeFormat("en-IN", { ...options, timeZone: "UTC" });
+  const local = new Intl.DateTimeFormat("en-IN", { ...options, timeZone: "Asia/Kolkata" });
+  const data = { ...live, columns: ["createdAt", "name"], leads: [{ ...lead, createdAt: value }] };
+  const Component = load("src\\components\\leads-workspace.tsx", {
+    react: {
+      ...React, useMemo: factory => factory(), useLayoutEffect() {},
+      useEffect(effect, dependencies) { if (dependencies.length === 0) hydrate = effect; },
+      useRef(initial) { const key = refIndex++; return refs[key] ?? (refs[key] = { current: initial }); },
+      useState(initial) { const key = stateIndex++; if (!(key in states)) states[key] = typeof initial === "function" ? initial() : initial; return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }]; },
+    },
+    "@/components/lead-filter-state": { useLeadFilterState: () => null, useLeadNavigation: () => null },
+    "@/lib/crm-data": { ...crm, formatDateTime: (value, formatter = local) => value ? formatter.format(new Date(value)) : "" },
+    "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({ data, loading: false, error: "", reload() {}, setError() {} }) },
+  }).default;
+  const render = () => { stateIndex = 0; refIndex = 0; return elements(Component()); };
+  assert.ok(render().some(node => node.type === "td" && node.props.title === utc.format(new Date(value))));
+  hydrate();
+  assert.ok(render().some(node => node.type === "td" && node.props.title === local.format(new Date(value))));
+});
+
 test("leads table formats timestamp columns as readable dates and times, including the linked first column", async () => {
   const timestamp = "2026-10-22T12:42:20.169251+00:00";
   const formatDateTime = value => value ? new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "";
@@ -3319,7 +4461,7 @@ test("leads table formats timestamp columns as readable dates and times, includi
     });
     assert.ok(html.includes(formatDateTime(timestamp)));
     assert.doesNotMatch(html, /2026-10-22T12:42:20|169251|\+00:00/);
-    assert.match(html, /<td>—<\/td>/);
+    assert.match(html, /<td title="—">—<\/td>/);
     if (columns[0] === "createdAt") assert.ok(html.includes(`href="/leads/${lead.id}">${formatDateTime(timestamp)}</a>`));
   }
 });

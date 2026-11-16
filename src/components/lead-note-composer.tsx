@@ -49,7 +49,11 @@ export function LeadNoteComposer({ disabled, content, onContentChange: setConten
     catch (failure) { setError(failure instanceof Error ? failure.message : "Could not save the note. Your draft has been kept."); }
     finally { working.current = false; setSaving(false); }
   }}>
-    <label className="form-field">Note<textarea aria-label="Note" disabled={locked} maxLength={10000} rows={5} value={content} placeholder="Write a note, or paste an image here…" onChange={event => setContent(event.target.value)} /></label>
+    <label className="form-field">Note<textarea aria-label="Note" disabled={locked} maxLength={10000} rows={5} value={content} placeholder="Write a note, or paste an image here…" onChange={event => setContent(event.target.value)} onKeyDown={event => {
+      if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+      event.preventDefault();
+      if (!event.repeat && !locked && !working.current) event.currentTarget.form?.requestSubmit();
+    }} /><small>Enter to save. Shift+Enter for a new line.</small></label>
     <div className="note-image-toolbar">
       <input ref={input} className="note-image-file" aria-label="Upload note images" type="file" accept={NOTE_IMAGE_TYPES.join(",")} multiple disabled={locked} onChange={event => {
         const files = Array.from(event.target.files ?? []); event.target.value = ""; void addImages(files);

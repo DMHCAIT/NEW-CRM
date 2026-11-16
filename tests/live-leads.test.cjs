@@ -19,7 +19,7 @@ function load(path, dependencies = {}) {
       name === "@/lib/server/note-images" ? load("src\\lib\\server\\note-images.ts", { "@/lib/server/auth": auth }) :
       name === "@/lib/server/email-signature" ? load("src\\lib\\server\\email-signature.ts", dependencies) :
       name === "@/lib/lead-phone" ? load("src\\lib\\lead-phone.ts") : require(name),
-    Date, Set, URL, Response, Buffer, console,
+    Date, Set, URL, Response, Buffer, console, crypto: require("node:crypto").webcrypto,
   });
   return exports;
 }
@@ -302,11 +302,231 @@ test("single-field lead PATCH preserves unrelated columns and merges custom fiel
   assert.equal((await patch({})).status, 400);
 });
 
+test("stage PATCH reads final automation ownership and handles loss of scope without exposing the lead", async () => {
+  const stageId = "30000000-0000-4000-8000-000000000001";
+  const initial = { ...validLead, id: "lead", stageId: null, assigneeId: "20000000-0000-4000-8000-000000000001", source: "Website", closureFee: 0 };
+  const before = { id: "lead", stage_id: stageId, assignee_id: "editor", custom_fields: {}, call_schedule_revision: 1 };
+  for (const outcome of ["retained", "transferred", "error", "closed-won"]) {
+    let updated = false, finalReads = 0;
+    const final = { ...before, assignee_id: "automation-owner", call_schedule_revision: 2 };
+    const route = load("src\\app\\api\\leads\\[id]\\route.ts", {
+      "@/lib/server/auth": { ...auth, requireUser: async () => ({
+        user: { id: "editor", permissions: ["leads.edit"] },
+        supabase: { from: () => {
+          let write = false;
+          const query = { select: () => query, eq: () => query,
+            single: async () => ({ data: { custom_fields: {}, call_schedule_revision: 0 }, error: null }),
+            update: () => { write = true; updated = true; return query; },
+            maybeSingle: async () => {
+              if (write) return { data: before, error: null };
+              assert.equal(updated, true);
+              finalReads++;
+              return { data: outcome === "transferred" ? null : final,
+                error: outcome === "error" ? { message: "Final lead read failed" } : null };
+            } };
+          return query;
+        } },
+      }) },
+      "@/lib/crm-data": { LEAD_SELECT: "id,stage_id,assignee_id", mapLead: row => row,
+        fetchLead: async () => initial, fetchStages: async () => [{ id: stageId, name: outcome === "closed-won" ? "Closed Won" : "Cold" }] },
+      "@/lib/live-leads": { ...validation, uuid: value => value },
+      "@/lib/supabase/server": {},
+    });
+    const response = await route.PATCH(new Request(`https://crm.example/api/leads/lead${outcome === "closed-won" ? "?assignment=on-exit" : ""}`, {
+      method: "PATCH", body: JSON.stringify({ stageId }),
+    }), { params: Promise.resolve({ id: "lead" }) });
+    const result = await response.json();
+    assert.equal(finalReads, 1, JSON.stringify(result));
+    if (outcome === "error") {
+      assert.equal(response.status, 400);
+      assert.match(result.error, /Final lead read failed/);
+    } else {
+      assert.equal(response.status, 200);
+      if (outcome === "transferred") assert.deepEqual(result, { id: "lead", reassigned: true });
+      else {
+        assert.equal(result.lead.assignee_id, "automation-owner", "do not return the stale pre-trigger owner");
+        assert.equal(result.lead.call_schedule_revision, 2);
+      }
+    }
+  }
+});
+
+test("detail stage PATCH defers assignment while returning the saved lead and departure token", async () => {
+  for (const name of ["Cold", "Junk", "Not Interested"]) {
+    const stageId = "30000000-0000-4000-8000-000000000001";
+    const initial = { ...validLead, id: "lead", stageId: null, source: "Website", closureFee: 0 };
+    const token = "40000000-0000-4000-8000-000000000001";
+    const calls = [];
+    const saved = { id: "lead", stage_id: stageId, assignee_id: null, custom_fields: {}, call_schedule_revision: 1 };
+    const route = load("src\\app\\api\\leads\\[id]\\route.ts", {
+      "@/lib/server/auth": { ...auth, requireUser: async () => ({ user: { id: "editor", permissions: ["leads.edit"] }, supabase: {
+        from: () => ({ select: () => ({ eq: () => ({ single: async () => ({ data: { custom_fields: {}, call_schedule_revision: 0 }, error: null }) }) }) }),
+        rpc: (fn, input) => {
+          calls.push({ fn, input });
+          return { single: async () => ({ data: { lead: saved, assignment_pending_id: token }, error: null }) };
+        },
+      } }) },
+      "@/lib/crm-data": { LEAD_SELECT: "id,stage_id,assignee_id", mapLead: row => row,
+        fetchLead: async () => initial, fetchStages: async () => [{ id: stageId, name }] },
+      "@/lib/live-leads": { ...validation, uuid: value => value },
+      "@/lib/supabase/server": {},
+    });
+    const response = await route.PATCH(new Request("https://crm.example/api/leads/lead?assignment=on-exit", {
+      method: "PATCH", body: JSON.stringify({ stageId }),
+    }), { params: Promise.resolve({ id: "lead" }) });
+    const result = await response.json();
+    assert.equal(response.status, 200, JSON.stringify(result));
+    assert.equal(result.assignmentPendingId, token);
+    assert.equal(result.lead.stage_id, stageId);
+    assert.equal(calls[0].fn, "save_lead_with_deferred_assignment");
+    assert.equal(calls[0].input.p_changes.stage_id, stageId);
+    assert.equal(calls[0].input.p_changes.modified_by, "editor");
+    assert.match(calls[0].input.p_token, /^[0-9a-f-]{36}$/);
+  }
+});
+
+test("departure assignment API enforces authenticated tokens and surfaces actual assignment errors", async () => {
+  const calls = [];
+  let failure = null;
+  const route = load("src\\app\\api\\leads\\[id]\\assignment\\route.ts", {
+    "@/lib/server/auth": { ...auth, requireUser: async permission => {
+      assert.equal(permission, "leads.edit");
+      return { supabase: { rpc: async (fn, input) => { calls.push({ fn, input }); return { data: true, error: failure }; } } };
+    } },
+    "@/lib/live-leads": { ...validation, uuid: value => value },
+  });
+  const token = "40000000-0000-4000-8000-000000000001";
+  const post = body => route.POST(new Request("https://crm.example/api/leads/lead/assignment", {
+    method: "POST", body: JSON.stringify(body),
+  }), { params: Promise.resolve({ id: "lead" }) });
+  assert.equal((await post({ token: "invalid" })).status, 400);
+  assert.equal(calls.length, 0);
+  assert.deepEqual(await (await post({ token })).json(), { completed: true });
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[0])), { fn: "finish_lead_stage_assignment", input: { p_lead_id: "lead", p_token: token } });
+  failure = { message: "Assignment automation cold has no active users" };
+  const failed = await post({ token });
+  assert.equal(failed.status, 400);
+  assert.match((await failed.json()).error, /has no active users/);
+});
+
+test("Cold assignment API saves a single active assignee and rejects invalid stage-rule settings", async () => {
+  const ownerId = "20000000-0000-4000-8000-000000000001";
+  const writes = [], permissions = [];
+  let activeOwners = [{ id: ownerId }];
+  const route = load("src\\app\\api\\automations\\assignments\\route.ts", {
+    "@/lib/server/auth": { ...auth, requireUser: async permission => {
+      permissions.push(permission);
+      return { supabase: { from: () => {
+        const query = { select: () => query, in: () => query, eq: () => query,
+          is: async () => ({ data: activeOwners, error: null }) };
+        return query;
+      } } };
+    } },
+    "@/lib/server/operational": {
+      databaseError: validation.dbError,
+      parseInput: (schema, input) => {
+        const parsed = schema.safeParse(input);
+        if (!parsed.success) throw new HttpError(400, parsed.error.message);
+        return parsed.data;
+      },
+    },
+    "@/lib/supabase/server": { getSupabaseAdminClient: () => ({ from: table => {
+      assert.equal(table, "lead_assignment_automations");
+      return { upsert: row => {
+        writes.push(row);
+        return { select: () => ({ single: async () => ({ data: row, error: null }) }) };
+      } };
+    } }) },
+  });
+  const input = { rule_key: "cold", enabled: true, strategy: "single", owner_ids: [ownerId] };
+  const patch = body => route.PATCH(new Request("https://crm.example/api/automations/assignments", {
+    method: "PATCH", body: JSON.stringify(body),
+  }));
+  const saved = await patch(input);
+  assert.equal(saved.status, 200);
+  assert.equal((await saved.json()).rule.rule_key, "cold");
+  assert.equal(writes[0].owner_ids[0], ownerId);
+  assert.equal(writes[0].next_owner_index, 0);
+  for (const change of [{ strategy: "round_robin" }, { owner_ids: [] }, { rule_key: "cold_not_answered" }]) {
+    assert.equal((await patch({ ...input, ...change })).status, 400);
+  }
+  activeOwners = [];
+  const inactive = await patch(input);
+  assert.equal(inactive.status, 400);
+  assert.match((await inactive.json()).error, /active CRM users/);
+  assert.equal(writes.length, 1, "invalid Cold rules must not be persisted");
+  assert.ok(permissions.every(permission => permission === "automations.manage"));
+});
+
+test("bulk lead transfer updates selected leads in one scoped database operation", async () => {
+  const ids = [
+    "20000000-0000-4000-8000-000000000001",
+    "20000000-0000-4000-8000-000000000002",
+  ];
+  const assigneeId = "20000000-0000-4000-8000-000000000003";
+  const stageId = "20000000-0000-4000-8000-000000000004";
+  let update, filters, stages = [{ id: stageId }], role = "manager", permissions = ["leads.edit", "leads.assign"];
+  const route = load("src\\app\\api\\leads\\bulk\\route.ts", {
+    "@/lib/server/auth": { ...auth, requireUser: async permission => {
+      assert.equal(permission, "leads.edit");
+      return {
+        user: { id: "editor", permissions, profile: { role } },
+        supabase: { from(table) {
+          assert.equal(table, "leads");
+          filters = [];
+          const query = {
+            update: value => { update = value; return query; },
+            eq: (column, value) => { filters.push([column, value]); return query; },
+            in: (column, value) => { filters.push([column, value]); return query; },
+            select: async column => {
+              assert.equal(column, "id");
+              return { data: ids.map(id => ({ id })), error: null };
+            },
+          };
+          return query;
+        } },
+      };
+    } },
+    "@/lib/server/login": { checkOrigin: () => {} },
+    "@/lib/crm-data": { fetchStages: async () => stages },
+    "@/lib/live-leads": validation,
+  });
+  const send = body => route.POST(new Request("https://crm.example/api/leads/bulk", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  }));
+  const response = await send({ ids, assigneeId, stageId });
+  assert.equal(response.status, 200);
+  assert.deepEqual(JSON.parse(JSON.stringify(update)), { assignee_id: assigneeId, modified_by: "editor", stage_id: stageId });
+  assert.deepEqual(JSON.parse(JSON.stringify(filters)), [["is_archived", false], ["id", ids]]);
+  assert.deepEqual(await response.json(), { updatedIds: ids });
+
+  role = "counselor"; permissions = ["leads.edit"];
+  assert.equal((await send({ action: "stage", ids, stageId })).status, 200);
+  assert.deepEqual(JSON.parse(JSON.stringify(update)), { modified_by: "editor", stage_id: stageId });
+  assert.equal((await send({ ids, assigneeId })).status, 403, "assignment still requires permission");
+  role = "manager"; permissions = ["leads.edit", "leads.assign"];
+  stages = [];
+  assert.equal((await send({ ids, assigneeId, stageId })).status, 400, "reject inactive stages before writing");
+  assert.equal((await send({ ids, assigneeId: "invalid" })).status, 400, "reject invalid assignee IDs");
+  assert.equal((await send({ ids: [], assigneeId })).status, 400, "reject empty selections");
+  assert.equal((await send({ ids: Array(101).fill(ids[0]), assigneeId })).status, 400, "bound database batch size");
+});
+
+test("database connectivity errors are logged and surfaced as retryable service failures", () => {
+  assert.throws(() => validation.dbError({ message: "TypeError: fetch failed" }), error =>
+    error.status === 503 && /database connection.*retry/i.test(error.message));
+});
+
 test("lead validation normalizes phone and email and excludes client-owned metadata", () => {
   const parsed = validation.parseLead(validLead);
   assert.equal(parsed.normalized_phone, "919876543210");
   assert.equal(parsed.normalized_email, "student@example.test");
   assert.equal(parsed.closure_fee, 0);
+  for (const email of ["schy_74@yahoo.com", "anything@", "unusual @ format"]) {
+    const accepted = validation.parseLead({ ...validLead, email });
+    assert.equal(accepted.email, email);
+    assert.equal(accepted.normalized_email, email.toLowerCase());
+  }
   assert.throws(() => validation.parseLead({ ...validLead, created_by: "spoof" }), /Unrecognized/);
   assert.throws(() => validation.parseLead({ ...validLead, is_archived: true }), /Unrecognized/);
   assert.throws(() => validation.parseLead({ ...validLead, closureFee: -1 }), /closureFee/);
@@ -629,6 +849,7 @@ test("import requires create permission, email and an authorized assignee; count
     [["leads.create"], [{ ...validLead, countryCode: "India (+91)", assigneeId: self }], 403, 0],
     [["leads.create", "leads.import"], [{ ...validLead, countryCode: "India (+91)", assigneeId: self, email: "" }], 400, 0],
     [["leads.create", "leads.import"], [{ ...validLead, countryCode: "", assigneeId: self }], 201, 1],
+    [["leads.create", "leads.import"], [{ ...validLead, email: "unusual @ format", countryCode: "", assigneeId: self }], 201, 1],
     [["leads.create", "leads.import"], [{ ...validLead, countryCode: "+91", assigneeId: self }], 201, 1],
     [["leads.create", "leads.import"], [{ ...validLead, countryCode: "91", assigneeId: self }], 201, 1],
     [["leads.create", "leads.import"], [{ ...validLead, countryCode: "India (+91)" }], 400, 0],
@@ -655,6 +876,43 @@ test("import requires create permission, email and an authorized assignee; count
     assert.equal(response.status, status);
     assert.equal(writes, expectedWrites);
   }
+});
+
+test("import reports provider HTML errors without exposing the response body", async () => {
+  const self = "00000000-0000-4000-8000-000000000001";
+  const route = load("src\\app\\api\\leads\\import\\route.ts", {
+    "next/server": { NextResponse: Response }, "@/lib/live-leads": validation,
+    "@/lib/server/auth": { ...auth, requireUser: async () => ({
+      user: { id: self, permissions: ["leads.create", "leads.import"] },
+      supabase: {
+        from: () => ({ select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { value: {} }, error: null }) }) }) }),
+        rpc: async () => ({ data: null, error: { message: "<!DOCTYPE html><html>provider details</html>", code: "" }, status: 520 }),
+      },
+    }) },
+  });
+  const response = await route.POST(new Request("http://localhost/api/leads/import", {
+    method: "POST", body: JSON.stringify({ rows: [{ ...validLead, assigneeId: self }] }),
+  }));
+  assert.equal(response.status, 503);
+  const body = await response.text();
+  assert.match(body, /temporarily unavailable/);
+  assert.doesNotMatch(body, /provider details|DOCTYPE/);
+  assert.throws(() => validation.dbError({ message: "<html>provider details</html>" }), error =>
+    error.status === 503 && !error.message.includes("provider details"));
+});
+
+test("duplicate precheck preserves a confirmed database timeout for batch splitting", async () => {
+  const route = load("src\\app\\api\\leads\\import\\route.ts", {
+    "next/server": { NextResponse: Response },
+    "@/lib/live-leads": { ...validation, fetchLeadConfiguration: async () => ({ fields: [], picklists: picklists.DEFAULT_LEAD_PICKLISTS }), validateCustomFields() {} },
+    "@/lib/server/auth": { ...auth, requireUser: async () => ({
+      user: { id: "00000000-0000-4000-8000-000000000001", permissions: ["leads.import", "leads.create"] },
+      supabase: { rpc: async () => ({ data: null, error: { code: "57014", message: "canceling statement due to statement timeout" }, status: 500 }) },
+    }) },
+    "@/lib/server/login": { checkOrigin() {} },
+  });
+  const response = await route.POST(new Request("http://localhost/api/leads/import", { method: "POST", body: JSON.stringify({ checkOnly: true, rows: [validLead] }) }));
+  assert.match(await response.text(), /canceling statement due to statement timeout/);
 });
 
 test("lead import attaches optional notes in the atomic import RPC", async () => {
@@ -791,19 +1049,58 @@ test("sheet deletion API requires administrator, import and delete permissions a
       "@/lib/server/auth": { ...auth, requireUser: async permission => {
         assert.equal(permission, "leads.delete");
         return { user: { permissions, profile: { role } }, supabase: { rpc: async (name, args) => {
-          writes++; assert.equal(name, "delete_live_lead_import"); assert.equal(args.sheet_id, id);
-          return failure ? { error: { message: "Delete failed" } } : { data: 17, error: null };
+          writes++; assert.equal(name, "delete_live_lead_import_batch"); assert.equal(args.sheet_id, id); assert.equal(args.batch_size, 250);
+          return failure ? { error: { message: "Delete failed" } } : { data: { deleted: 17, done: true }, error: null };
         } } };
       } },
     });
     const response = await route.DELETE(new Request("http://localhost/api/leads/imports/id", { method: "DELETE" }), { params: Promise.resolve({ id }) });
     assert.equal(response.status, expected);
     assert.equal(writes, expected === 403 ? 0 : 1);
-    if (expected === 200) assert.deepEqual(await response.json(), { deleted: 17 });
+    if (expected === 200) assert.deepEqual(await response.json(), { deleted: 17, done: true });
   }
 });
 
-test("import PDF contains the sheet name and exact total, duplicate, imported and unprocessed counts", async () => {
+test("sheet deletion API validates batch size and the database response", async () => {
+  const id = "00000000-0000-4000-8000-000000000001";
+  let writes = 0, result = { deleted: 4, done: false };
+  const route = load("src\\app\\api\\leads\\imports\\[id]\\route.ts", {
+    "next/server": { NextResponse: Response }, "@/lib/live-leads": validation,
+    "@/lib/server/auth": { ...auth, requireUser: async () => ({
+      user: { permissions: ["leads.import"], profile: { role: "admin" } },
+      supabase: { rpc: async (name, args) => { writes++; assert.equal(args.batch_size, 12); return { data: result, error: null }; } },
+    }) },
+  });
+  const send = size => route.DELETE(new Request(`http://localhost/api/leads/imports/${id}?batchSize=${size}`, { method: "DELETE" }), { params: Promise.resolve({ id }) });
+  for (const size of ["0", "2001", "1.5", "invalid"]) assert.equal((await send(size)).status, 400);
+  assert.equal(writes, 0);
+  assert.deepEqual(await (await send("12")).json(), { deleted: 4, done: false });
+  result = { deleted: -1, done: true };
+  assert.equal((await send("12")).status, 500);
+});
+
+test("sheet deletion API falls back to the original RPC when the batched migration is not deployed", async () => {
+  const id = "00000000-0000-4000-8000-000000000001";
+  const calls = [];
+  const route = load("src\\app\\api\\leads\\imports\\[id]\\route.ts", {
+    "next/server": { NextResponse: Response }, "@/lib/live-leads": validation,
+    "@/lib/server/auth": { ...auth, requireUser: async () => ({
+      user: { permissions: ["leads.import"], profile: { role: "admin" } },
+      supabase: { rpc: async (name, args) => {
+        calls.push(name);
+        if (name === "delete_live_lead_import_batch") return { data: null, error: { code: "PGRST202", message: "Could not find the function" }, status: 404 };
+        assert.equal(JSON.stringify(args), JSON.stringify({ sheet_id: id }));
+        return { data: 9, error: null, status: 200 };
+      } },
+    }) },
+  });
+  const response = await route.DELETE(new Request(`http://localhost/api/leads/imports/${id}`, { method: "DELETE" }), { params: Promise.resolve({ id }) });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { deleted: 9, done: true });
+  assert.deepEqual(calls, ["delete_live_lead_import_batch", "delete_live_lead_import"]);
+});
+
+test("import PDF contains the sheet name and exact total, skipped, imported and unprocessed counts", async () => {
   const pdfLib = require("pdf-lib");
   const report = {};
   const source = readFileSync(join(__dirname, "..", "src", "lib", "lead-import-report.ts"), "utf8");

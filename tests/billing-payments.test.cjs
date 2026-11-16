@@ -169,7 +169,7 @@ test("invoice delivery routes INR and USD to Razorpay and copies creator plus as
     assert.equal(f.calls.find(call=>call.pdf).viewUrl,"https://crm.example/invoice-status/random-public-status-token");
     assert.equal(f.emails[0].attachments[0].contentType,"application/pdf");
     assert.equal(f.emails[0].to,"saved@example.com");
-    assert.equal(f.emails[0].cc,"creator@example.com, owner@example.com");
+    assert.equal(f.emails[0].cc,"creator@example.com, owner@example.com, sales@dmhca.in");
     assert.ok(f.emails[0].html.includes('href="https://rzp.io/i/test"'));
     assert.doesNotMatch(f.emails[0].html,/View complete invoice|Pay Now · View invoice/);
     assert.doesNotMatch(f.emails[0].html,/View invoice payment status/);
@@ -236,7 +236,20 @@ test("missing Stripe keys do not block either brand's INR or USD invoice or paid
 test("approval delivery copies the original creator rather than replacing them with the approving administrator",async()=>{
   const f=deliveryFixture();
   await f.helpers.deliverInvoice(f.admin,f.invoice,{id:"lead",name:"Live name",email:"live@example.com"},"approver@example.com");
-  assert.equal(f.emails[0].cc,"creator@example.com, owner@example.com");
+  assert.equal(f.emails[0].cc,"creator@example.com, owner@example.com, sales@dmhca.in");
+});
+test("invoice sales copies deduplicate against the lead owner and creator",async()=>{
+  const f=deliveryFixture();
+  f.invoice.creator_email="Sales@DMHCA.in";
+  f.setOwnerEmail("sales@dmhca.in");
+  await f.send();
+  assert.equal(f.emails[0].to,"saved@example.com");
+  assert.equal(f.emails[0].cc,"sales@dmhca.in");
+  const leadSales=deliveryFixture();
+  leadSales.invoice.billing_email="Sales@DMHCA.in";
+  await leadSales.send();
+  assert.equal(leadSales.emails[0].to,"Sales@DMHCA.in");
+  assert.equal(leadSales.emails[0].cc,"creator@example.com, owner@example.com");
 });
 test("invoice email uses the full branded document and embeds the correct logo for both companies",async()=>{
   for(const [code,primary,accent] of [["DMHCA","#1c1d4e","#c44754"],["IBMP","#1c1d4e","#c44754"]]){
@@ -269,7 +282,7 @@ test("delivery copies the current owner, not a stale invoice owner snapshot",asy
   f.invoice.owner_email="former-owner@example.com";
   f.setOwnerEmail("Current.Owner@example.com");
   await f.send();
-  assert.equal(f.emails[0].cc,"creator@example.com, current.owner@example.com");
+  assert.equal(f.emails[0].cc,"creator@example.com, current.owner@example.com, sales@dmhca.in");
   assert.doesNotMatch(f.emails[0].cc,/former-owner/);
 });
 test("missing or unreadable owner emails stop sending and save an actionable delivery error",async()=>{

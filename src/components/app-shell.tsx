@@ -11,13 +11,16 @@ import {
 import { useEffect, useLayoutEffect, useRef, useState, useTransition, type MouseEvent, type SyntheticEvent } from "react";
 import { navigationItems } from "@/lib/navigation";
 import { RolePreviewContext } from "@/components/role-preview-context";
+import { LeadFilterStateProvider } from "@/components/lead-filter-state";
 import type { CurrentUser } from "@/lib/types";
 import { apiRequest, clearApiReadCache, errorMessage, getApiReadSnapshot, getPendingApiRead, prefetchApiRead, subscribeApiWrites } from "@/lib/crm-data";
 import { SectionLoading } from "@/components/section-loading";
 import { GlobalLeadSearch } from "@/components/global-lead-search";
 import { NotificationBell } from "@/components/notification-bell";
+import { CallReminderProvider } from "@/components/call-reminder-popups";
 import { loadLeadDetailData } from "@/lib/live-leads-client";
 import { prepareSidebarSections, sectionReadPaths } from "@/lib/section-preparation";
+import { finishLeavingLeadAssignments, finishStageAssignmentsOnUnload, hasLeavingLeadWork, initializeStageAssignments, subscribeStageAssignments } from "@/lib/lead-stage-assignment";
 
 export function AppShell({ children, user }: { children: React.ReactNode; user: CurrentUser | null }) {
   const pathname = usePathname();
@@ -27,9 +30,12 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
   const [signingOut, setSigningOut] = useState(false);
   const [destination, setDestination] = useState("");
   const [navigating, startNavigation] = useTransition();
+  const [assignmentError, setAssignmentError] = useState("");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const preparedDetails = useRef(new Map<string, number>());
   const preparedSections = useRef(new Map<string, number>());
   const sectionPreparation = useRef<ReturnType<typeof prepareSidebarSections> | undefined>(undefined);
+  const failedAssignmentNavigation = useRef<URL | null>(null);
   function prefetchSection(href: string, prepareRoute = true, background = false) {
     const preparedAt = preparedSections.current.get(href);
     if (prepareRoute && (!background || href === "/") && href !== "/admin/login-activity"
@@ -68,7 +74,7 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
     router.prefetch(url.pathname, { kind: PrefetchKind.FULL });
     prefetchSection(url.pathname, false);
   }
-  function navigate(event: MouseEvent<HTMLDivElement>) {
+  async function navigate(event: MouseEvent<HTMLDivElement>) {
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     const link = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>("a[href]") : null;
     if (!link || link.hasAttribute("download") || (link.target && link.target !== "_self")) return;
@@ -76,6 +82,18 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
     if (url.origin !== window.location.origin || url.pathname.startsWith("/api/")) return;
     if (url.pathname === window.location.pathname && url.search === window.location.search) return;
     event.preventDefault();
+    await navigateTo(url);
+  }
+  async function navigateTo(url: URL) {
+    try {
+      if (hasLeavingLeadWork(url.pathname)) await finishLeavingLeadAssignments(url.pathname);
+    } catch (error) {
+      failedAssignmentNavigation.current = url;
+      setAssignmentError(errorMessage(error, "Could not finish lead assignment. Retry before leaving this lead."));
+      return;
+    }
+    failedAssignmentNavigation.current = null;
+    setAssignmentError("");
     sectionPreparation.current?.cancel();
     setMobileOpen(false);
     setAccountError("");
@@ -145,6 +163,26 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
   }, [mobileOpen]);
+  useEffect(() => {
+    if (!user) return;
+    initializeStageAssignments(user.id);
+    const finish = () => {
+      if (failedAssignmentNavigation.current) return;
+      void finishLeavingLeadAssignments(pathname).then(() => setAssignmentError(""))
+        .catch(error => setAssignmentError(errorMessage(error, "Could not finish lead assignment. Please retry.")));
+    };
+    const unsubscribe = subscribeStageAssignments(finish);
+    finish();
+    window.addEventListener("online", finish);
+    window.addEventListener("focus", finish);
+    window.addEventListener("pagehide", finishStageAssignmentsOnUnload);
+    return () => {
+      unsubscribe();
+      window.removeEventListener("online", finish);
+      window.removeEventListener("focus", finish);
+      window.removeEventListener("pagehide", finishStageAssignmentsOnUnload);
+    };
+  }, [user?.id, pathname]);
   if (!user) return <>{children}</>;
   const previewRole = user.profile.role;
   const initials = user.profile.fullName.split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase();
@@ -155,7 +193,9 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
 
   return (
     <RolePreviewContext.Provider value={previewRole}>
-    <div className="app-layout" onClickCapture={navigate} onMouseOverCapture={prepareDetail} onFocusCapture={prepareDetail} onTouchStartCapture={prepareDetail}>
+    <LeadFilterStateProvider key={user.id}>
+    <CallReminderProvider key={user.id}>
+    <div className={`app-layout${sidebarCollapsed ? " sidebar-collapsed" : ""}`} onClickCapture={navigate} onMouseOverCapture={prepareDetail} onFocusCapture={prepareDetail} onTouchStartCapture={prepareDetail}>
       <a className="skip-navigation" href="#workspace-content">Skip to content</a>
       {mobileOpen && (
         <button
@@ -164,7 +204,7 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
           onClick={() => setMobileOpen(false)}
         />
       )}
-      <aside className={`sidebar ${mobileOpen ? "sidebar-open" : ""}`} aria-label="Workspace sidebar">
+      <aside id="workspace-sidebar" className={`sidebar ${mobileOpen ? "sidebar-open" : ""}`} aria-label="Workspace sidebar">
         <div className="brand">
           <div>
             <div className="brand-name">IBMP</div>
@@ -245,14 +285,16 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
           <button className="icon-button mobile-menu" onClick={() => setMobileOpen(true)} aria-label="Open menu" aria-expanded={mobileOpen} aria-controls="workspace-navigation">
             <Menu size={20} />
           </button>
-          <div className="breadcrumb"><span>Workspace</span><span className="breadcrumb-slash">/</span><strong>{pageName(navigating ? destination : pathname)}</strong></div>
+          <div className="breadcrumb"><button type="button" className="icon-button sidebar-toggle" onClick={() => setSidebarCollapsed(value => !value)}
+            aria-label={sidebarCollapsed ? "Open sidebar" : "Close sidebar"} title={sidebarCollapsed ? "Open sidebar" : "Close sidebar"}
+            aria-expanded={!sidebarCollapsed} aria-controls="workspace-sidebar"><Menu size={20} /></button><span>Workspace</span><span className="breadcrumb-slash">/</span><strong>{pageName(navigating ? destination : pathname)}</strong></div>
           <div className="topbar-actions">
             {user.permissions.includes("leads.view") && <GlobalLeadSearch />}
             <NotificationBell key={user.id} userId={user.id} />
             <div className="topbar-divider" />
             <button className="topbar-user" aria-label="Sign out" disabled={signingOut} onClick={async () => {
               setSigningOut(true);
-              try { await apiRequest("/api/auth/logout", { method: "POST" }); window.location.assign("/login"); }
+              try { await finishLeavingLeadAssignments("/login"); await apiRequest("/api/auth/logout", { method: "POST" }); window.location.assign("/login"); }
               catch (error) { setAccountError(errorMessage(error, "Sign-out failed.")); setSigningOut(false); }
             }}>
               <span className="avatar avatar-small">{initials}</span>
@@ -262,11 +304,18 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
         </header>
         <main id="workspace-content" className="page-content" tabIndex={-1} aria-busy={navigating}>
           {accountError && <p className="form-error" role="alert">{accountError}</p>}
+          {assignmentError && <p className="form-error" role="alert">{assignmentError} <button type="button" className="text-link" onClick={() => {
+            if (failedAssignmentNavigation.current) { void navigateTo(failedAssignmentNavigation.current); return; }
+            void finishLeavingLeadAssignments(pathname).then(() => setAssignmentError(""))
+              .catch(error => setAssignmentError(errorMessage(error, "Could not finish lead assignment. Please retry.")));
+          }}>Retry assignment</button></p>}
           {navigating && <SectionLoading title={pageName(destination)} />}
           <div className="section-content" hidden={navigating} inert={navigating}>{children}</div>
         </main>
       </div>
     </div>
+    </CallReminderProvider>
+    </LeadFilterStateProvider>
     </RolePreviewContext.Provider>
   );
 }

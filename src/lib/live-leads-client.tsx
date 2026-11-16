@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Plus, RotateCcw, SlidersHorizontal, X } from "lucide-react";
 import { SearchableDropdown } from "@/components/searchable-dropdown";
-import { apiRequest, getCachedApiRead, getPendingApiRead, type StageRow } from "@/lib/crm-data";
+import { ApiError, apiRequest, getCachedApiRead, getPendingApiRead, type StageRow } from "@/lib/crm-data";
 import type { CurrentUser, Lead, Profile } from "@/lib/types";
 import { FILTER_FIELDS, RECENT_VISIT_SOURCES, criterionError, criterionIsActive, defaultOperator, operatorNeedsValue, operatorsForField, type FilterField, type SavedLeadFilter } from "@/lib/lead-filters";
 import type { LeadConfiguration } from "@/lib/live-leads";
@@ -21,15 +21,18 @@ export type LiveLeadData = {
   total?: number;
 };
 
+export type LiveLeadSnapshot<T = LiveLeadData> = { data: T; updatedAt: number };
+
 let leadMetadataPath = "";
 
 function getLeadListMetadata(maxAgeMs = 30000) {
-  return getCachedApiRead<LiveLeadData>(leadQueryPath(emptyFilter()), maxAgeMs)
+  return getCachedApiRead<LiveLeadData>(leadQueryPath(emptyFilter(), { pageSize: 100 }), maxAgeMs)
+    ?? getCachedApiRead<LiveLeadData>(leadQueryPath(emptyFilter()), maxAgeMs)
     ?? (leadMetadataPath ? getCachedApiRead<LiveLeadData>(leadMetadataPath, maxAgeMs) : undefined);
 }
 
 export async function loadLeadListData(path: string, options: { maxAgeMs: number }): Promise<LiveLeadData> {
-  const basePath = leadQueryPath(emptyFilter());
+  const basePath = leadQueryPath(emptyFilter(), { pageSize: 100 });
   const metadata = options.maxAgeMs > 0 ? getLeadListMetadata(options.maxAgeMs) : undefined;
   if (!metadata || path === basePath) {
     const result = await apiRequest<LiveLeadData>(path, options);
@@ -42,16 +45,26 @@ export async function loadLeadListData(path: string, options: { maxAgeMs: number
   return { ...metadata, ...page };
 }
 
-export async function loadAllLeadRows(filter: SavedLeadFilter, dashboard = false): Promise<Lead[]> {
+export async function loadAllLeadRows(filter: SavedLeadFilter, dashboard = false, options: {
+  initialPage?: LeadPage; onPage?: (leads: Lead[]) => void; shouldContinue?: () => boolean;
+} = {}): Promise<Lead[]> {
   const leads: Lead[] = [];
   const seenCursors = new Set<string>();
-  let cursor: LeadCursor | null = null;
+  let cursor: LeadCursor | null = options.initialPage?.nextCursor ?? null;
+  if (options.initialPage) {
+    leads.push(...options.initialPage.leads);
+    options.onPage?.(leads);
+    if (!options.initialPage.hasMore) return leads;
+  }
   for (;;) {
+    if (options.shouldContinue && !options.shouldContinue()) return leads;
     const path = leadQueryPath(filter, { cursor, dashboard, pageSize: 100 });
     const params = new URLSearchParams(path.split("?")[1]);
     params.set("metadata", "0");
     const page = await apiRequest<LeadPage>(`/api/leads?${params}`, { maxAgeMs: 0 });
+    if (options.shouldContinue && !options.shouldContinue()) return leads;
     leads.push(...page.leads);
+    options.onPage?.(leads);
     if (!page.hasMore) return leads;
     const nextCursorKey = JSON.stringify(page.nextCursor);
     if (!page.nextCursor || seenCursors.has(nextCursorKey)) {
@@ -134,12 +147,13 @@ export async function loadLeadDetailData<T>(path: string, options: { maxAgeMs: n
 }
 
 export function useLiveLeadData<T = LiveLeadData>(path = "/api/leads", request: (path: string, options: { maxAgeMs: number }) => Promise<T> = apiRequest,
-  snapshot: (path: string) => T | undefined = getCachedApiRead) {
-  const [data, setData] = useState<T | null>(() => snapshot(path) ?? null);
+  snapshot: (path: string) => T | undefined = getCachedApiRead, initialData?: LiveLeadSnapshot<T>) {
+  const [data, setData] = useState<T | null>(() => initialData?.data ?? snapshot(path) ?? null);
   const [error, setError] = useState("");
-  const [loading, setLoading] = useState(() => snapshot(path) === undefined);
+  const [loading, setLoading] = useState(() => initialData === undefined && snapshot(path) === undefined);
   const [loadedPath, setLoadedPath] = useState(path);
   const requestId = useRef(0);
+  const initialRead = useRef(initialData === undefined ? null : { path, updatedAt: initialData.updatedAt });
   const load = useCallback(async (maxAgeMs: number) => {
     const current = ++requestId.current;
     try {
@@ -147,7 +161,13 @@ export function useLiveLeadData<T = LiveLeadData>(path = "/api/leads", request: 
       if (current === requestId.current) { setData(next); setLoadedPath(path); setError(""); }
     }
     catch (e) {
-      if (current === requestId.current) setError(e instanceof Error ? e.message : "Could not load CRM data.");
+      if (current === requestId.current) {
+        if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
+          setData(null);
+          setLoadedPath(path);
+        }
+        setError(e instanceof Error ? e.message : "Could not load CRM data.");
+      }
       throw e;
     }
     finally { if (current === requestId.current) setLoading(false); }
@@ -157,6 +177,11 @@ export function useLiveLeadData<T = LiveLeadData>(path = "/api/leads", request: 
   const reload = useCallback(() => latestLoad.current(0), []);
   useEffect(() => {
     const sequence = requestId;
+    if (initialRead.current?.path === path && Date.now() - initialRead.current.updatedAt < 30000) {
+      setLoading(false);
+      return () => { sequence.current++; };
+    }
+    initialRead.current = null;
     const saved = snapshot(path);
     if (saved !== undefined) { setData(saved); setLoadedPath(path); }
     setLoading(saved === undefined);

@@ -296,7 +296,7 @@ test("verified external links and finance confirmations settle approved schedule
     "select public.operational_record_verified_url($1,'razorpay',$2,'plink_external',$3,'INR','https://rzp.io/i/external','{}') as recorded", [id, paymentId, amount]));
   await assert.rejects(record(ids[1], "pay_scheduled_external", 5620), /approved invoice/);
   await assert.rejects(asUser(adminId, adminSession, tx => tx.query("select public.operational_confirm_external_payment($1,'BANK-UNAPPROVED','Evidence')", [ids[1]])), /approved unpaid/);
-  await asUser(adminId, adminSession, tx => tx.query("select public.operational_decide_invoice($1,'approved','Approved')", [ids[0]]));
+  await asUser(superId, superSession, tx => tx.query("select public.operational_decide_invoice($1,'approved','Approved')", [ids[0]]));
   assert.equal((await record(ids[1], "pay_scheduled_external", 5620)).rows[0].recorded, true);
   assert.equal((await record(ids[1], "pay_scheduled_external", 5620)).rows[0].recorded, false);
   await db.query("update public.invoices set status='expired' where id=$1", [ids[0]]);
@@ -328,7 +328,7 @@ test("saving selected installments releases today's approved invoices only and r
   discounted.installments[0].invoice_date = scheduleToday();
   const pending = await savePlan(discounted);
   assert.equal((await release(pending)).rows.length, 0);
-  await asUser(adminId, adminSession, tx => tx.query("select public.operational_decide_invoice($1,'approved','Approved')", [pending[0]]));
+  await asUser(superId, superSession, tx => tx.query("select public.operational_decide_invoice($1,'approved','Approved')", [pending[0]]));
   assert.deepEqual((await release(pending)).rows.map(row => row.id), [pending[0]]);
   await assert.rejects(release([]), /between 1 and 36/);
   await assert.rejects(release(null), /between 1 and 36/);
@@ -340,7 +340,7 @@ test("one discount decision unlocks every due installment without waiting for ea
   assert.equal((await db.query("select count(*)::int as count from public.invoice_approvals where invoice_id=any($1)", [ids])).rows[0].count, 1);
   await db.query("update public.invoices set scheduled_for=now()-interval '1 minute' where id=any($1)", [ids]);
   assert.equal((await asService(tx => tx.query("select id from public.operational_release_due_invoices() where id=any($1)", [ids]))).rows.length, 0);
-  await asUser(adminId, adminSession, tx => tx.query("select public.operational_decide_invoice($1,'approved','Approved enrollment')", [ids[0]]));
+  await asUser(superId, superSession, tx => tx.query("select public.operational_decide_invoice($1,'approved','Approved enrollment')", [ids[0]]));
   const released = await asService(tx => tx.query("select id from public.operational_release_due_invoices() where id=any($1)", [ids]));
   assert.equal(released.rows.length, 2);
   assert.deepEqual((await db.query("select status from public.invoices where id=any($1)", [ids])).rows.map(row => row.status), ["sent", "sent"]);
@@ -353,7 +353,7 @@ test("one discount decision unlocks every due installment without waiting for ea
 
 test("rejection cancels scheduled children and workers cannot bypass approval or delivery locks", async () => {
   const ids = await savePlan(await newPlanFixture(10));
-  await asUser(adminId, adminSession, tx => tx.query("select public.operational_decide_invoice($1,'rejected','Not approved')", [ids[0]]));
+  await asUser(superId, superSession, tx => tx.query("select public.operational_decide_invoice($1,'rejected','Not approved')", [ids[0]]));
   assert.deepEqual((await db.query("select status from public.invoices where id=any($1) order by installment_number", [ids])).rows.map(row => row.status), ["rejected", "cancelled"]);
   await assert.rejects(asUser(counselorId, counselorSession, tx => tx.query("select public.operational_release_due_invoices()")), /permission denied/);
   const input = await newPlanFixture();
@@ -569,12 +569,57 @@ test("un-discounted invoices issue immediately while discounts require approver 
   await assert.rejects(asUser(counselorId, counselorSession, (tx) => tx.query(
     "select public.operational_decide_invoice($1,'approved','Approved')", [discountedId],
   )), /Not authorized/);
-  await asUser(adminId, adminSession, (tx) => tx.query("select public.operational_decide_invoice($1,'approved','Approved')", [discountedId]));
+  for (const decision of ["approved", "rejected"]) {
+    await assert.rejects(asUser(adminId, adminSession, tx => tx.query(
+      "select public.operational_decide_invoice($1,$2,'Admin attempt')", [discountedId, decision],
+    )), /Super Admin approval is required for discounts/);
+  }
+  assert.equal((await asUser(adminId, adminSession, tx => tx.query(
+    "update public.invoices set status='sent',approved_by=$2,approved_at=now() where id=$1 returning id", [discountedId, adminId],
+  ))).rows.length, 0, "direct invoice updates cannot bypass Super Admin approval");
+  assert.equal((await asUser(adminId, adminSession, tx => tx.query(
+    "update public.invoice_approvals set decision='approved',decided_by=$2,decided_at=now() where invoice_id=$1 returning id", [discountedId, adminId],
+  ))).rows.length, 0, "direct approval updates cannot bypass Super Admin approval");
+  await asUser(superId, superSession, (tx) => tx.query("select public.operational_decide_invoice($1,'approved','Approved')", [discountedId]));
   assert.equal((await db.query("select status from public.invoices where id=$1", [discountedId])).rows[0].status, "sent");
   assert.equal((await db.query("select decision from public.invoice_approvals where invoice_id=$1", [discountedId])).rows[0].decision, "approved");
-  await assert.rejects(asUser(adminId, adminSession, (tx) => tx.query(
+  await assert.rejects(asUser(superId, superSession, (tx) => tx.query(
     "select public.operational_decide_invoice($1,'approved','Again')", [discountedId],
   )), /already decided/);
+});
+
+test("counselor team lead and manager requests appear for Super Admin in both currencies", async () => {
+  try {
+    for (const role of ["counselor", "team_lead", "manager"]) {
+      await db.query("update public.profiles set role=$1 where id=$2", [role, counselorId]);
+      for (const currency of ["INR", "USD"]) {
+        const course = (await db.query("insert into public.courses(name,price_inr,price_usd) values($1,200,20) returning id",
+          [`Role invoice ${role} ${currency}`])).rows[0].id;
+        const input = { ...invoiceDefaults, course_id: course, lead_id: leadId, currency, discount_percent: 10,
+          discount_reason: "Requested course discount", due_date: "2026-12-31" };
+        const create = values => asUser(counselorId, counselorSession, tx => tx.query(
+          "select public.operational_create_invoice($1::jsonb) as id", [JSON.stringify({ ...input, ...values })]));
+        const plainId = (await create({ discount_percent: 0, discount_reason: "" })).rows[0].id;
+        assert.equal((await db.query("select status from public.invoices where id=$1", [plainId])).rows[0].status, "sent");
+        const requestId = (await create({})).rows[0].id;
+        const planIds = (await asUser(counselorId, counselorSession, tx => tx.query(
+          "select public.operational_create_installment_plan($1::jsonb) as ids", [JSON.stringify({
+            ...input, payment_type: "installments", request_id: randomUUID(),
+            installments: [{ amount: 10, invoice_date: scheduleToday() }],
+          })]))).rows[0].ids;
+        const visible = await asUser(superId, superSession, tx => tx.query(
+          "select i.id,i.status,a.decision from public.invoices i join public.invoice_approvals a on a.invoice_id=i.id where i.id=any($1)",
+          [[requestId, ...planIds]]));
+        assert.equal(visible.rows.length, 2, `${role} ${currency}: both approval requests must be visible to Super Admin`);
+        assert.ok(visible.rows.every(row => row.status === "pending_approval" && row.decision === "pending"));
+        await asUser(superId, superSession, tx => tx.query(
+          "select public.operational_decide_invoice($1,'approved','Approved')", [requestId]));
+        await asUser(superId, superSession, tx => tx.query(
+          "select public.operational_decide_invoice($1,'rejected','Rejected test plan')", [planIds[0]]));
+        assert.equal((await db.query("select status from public.invoices where id=$1", [requestId])).rows[0].status, "sent");
+      }
+    }
+  } finally { await db.query("update public.profiles set role='counselor' where id=$1", [counselorId]); }
 });
 
 test("installments reserve every unpaid invoice and cannot exceed the original course balance", async () => {
@@ -686,7 +731,7 @@ test("an expired approval cannot reopen or extend the payment window",async()=>{
   const id=(await asUser(counselorId,counselorSession,tx=>tx.query("select public.operational_create_invoice($1::jsonb) as id",
     [JSON.stringify({...invoiceDefaults,lead_id:leadId,discount_percent:10,discount_reason:"Test",due_date:"2026-12-31"})]))).rows[0].id;
   await db.query("update public.invoices set payment_expires_at=now()-interval '1 second' where id=$1",[id]);
-  await assert.rejects(asUser(adminId,adminSession,tx=>tx.query("select public.operational_decide_invoice($1,'approved','Late approval')",[id])),/expired/);
+  await assert.rejects(asUser(superId,superSession,tx=>tx.query("select public.operational_decide_invoice($1,'approved','Late approval')",[id])),/expired/);
   assert.equal((await db.query("select status from public.invoices where id=$1",[id])).rows[0].status,"pending_approval");
 });
 
@@ -942,9 +987,189 @@ test("assignment automations rotate integration leads, notify website assignees 
       where rule_key='closed_won'`, [counselorId]);
     await db.query("update public.leads set stage_id=$1 where id=$2", [stage["Closed Won"], websiteLeadIds[0]]);
     assert.equal((await db.query("select assignee_id from public.leads where id=$1", [websiteLeadIds[0]])).rows[0].assignee_id, counselorId);
+
+    const coldStage = (await db.query("select id from public.lead_stages where name='Cold'")).rows[0].id;
+    await db.query("update public.lead_assignment_automations set enabled=true,owner_ids=array[$1::uuid] where rule_key='cold'", [counselorId]);
+    await db.query(`insert into public.leads(id,name,phone,created_by,assignee_id,stage_id)
+      values($1,'Cold website lead','8888888004',$2,$2,$3)`, [websiteLeadIds[1], adminId, coldStage]);
+    await db.query(`insert into public.inbound_events(source_id,lead_id,payload,status,external_event_id)
+      values($1,$2,'{}'::jsonb,'created','website-cold')`, [websiteSourceId, websiteLeadIds[1]]);
+    assert.equal((await db.query("select assignee_id from public.leads where id=$1", [websiteLeadIds[1]])).rows[0].assignee_id, counselorId,
+      "Cold stage assignment takes precedence over the website rule");
+    const coldNotification = (await db.query("select user_id from public.notifications where lead_id=$1 and type='lead_assigned'", [websiteLeadIds[1]])).rows;
+    assert.deepEqual(coldNotification, [{ user_id: counselorId }]);
   } finally {
     await db.exec("rollback");
   }
+});
+
+test("authenticated stage changes apply assignment rules for every editing role", async () => {
+  const stages = (await db.query("select id,name from public.lead_stages where name in ('Junk','Not Interested','Closed Won','Cold')")).rows;
+  const keys = { Junk: "junk", "Not Interested": "not_interested", "Closed Won": "closed_won", Cold: "cold" };
+  assert.equal(stages.length, 4);
+  try {
+    for (const role of ["counselor", "team_lead", "manager", "admin", "super_admin"]) {
+      const actorId = role === "super_admin" ? superId : counselorId;
+      const actorSession = role === "super_admin" ? superSession : counselorSession;
+      const targetId = role === "super_admin" ? counselorId : superId;
+      if (actorId === counselorId) await db.query("update public.profiles set role=$1 where id=$2", [role, actorId]);
+      for (const stage of stages) {
+        const record = (await db.query(`insert into public.leads(name,phone,created_by,assignee_id)
+          values($1,$2,$3,$3) returning id`, [`Stage ${role} ${stage.name}`, `${Date.now()}${Math.random()}`.replace(/\D/g, "").slice(0, 20), actorId])).rows[0].id;
+        await db.query("update public.lead_assignment_automations set enabled=true,owner_ids=array[$1::uuid] where rule_key=$2",
+          [targetId, keys[stage.name]]);
+        const returned = await asUser(actorId, actorSession, tx => tx.query("update public.leads set stage_id=$1 where id=$2 returning id,assignee_id", [stage.id, record]));
+        assert.equal(returned.rows[0].assignee_id, actorId, "UPDATE RETURNING precedes the AFTER-trigger transfer");
+        const saved = (await db.query("select stage_id,assignee_id from public.leads where id=$1", [record])).rows[0];
+        assert.deepEqual(saved, { stage_id: stage.id, assignee_id: targetId }, `${role}: ${stage.name}`);
+        const audit = (await db.query(`select user_id,meta from public.activities where lead_id=$1 and meta->'changes' ? 'assignee_id'`, [record])).rows;
+        assert.equal(audit.length, 1);
+        assert.equal(audit[0].user_id, actorId);
+        assert.equal(audit[0].meta.changes.assignee_id.after, targetId);
+      }
+    }
+  } finally {
+    await db.query("update public.profiles set role='counselor' where id=$1", [counselorId]);
+    await db.exec("update public.lead_assignment_automations set enabled=false where rule_key in ('junk','not_interested','closed_won','cold')");
+  }
+});
+
+test("stage automation preserves manual assignment restrictions and only runs on actual enabled stage changes", async () => {
+  const stage = (await db.query("select id from public.lead_stages where name='Cold'")).rows[0].id;
+  const record = (await db.query(`insert into public.leads(name,phone,created_by,assignee_id)
+    values('Stage guard checks','881122334400',$1,$1) returning id`, [counselorId])).rows[0].id;
+  const change = (sql, values) => asUser(counselorId, counselorSession, tx => tx.query(sql, values));
+  try {
+    await db.query("update public.lead_assignment_automations set enabled=true,owner_ids=array[$1::uuid] where rule_key='cold'", [superId]);
+    assert.equal((await db.query("select assignee_id from public.leads where id=$1", [record])).rows[0].assignee_id, counselorId,
+      "enabling a rule must not transfer existing leads");
+    await assert.rejects(change("update public.leads set assignee_id=$1 where id=$2", [superId, record]), /Assignment permission required/);
+    await assert.rejects(change("select public.apply_lead_assignment_automation($1,'cold')", [record]), /permission denied/);
+    const similarStage = (await db.query("select id from public.lead_stages where name='Cold Not Answered'")).rows[0].id;
+    await change("update public.leads set stage_id=$1 where id=$2", [similarStage, record]);
+    assert.equal((await db.query("select assignee_id from public.leads where id=$1", [record])).rows[0].assignee_id, counselorId,
+      "Cold automation must not match Cold Not Answered");
+    await db.exec("update public.lead_assignment_automations set enabled=false where rule_key='cold'");
+    await change("update public.leads set stage_id=$1 where id=$2", [stage, record]);
+    assert.equal((await db.query("select assignee_id from public.leads where id=$1", [record])).rows[0].assignee_id, counselorId);
+    await db.exec("update public.lead_assignment_automations set enabled=true where rule_key='cold'");
+    await change("update public.leads set stage_id=$1 where id=$2", [stage, record]);
+    assert.equal((await db.query("select assignee_id from public.leads where id=$1", [record])).rows[0].assignee_id, counselorId,
+      "re-saving the existing stage does not transfer");
+    await assert.rejects(change("update public.leads set assignee_id=$1 where id=$2", [superId, record]), /Assignment permission required/);
+    await change("update public.leads set stage_id=null where id=$1", [record]);
+    await db.exec("update public.lead_assignment_automations set owner_ids='{}' where rule_key='cold'");
+    await assert.rejects(change("update public.leads set stage_id=$1 where id=$2", [stage, record]), /has no active users/);
+    assert.equal((await db.query("select stage_id from public.leads where id=$1", [record])).rows[0].stage_id, null,
+      "an invalid rule rolls back the stage and reports an actionable error");
+    await db.query("update public.lead_assignment_automations set owner_ids=array[$1::uuid] where rule_key='cold'", [superId]);
+    await asUser(counselorId, unverifiedSession, async tx => {
+      assert.equal((await tx.query("update public.leads set stage_id=$1 where id=$2 returning id", [stage, record])).rows.length, 0);
+    });
+    await change("update public.leads set stage_id=$1 where id=$2", [stage, record]);
+    assert.equal((await db.query("select assignee_id from public.leads where id=$1", [record])).rows[0].assignee_id, superId);
+    assert.equal((await change("select id from public.leads where id=$1", [record])).rows.length, 0,
+      "automation must not grant continued access after the transfer");
+  } finally { await db.exec("update public.lead_assignment_automations set enabled=false where rule_key='cold'"); }
+});
+
+test("bulk stage automation transfers only accessible leads", async () => {
+  const stage = (await db.query("select id from public.lead_stages where name='Not Interested'")).rows[0].id;
+  const records = [];
+  for (const [index, owner] of [counselorId, counselorId, superId].entries()) {
+    records.push((await db.query(`insert into public.leads(name,phone,created_by,assignee_id)
+      values('Bulk stage routing',$1,$2,$2) returning id`, [`88112233441${index}`, owner])).rows[0].id);
+  }
+  try {
+    await db.query("update public.lead_assignment_automations set enabled=true,owner_ids=array[$1::uuid] where rule_key='not_interested'", [superId]);
+    const updated = await asUser(counselorId, counselorSession, tx => tx.query(
+      "update public.leads set stage_id=$1,modified_by=$2 where id=any($3::uuid[]) returning id", [stage, counselorId, records]));
+    assert.deepEqual(updated.rows.map(row => row.id).sort(), records.slice(0, 2).sort());
+    const saved = (await db.query("select id,stage_id,assignee_id from public.leads where id=any($1::uuid[])", [records])).rows;
+    for (const row of saved) {
+      assert.equal(row.assignee_id, superId);
+      assert.equal(row.stage_id, row.id === records[2] ? null : stage, "inaccessible lead stays unchanged");
+    }
+  } finally { await db.exec("update public.lead_assignment_automations set enabled=false where rule_key='not_interested'"); }
+});
+
+test("deferred stage assignments retain ownership until departure for every editing role", async () => {
+  const stages = (await db.query("select id,name from public.lead_stages where name in ('Cold','Junk','Not Interested')")).rows;
+  assert.equal(stages.length, 3);
+  const keys = { Cold: "cold", Junk: "junk", "Not Interested": "not_interested" };
+  let sequence = 0;
+  try {
+    for (const role of ["counselor", "team_lead", "manager", "admin", "super_admin"]) {
+      const actorId = role === "super_admin" ? superId : counselorId;
+      const session = role === "super_admin" ? superSession : counselorSession;
+      const target = role === "super_admin" ? counselorId : superId;
+      if (actorId === counselorId) await db.query("update public.profiles set role=$1 where id=$2", [role, actorId]);
+      for (const stage of stages) {
+        const record = (await db.query("insert into public.leads(name,phone,created_by,assignee_id) values('Deferred stage',$1,$2,$2) returning id",
+          [String(8899010000 + sequence++), actorId])).rows[0].id;
+        const token = randomUUID();
+        await db.query("update public.lead_assignment_automations set enabled=true,owner_ids=array[$1::uuid] where rule_key=$2", [target, keys[stage.name]]);
+        const saved = await asUser(actorId, session, tx => tx.query(
+          "select * from public.save_lead_with_deferred_assignment($1,$2::jsonb,$3)",
+          [record, JSON.stringify({ stage_id: stage.id, course: "Confirmed before departure" }), token]));
+        assert.equal(saved.rows[0].assignment_pending_id, token);
+        assert.equal(saved.rows[0].lead.assignee_id, actorId);
+        assert.equal(saved.rows[0].lead.stage_id, stage.id);
+        await asUser(actorId, session, tx => tx.query("update public.leads set name='Still editable before departure' where id=$1", [record]));
+        assert.equal((await db.query("select assignee_id from public.leads where id=$1", [record])).rows[0].assignee_id, actorId);
+        const finish = () => asUser(actorId, session, tx => tx.query("select public.finish_lead_stage_assignment($1,$2) as completed", [record, token]));
+        assert.equal((await finish()).rows[0].completed, true, `${role}: ${stage.name}`);
+        assert.equal((await db.query("select assignee_id from public.leads where id=$1", [record])).rows[0].assignee_id, target);
+        const audit = (await db.query("select user_id from public.activities where lead_id=$1 and meta->'changes' ? 'assignee_id'", [record])).rows;
+        assert.deepEqual(audit, [{ user_id: actorId }]);
+        assert.equal((await finish()).rows[0].completed, false, "departure retries do not transfer twice");
+      }
+    }
+  } finally {
+    await db.query("update public.profiles set role='counselor' where id=$1", [counselorId]);
+    await db.exec("update public.lead_assignment_automations set enabled=false where rule_key in ('cold','junk','not_interested')");
+  }
+});
+
+test("deferred stage assignments cancel stale edits and enforce ownership, tokens and RLS", async () => {
+  const stages = (await db.query("select id,name from public.lead_stages where name in ('Cold','Junk')")).rows;
+  const stage = Object.fromEntries(stages.map(row => [row.name, row.id]));
+  const record = (await db.query("insert into public.leads(name,phone,created_by,assignee_id) values('Deferred cancellation','8899020000',$1,$1) returning id", [counselorId])).rows[0].id;
+  const save = (changes, token = randomUUID()) => asUser(counselorId, counselorSession, tx => tx.query(
+    "select * from public.save_lead_with_deferred_assignment($1,$2::jsonb,$3)", [record, JSON.stringify(changes), token]));
+  const finish = (token, userId = counselorId, session = counselorSession) => asUser(userId, session, tx => tx.query(
+    "select public.finish_lead_stage_assignment($1,$2) as completed", [record, token]));
+  try {
+    await db.query("update public.lead_assignment_automations set enabled=true,owner_ids=array[$1::uuid] where rule_key in ('cold','junk')", [superId]);
+    const first = (await save({ stage_id: stage.Cold })).rows[0].assignment_pending_id;
+    const second = (await save({ stage_id: stage.Junk })).rows[0].assignment_pending_id;
+    assert.notEqual(first, second);
+    await assert.rejects(asUser(counselorId, unverifiedSession, tx => tx.query(
+      "select public.finish_lead_stage_assignment($1,$2)", [record, second])), /Lead edit permission required/);
+    assert.equal((await finish(first)).rows[0].completed, false, "an older departure cannot finalize a newer stage");
+    assert.equal((await finish(second, superId, superSession)).rows[0].completed, false, "another editor cannot finalize this user's pending change");
+    await assert.rejects(save({ stage_id: stage.Cold, assignee_id: superId }), /Assignment permission required/);
+    await assert.rejects(save({ stage_id: stage.Cold, created_by: superId }), /Invalid deferred lead update/);
+    await assert.rejects(asUser(counselorId, counselorSession, tx => tx.query(
+      "delete from public.pending_lead_stage_assignments where lead_id=$1", [record])), /permission denied/);
+    await asUser(counselorId, counselorSession, tx => tx.query("update public.leads set stage_id=null where id=$1", [record]));
+    assert.equal((await finish(second)).rows[0].completed, false, "moving away from an automated stage cancels the queued transfer");
+    const third = (await save({ stage_id: stage.Cold })).rows[0].assignment_pending_id;
+    await db.exec("update public.lead_assignment_automations set enabled=false where rule_key='cold'");
+    assert.equal((await finish(third)).rows[0].completed, true);
+    assert.equal((await db.query("select assignee_id from public.leads where id=$1", [record])).rows[0].assignee_id, counselorId,
+      "the enabled rule at departure controls whether reassignment occurs");
+    await asUser(counselorId, counselorSession, tx => tx.query("update public.leads set stage_id=null where id=$1", [record]));
+    assert.equal((await save({ stage_id: stage.Cold })).rows[0].assignment_pending_id, null, "paused rules do not queue transfers");
+    const paused = (await save({ stage_id: stage.Junk })).rows[0].assignment_pending_id;
+    await db.exec("update public.lead_assignment_automations set owner_ids='{}' where rule_key='junk'");
+    await assert.rejects(finish(paused), /has no active users/);
+    assert.equal((await db.query("select token from public.pending_lead_stage_assignments where lead_id=$1", [record])).rows[0].token, paused,
+      "failed assignment keeps the pending change retryable");
+    await db.query("update public.lead_assignment_automations set owner_ids=array[$1::uuid] where rule_key='junk'", [superId]);
+    assert.equal((await finish(paused)).rows[0].completed, true);
+    await assert.rejects(save({ stage_id: stage.Cold }), /Lead update was not permitted/);
+  } finally { await db.exec("update public.lead_assignment_automations set enabled=false where rule_key in ('cold','junk')"); }
 });
 
 test("profile hierarchy rejects cycles and preserves the last active Super Admin", async () => {

@@ -7,6 +7,9 @@ import { getSupabaseAdminClient } from "@/lib/supabase/server";
 import { currentGmailMailbox } from "@/lib/server/operational-gmail";
 
 type Context = { params: Promise<{ id: string }> };
+type SavedLead = LeadRow & { custom_fields: Record<string, string>; call_schedule_revision: number };
+type LeadExtras = { custom_fields: Record<string, string>; call_schedule_revision: number; pending_assignment: { token: string } | null };
+const leadExtras = "custom_fields,call_schedule_revision,pending_assignment:pending_lead_stage_assignments(token)";
 export async function GET(request: Request, context: Context) {
   const started = Date.now();
   try {
@@ -30,7 +33,7 @@ export async function GET(request: Request, context: Context) {
       withActivities ? supabase.from("activities").select("id,type,description,meta,created_at,user_id").eq("lead_id", id).order("created_at", { ascending: false }) : { data: [], error: null },
       all || section === "email" ? supabase.from("emails").select("id,subject,body,status,from_email,to_email,direction,created_at,user_id").eq("lead_id", id).order("created_at", { ascending: false }) : { data: [], error: null },
       includeMetadata ? fetchLeadConfiguration(supabase) : undefined,
-      supabase.from("leads").select("custom_fields,call_schedule_revision").eq("id", id).single(),
+      supabase.from("leads").select(leadExtras).eq("id", id).single<LeadExtras>(),
       all || section === "email" ? currentGmailMailbox(getSupabaseAdminClient(), user.id, user.email).catch(error => {
         if (!workspace) throw error;
         console.error("Could not prepare lead mailbox", error);
@@ -53,7 +56,7 @@ export async function GET(request: Request, context: Context) {
     if (emailCount) dbError(emailCount.error);
     const latestCall = [...(scheduledCalls.data ?? [])].sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id))[0];
     const canScheduleCall = !latestCall || latestCall.schedule_revision < extras.data!.call_schedule_revision;
-    return NextResponse.json({ lead: { ...lead, customFields: extras.data?.custom_fields ?? {} }, configuration, stages, profiles, notes: notes.data ?? [], activities: activities.data ?? [], emails: emails.data ?? [], counts: { notes: noteCount?.count ?? notes.data?.length ?? 0, emails: emailCount?.count ?? emails.data?.length ?? 0 }, mailbox, scheduledCalls: scheduledCalls.data, canScheduleCall, duplicates: duplicates.data, user, ...(workspace ? { sectionErrors } : {}) }, { headers: {
+    return NextResponse.json({ lead: { ...lead, customFields: extras.data?.custom_fields ?? {} }, assignmentPendingId: extras.data?.pending_assignment?.token ?? null, configuration, stages, profiles, notes: notes.data ?? [], activities: activities.data ?? [], emails: emails.data ?? [], counts: { notes: noteCount?.count ?? notes.data?.length ?? 0, emails: emailCount?.count ?? emails.data?.length ?? 0 }, mailbox, scheduledCalls: scheduledCalls.data, canScheduleCall, duplicates: duplicates.data, user, ...(workspace ? { sectionErrors } : {}) }, { headers: {
       "Cache-Control": "private, no-store",
       "Server-Timing": `auth;dur=${authenticated - started}, lead;dur=${leadLoaded - authenticated}, related;dur=${Date.now() - leadLoaded}`,
     } });
@@ -68,9 +71,11 @@ export async function PATCH(request: Request, context: Context) {
     const authenticated = Date.now();
     const id = uuid((await context.params).id);
     const body = await readJson<Record<string, unknown>>(request);
+    const assignmentTiming = new URL(request.url).searchParams.get("assignment");
+    if (assignmentTiming !== null && assignmentTiming !== "on-exit") throw new HttpError(400, "Invalid assignment timing.");
     const [current, extras, configuration, stages] = await Promise.all([
       fetchLead(supabase, id),
-      supabase.from("leads").select("custom_fields,call_schedule_revision").eq("id", id).single(),
+      supabase.from("leads").select(leadExtras).eq("id", id).single<LeadExtras>(),
       Object.hasOwn(body, "customFields") ? fetchLeadConfiguration(supabase) : undefined,
       Object.hasOwn(body, "stageId") ? fetchStages(supabase) : undefined,
     ]);
@@ -97,13 +102,39 @@ export async function PATCH(request: Request, context: Context) {
     const changes = Object.fromEntries(Object.entries(input).filter(([column]) =>
       columnInputs[column as keyof typeof input].some(key => Object.hasOwn(body, key))));
     if (!Object.keys(changes).length) throw new HttpError(400, "No lead fields were supplied.");
-    const { data, error } = await supabase.from("leads").update({ ...changes, modified_by: user.id }).eq("id", id).eq("is_archived", false)
-      .select(`${LEAD_SELECT},custom_fields,call_schedule_revision`).maybeSingle<LeadRow & { custom_fields: Record<string, string>; call_schedule_revision: number }>();
-    dbError(error);
+    const stageChanged = input.stage_id !== (current.stageId ?? null);
+    const deferred = assignmentTiming === "on-exit" && stageChanged
+      && ["cold", "junk", "not interested"].includes(stages?.find(stage => stage.id === input.stage_id)?.name.toLowerCase() ?? "");
+    let data: SavedLead | null;
+    let assignmentPendingId: string | null = extras.data?.pending_assignment?.token ?? null;
+    if (deferred) {
+      const { data: result, error } = await supabase.rpc("save_lead_with_deferred_assignment", {
+        p_lead_id: id, p_changes: { ...changes, modified_by: user.id }, p_token: crypto.randomUUID(),
+      }).single<{ lead: SavedLead; assignment_pending_id: string | null }>();
+      dbError(error);
+      data = result?.lead ?? null;
+      assignmentPendingId = result?.assignment_pending_id ?? null;
+    } else {
+      const result = await supabase.from("leads").update({ ...changes, modified_by: user.id }).eq("id", id).eq("is_archived", false)
+        .select(`${LEAD_SELECT},custom_fields,call_schedule_revision`).maybeSingle<SavedLead>();
+      dbError(result.error);
+      data = result.data;
+      if (stageChanged || input.assignee_id !== (current.assigneeId ?? null)) assignmentPendingId = null;
+    }
     if (!data) throw new HttpError(403, "Lead update was not permitted.");
+    let saved = data;
+    if (stageChanged && !deferred) {
+      // AFTER-stage automation can transfer the lead after UPDATE RETURNING captures its row.
+      const { data: final, error: finalError } = await supabase.from("leads")
+        .select(`${LEAD_SELECT},custom_fields,call_schedule_revision`).eq("id", id)
+        .maybeSingle<SavedLead>();
+      dbError(finalError);
+      if (!final) return NextResponse.json({ id, reassigned: true });
+      saved = final;
+    }
     return NextResponse.json({
-      id: data.id, lead: { ...mapLead(data), customFields: data.custom_fields },
-      scheduleUnlocked: Number(data.call_schedule_revision) > Number(extras.data?.call_schedule_revision),
+      id: saved.id, lead: { ...mapLead(saved), customFields: saved.custom_fields }, assignmentPendingId,
+      scheduleUnlocked: Number(saved.call_schedule_revision) > Number(extras.data?.call_schedule_revision),
     }, { headers: { "Server-Timing": `auth;dur=${authenticated - started}, save;dur=${Date.now() - authenticated}` } });
   } catch (error) { return jsonError(error); }
 }

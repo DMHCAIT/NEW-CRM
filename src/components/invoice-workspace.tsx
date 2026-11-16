@@ -41,6 +41,7 @@ type Data = {
   userId: string;
   canCreate: boolean;
   canApprove: boolean;
+  canApproveDiscount: boolean;
   razorpay: Configuration;
   smtp: Configuration;
 };
@@ -90,7 +91,7 @@ export function InvoiceWorkspace({ leadId, timelineOnly = false }: { leadId?: st
   }
   useEffect(() => {
     setPaymentStatusError("");
-    if (busy || showForm || !data?.invoices.some(invoice => invoiceStatusShouldRefresh(invoice.status))) return;
+    if (busy || showForm || (!data?.canApproveDiscount && !data?.invoices.some(invoice => invoiceStatusShouldRefresh(invoice.status)))) return;
     const selected = data.invoices.find(invoice => invoice.id === selectedId);
     const watchSelected = selected && invoiceStatusShouldRefresh(selected.status);
     let active = true;
@@ -178,11 +179,14 @@ export function InvoiceWorkspace({ leadId, timelineOnly = false }: { leadId?: st
     return totals.size ? [...totals].map(([currency, value]) => money(value, currency)).join(" / ") : money(0);
   };
   function approvalAction(invoice: Invoice) {
-    if (!data?.canApprove || invoice.status !== "pending_approval" || invoice.tax_review_required) return null;
+    if (!canDecide(invoice) || invoice.status !== "pending_approval" || invoice.tax_review_required) return null;
     return <button className="button button-primary" disabled={state.busy} aria-label={invoice.scheduled_for ? `Approve enrollment ${invoice.invoice_no}` : `Approve and send invoice ${invoice.invoice_no}`} onClick={() => {
       if (confirm(`Approve ${invoice.invoice_no} with ${invoice.discount_percent}% discount and total ${money(invoice.total, invoice.currency)}? ${invoice.scheduled_for ? "This approves the enrollment once. Installments will be emailed on their scheduled dates." : "The invoice and payment link will be emailed automatically."}`))
         void state.mutate(`/api/invoices/${invoice.id}`, "PATCH", { action: "approve" });
     }}><ShieldCheck size={14} />{invoice.scheduled_for ? "Approve enrollment" : "Approve & send invoice"}</button>;
+  }
+  function canDecide(invoice: Invoice) {
+    return Boolean(data?.canApprove && (Number(invoice.discount_percent) === 0 || data.canApproveDiscount));
   }
   function invoiceActions(invoice: Invoice) {
     const parent = data?.installmentParents?.find(row => row.id === (invoice.parent_invoice_id ?? invoice.id));
@@ -191,7 +195,7 @@ export function InvoiceWorkspace({ leadId, timelineOnly = false }: { leadId?: st
       {invoice.payment_url && invoice.status === "sent" && enrollmentApproved(invoice) && <a className="button button-primary" href={invoice.payment_url} target="_blank" rel="noreferrer">Pay Now</a>}
       <button className="button button-secondary" disabled={Boolean(downloadingId)} onClick={() => void downloadInvoice(invoice)}><Download size={14} />{downloadingId === invoice.id ? "Downloading…" : "Download PDF"}</button>
       {data?.canCreate && parent && Number(parent.available_balance) >= 1 && !parent.tax_review_required && <button className="button button-primary" disabled={state.busy} onClick={() => addInstallments(parent)}><Plus size={14} />Add next installment</button>}
-      {invoice.status === "expired" && data?.canApprove && <button className="button button-secondary" disabled={state.busy} onClick={() => {
+      {invoice.status === "expired" && data?.canApprove && (invoice.approved_at || canDecide(invoice)) && <button className="button button-secondary" disabled={state.busy} onClick={() => {
         if (confirm("Reconcile and cancel the expired payment links, then close this unpaid invoice? Received funds must be verified first."))
           void state.mutate(`/api/invoices/${invoice.id}`, "PATCH", { action: "close_expired" });
       }}>Reconcile &amp; close expired invoice</button>}
@@ -199,10 +203,12 @@ export function InvoiceWorkspace({ leadId, timelineOnly = false }: { leadId?: st
         if (confirm("Cancel existing unpaid payment links and recalculate this agreement with INR 18% / USD 0% tax? Revised totals will require approval before delivery."))
           void state.mutate(`/api/invoices/${invoice.id}`, "PATCH", { action: "review_tax" });
       }}>Review &amp; recalculate tax</button>}
-      {invoice.status === "pending_approval" && !invoice.tax_review_required && data?.canApprove && <>
+      {invoice.status === "pending_approval" && !invoice.tax_review_required && canDecide(invoice) && <>
         {approvalAction(invoice)}
         <button className="button button-secondary" disabled={state.busy} onClick={() => { const comment = prompt("Rejection reason"); if (comment !== null) void state.mutate(`/api/invoices/${invoice.id}`, "PATCH", { action: "reject", comment }); }}>Reject</button>
       </>}
+      {invoice.status === "pending_approval" && Number(invoice.discount_percent) > 0 && !data?.canApproveDiscount
+        && <span className="invoice-action-note">Awaiting Super Admin discount approval</span>}
       {invoice.status === "sent" && !invoice.tax_review_required && <>
         {["one_shot", "installments"].includes(invoice.payment_type) && canRecordPayment(invoice) && <>
           <button className="button button-secondary" disabled={state.busy} onClick={() => void state.mutate(`/api/invoices/${invoice.id}`, "PATCH", { action: "sync_payment" })}><RefreshCw size={14} />Check payment status</button>

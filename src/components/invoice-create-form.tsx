@@ -189,10 +189,10 @@ export function InvoiceCreateForm({ leadId, leads, parents, busy, onSubmit, onCl
 
       <div className="zf-grid zf-summary">
         <Field label="Total Price"><input className="zf-input" readOnly value={fixed(price)} aria-label="Total Price" /></Field>
-        <Field label="Discount Approved"><input className="zf-input" readOnly value={hasDiscount || selectedParent?.approval_pending ? "Pending admin approval" : selectedParent && discountPercent > 0 ? "Original enrollment approved" : "Not required"} aria-label="Discount Approved" /></Field>
+        <Field label="Discount Approved"><input className="zf-input" readOnly value={hasDiscount || selectedParent?.approval_pending ? "Pending Super Admin approval" : selectedParent && discountPercent > 0 ? "Original enrollment approved" : "Not required"} aria-label="Discount Approved" /></Field>
         <Field label="Total Tax"><input className="zf-input" readOnly value={fixed(taxAmount)} aria-label="Total Tax" /></Field>
         <Field label="Average Discount %"><span className="zf-suffix"><input className="zf-input" readOnly value={discountPercent.toFixed(1)} aria-label="Average Discount %" /><b>%</b></span></Field>
-        <Field label="Approver"><input className="zf-input" readOnly value={hasDiscount ? "Admin / Super Admin" : "Not required"} aria-label="Approver" /></Field>
+        <Field label="Approver"><input className="zf-input" readOnly value={hasDiscount || (selectedParent?.approval_pending && discountPercent > 0) ? "Super Admin" : "Not required"} aria-label="Approver" /></Field>
         <Field label="Total Discount"><input className="zf-input" readOnly value={fixed(discountAmount)} aria-label="Total Discount" /></Field>
         {hasDiscount ? <Field label="Discount Reason" required><input className="zf-input" name="discount_reason" maxLength={1000} required /></Field> : <span />}
         <Field label="Full Course Total"><input className="zf-input zf-strong" readOnly value={fixed(total)} aria-label="Total Amount" /></Field>
@@ -251,7 +251,7 @@ export function InvoiceCreateForm({ leadId, leads, parents, busy, onSubmit, onCl
           payment_type: paymentType, course_total: total, installment_number: isInstallment ? selectedParent?.next_installment ?? 1 : null,
         }) }} /></details>}
 
-    </fieldset><div className="invoice-form-footer zf-footer"><p>{hasDiscount ? "Discount requested: Admin / Super Admin must approve before the invoice and payment link are emailed." : isInstallment ? "Today's installments are emailed on Save with a Pay Now button, with the creator and assigned owner copied. Future dates remain scheduled." : "Automatically emailed to the lead, with the creator and assigned owner copied."}</p>
+    </fieldset><div className="invoice-form-footer zf-footer"><p>{hasDiscount ? "Save & request approval adds this request to the Super Admin's Invoices page. After approval, the invoice is emailed to the lead, with the owner, creator and sales@dmhca.in copied; future installments wait for their invoice dates." : isInstallment ? "Today's installments are emailed on Save with a Pay Now button, with the creator, assigned owner and sales@dmhca.in copied. Future dates remain scheduled." : "Automatically emailed to the lead, with the creator, assigned owner and sales@dmhca.in copied."}</p>
       <button type="button" className="button button-secondary" disabled={busy} onClick={onClose}>Cancel</button>
       <button className="button button-primary" disabled={!canSubmit}>{busy ? "Saving..." : hasDiscount || selectedParent?.approval_pending ? "Save & request approval" : isInstallment ? "Save installment plan" : "Save & send invoice"}</button>
     </div></form>

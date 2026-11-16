@@ -12,11 +12,19 @@ full details without large padded event cards.
 
 ### Interactive performance
 
+The Leads page server-renders its first 100 accessible records and metadata with
+the signed-in user's database permissions. Search and dashboard filters apply
+before rendering; a different retained filter still loads its own matching data.
+Hydration reuses a fresh server result without a duplicate initial list request;
+prefetched server results older than 30 seconds are revalidated.
 Lead list filters reuse fresh metadata even when the first visit is a filtered
 view. Cached data expires after 30 seconds; writes and manual refresh invalidate
-it. Next-page preparation uses the selected page size. Bulk lead changes run up
-to three requests concurrently, retain failed/unattempted selections, and wait
-for in-flight writes before reporting partial completion.
+it. Lead pages fetch up to 100 records so page-size changes can reuse the same
+data; pagination advances from the last displayed lead. While a new filter is
+being fetched, the previous results stay visible and cannot be selected.
+Sidebar preparation requests the same 100-lead page so navigation can reuse it.
+Bulk status changes and transfers use batches of up to 100 leads; deletions run up
+to three requests concurrently. Failed or unavailable selections are retained.
 Ordinary lead-field updates and transfers skip custom-field settings reads;
 changes to custom fields still load and validate the current configuration.
 
@@ -93,6 +101,10 @@ for those outcomes. Other TeleCMI products/regions require a separately verified
 The Notes editor supports image uploads and clipboard paste (Ctrl+V / Cmd+V),
 with previews and removal before saving. Attach up to three PNG, JPEG, GIF or
 WebP images, each at most 5 MB. Notes can contain text, images, or both.
+Press Enter in the note editor to save, or Shift+Enter to insert a new line.
+The Add note button remains available, and failed saves keep the draft and images.
+The editor unlocks as soon as the database confirms the note; the timeline refreshes
+in the background. A failed refresh is reported as a refresh error, not a failed save.
 Apply migrations through `202611110008_note_images_5mb.sql` before using this feature. Notes and image
 bytes are saved atomically in the database; no public storage URL is created.
 Saved images appear as compact filename attachments, not full previews, in the
@@ -136,6 +148,20 @@ Apply migrations through `202611100007_scheduled_call_notifications_only.sql` be
 the owner's unread count and checks every 15 seconds while visible, on navigation,
 and after CRM writes. Notifications open their associated lead through normal
 permission checks; use **Mark read** to clear an unread item.
+
+Due-call reminders also appear in a centered, non-blocking popup throughout the
+signed-in workspace, capped at 320px wide. Drag its navy header to move it; all pending reminders remain
+clickable in the scrollable list. Nothing appears before the scheduled time.
+Opening the related lead keeps its reminder visible. A confirmed change to that
+lead or clicking its **X** clears both the popup and Notifications. Failed dismissals remain
+visible with an error and can be retried. After opening a popup lead, **Next**
+visits the other pending reminder leads rather than the lead-list filters,
+skipping leads already opened through the popup in this navigation sequence.
+Leaving lead details returns Next to normal filtered navigation.
+The popup uses the bell's existing visible-page polling (up to 15 seconds after
+the due time); owner emails with the lead URL use the scheduler described below,
+including when no CRM browser is open. Neither polling nor SMTP guarantees
+delivery at the exact second.
 
 Only due scheduled calls create owner alerts and a transactional SMTP outbox entry.
 The notification page and bell exclude general activity alerts and read reminders.
@@ -802,6 +828,29 @@ Apply your organization's retention/privacy policy to stored login and lead data
   notification/follow-up actions and transactional logs. They are **not** an
   unattended scheduler; use the Run action. Notifications shows real recorded
   notifications.
+- Automatic assignment rules in **Automations** also run transactionally when
+  leads enter Junk, Not Interested, Closed Won or Cold (not Cold Not Answered). Apply
+  `202611160002_stage_assignment_permissions.sql`,
+  `202611160003_cold_stage_assignment.sql` and
+  `202611160004_deferred_stage_assignment.sql` with `npm run db:migrate`.
+  Enabled rules transfer the lead to the selected active assignee for changes by
+  any role with lead-edit permission; counselors do not need manual-assignment
+  permission to trigger a configured rule. Manual assignment remains restricted.
+  Paused rules leave ownership unchanged. Merely enabling a rule does not move
+  existing leads. If a stage change transfers a lead outside the editor's scope,
+  lead details return to the lead list with a saved/reassigned notice rather
+  than offering Retry for an operation that already succeeded.
+  Detail-page changes to Cold, Junk and Not Interested save immediately but defer
+  enabled assignment until the editor leaves the lead. Back to leads, Next and
+  sidebar links wait for saves and complete reassignment before navigating;
+  other route changes also complete pending assignments. A later stage or manual
+  owner change cancels the previous pending transfer. For queued transfers, the
+  enabled rule at departure determines the assignee. Closed Won, pipeline/bulk
+  changes and integration intake retain
+  immediate assignment behavior. Pending transfers survive refreshes; tab-close
+  requests use browser keepalive (delivery is not guaranteed by the browser),
+  and unfinished requests retry on subsequent navigation, focus or reconnection
+  in that tab. Errors retain the pending transfer and offer Retry assignment.
 - Integration screens show configuration status and supported real actions.
   Configuration presence alone does not prove provider credentials are valid.
 
@@ -822,8 +871,11 @@ Buttons use blue primary actions and bordered secondary actions. Keyboard naviga
 has visible focus outlines and a Skip to content link. Form input focus indicators
 and the selected navigation marker are retained.
 The sidebar uses a thin scrollbar and retains wheel, touch and keyboard
-scrolling. Compact-height layouts reduce menu spacing; mobile navigation uses
-a viewport-sized drawer. Help & support is no longer shown in the sidebar.
+scrolling. Use the top-bar sidebar button to hide or reopen the desktop navigation;
+the content expands into the freed space. The choice remains while navigating
+within the app. Compact-height layouts reduce menu spacing; mobile navigation
+retains its viewport-sized drawer, menu, close button and backdrop.
+Help & support is no longer shown in the sidebar.
 The shared sidebar uses compact muted-navy navigation, consistent icons, a
 single profile divider and a readable role label. Menu visibility still follows
 the signed-in user's permissions for every role; empty groups are omitted.
@@ -914,6 +966,21 @@ Leads filters support field-specific text, choices and dates, including On/Not o
 Before/After, inclusive boundaries/ranges, calendar weeks/months and relative day
 counts. Weeks start Monday; relative day counts include today. Filter date
 comparisons use the browser's local timezone. Invalid conditions cannot be saved.
+Conditions can be added without a fixed count limit. When they exceed the available
+height, scroll the conditions panel (with no visible scrollbar). Saved-filter controls
+remain visible outside the scrolling area.
+Active filters, including unfinished conditions, are retained when opening a lead
+and returning during the signed-in workspace session. Edit or Reset them to change
+the selection; dashboard drill-downs and global-search entries retain separate filters.
+The Next button on lead details follows the list's applied filters and newest-first
+order, including across pages. It rechecks accessible matching leads after the current
+record and indicates when no more match; navigation is blocked while lead changes save.
+The list header shows the exact database count of all matching accessible leads,
+independent of the rows-per-page selection. All matching publishes its complete list
+once loading finishes, rather than changing the count and rows after each batch.
+Column widths stay bounded as records change; truncated values are available on hover.
+Selection cells do not truncate checkboxes. The table header stays flush at the top
+of the scrolling list, and lead-detail navigation uses prominent navy buttons.
 
 Last Modified filters the editor, while Modified filters the edit date. Untouched
 means never edited since creation, not never contacted. Unknown edit history
@@ -1220,16 +1287,28 @@ its API checks access to the lead before loading records in 200-record batches.
 The register loads all accessible invoices, not just the latest 200. Admin and
 Super Admin can see every invoice, including archived-lead invoices; other staff
 remain scoped by database row-level security.
-Creation requires `invoices.create`; discount approval and external-financing
-verification require `invoices.approve` (Admin/Super Admin by default). Invoices
+Creation requires `invoices.create`, enabled by default for Counselors, Team Leads
+and Managers, for leads they can already access. INR and USD use the existing
+Razorpay flow. Discount approval or rejection requires both the Super Admin role
+and `invoices.approve`; granting that permission to another role does not allow
+discount decisions. API and database policies enforce this restriction.
+External-financing verification retains `invoices.approve` for Admin/Super Admin.
+Apply `202611160001_super_admin_invoice_discounts.sql` with `npm run db:migrate`
+before running this workflow. Invoices
 support one-shot, installment, EMI and loan modes. Discounts use a percentage and
 mandatory reason; discounted invoices await approval, while un-discounted
 invoices issue immediately and automatically create a Razorpay Payment Link for
 INR and USD (full payment/installments). The lead is the
-recipient; both the invoice creator and assigned lead owner are copied,
+recipient; the invoice creator, current assigned lead owner and `sales@dmhca.in` are copied,
 deduplicated case-insensitively. A valid lead email, billing address and active
 assigned owner with an email are required. Discounted invoices are delivered
-only after approval.
+only after Super Admin approval. **Save & request approval** saves the pending
+request in the Super Admin's **Invoices > Awaiting approval** register. Approval
+requests are checked every 15 seconds while that register is visible, even when
+its invoice list was previously empty. Approval
+sends eligible invoices automatically; future installments keep their scheduled
+invoice dates. No team-lead email copy is required. Payment receipt recipients
+remain unchanged.
 Apply `202611050001_invoice_installment_workflow.sql` with `npm run db:migrate`
 before running this workflow. The full catalog price, course discount and course
 tax are calculated once for the enrollment. Enter the **tax-inclusive amount
@@ -1277,7 +1356,7 @@ terms. PDFs, emails, public invoice pages and the register use the selected date
 Plans are persisted atomically with a retry-safe request ID. Scheduled/unpaid
 amounts reserve the course balance without being counted as received money.
 Later invoices retain the enrollment price, tax and discount; only the first
-discount request needs an admin decision. Pending approval blocks scheduled
+discount request needs a Super Admin decision. Pending approval blocks scheduled
 delivery. Rejection cancels the scheduled children. Once approved, each due
 installment is sent independently of earlier payments. Approval never extends
 an expired payment window; reconcile expired invoices rather than backdating or
@@ -1634,8 +1713,8 @@ assignee and an updated stage. Both dropdowns support text search, keyboard
 navigation and scrollable options.
 Dropdown menus stay inside the modal's top layer so they remain visible and interactive.
 **Keep current stage** is selected by default and preserves each selected lead's
-stage. Choosing another CRM stage updates it in the
-same request as the assignee. Delete requires `leads.delete` and an Admin or Super
+stage. Choosing another CRM stage updates it in the same batched server request
+as the assignee. Delete requires `leads.delete` and an Admin or Super
 Admin role, with server-side enforcement. Delete retains the existing soft-delete
 behavior: leads are archived from active views, with history preserved.
 Overview has a separate record-change/activity timeline, Notes has a note timeline,

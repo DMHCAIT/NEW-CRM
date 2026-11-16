@@ -138,6 +138,13 @@ test("scheduling waits until due; reminders deduplicate and follow rescheduling,
     await db.query("update public.scheduled_calls set scheduled_at=now()-interval '1 minute' where id=$1", [call]);
     assert.equal((await db.query("select public.release_due_call_notifications() as count")).rows[0].count, 1);
     assert.equal((await db.query("select public.release_due_call_notifications() as count")).rows[0].count, 0);
+    await asOwner(tx => tx.query("update public.notifications set is_read=true where lead_id=$1 and type='call_due'", [lead]));
+    assert.equal((await asOwner(tx => tx.query("select public.crm_notification_snapshot() as result"))).rows[0].result.unread, 0);
+    const claimed = (await db.query("select * from public.claim_notification_emails()")).rows;
+    assert.equal(claimed.length, 1, "clearing the popup must not cancel the due-call email");
+    assert.equal(claimed[0].recipient, "Owner@example.test");
+    assert.equal(claimed[0].lead_id, lead);
+    assert.match(claimed[0].message, /Scheduled call is due.*Reminder lead/);
     await db.query("update public.scheduled_calls set scheduled_at=now()+interval '1 hour' where id=$1", [call]);
     assert.equal((await db.query("select public.release_due_call_notifications() as count")).rows[0].count, 0);
     await db.query("update public.leads set assignee_id=$1 where id=$2", [other, lead]);

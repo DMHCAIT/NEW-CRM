@@ -4,7 +4,7 @@ export type LeadImportSheet = {
   total_rows: number;
   imported_rows: number;
   duplicate_rows: number;
-  status: "importing" | "completed" | "deleted";
+  status: "importing" | "completed" | "deleting" | "deleted";
   created_at: string;
 };
 
@@ -19,7 +19,7 @@ export async function createLeadImportPdf(sheet: LeadImportSheet): Promise<Uint8
   const amber = rgb(0.62, 0.38, 0.08);
   const blue = rgb(0.15, 0.39, 0.77);
   const pending = sheet.total_rows - sheet.imported_rows - sheet.duplicate_rows;
-  const status = sheet.status === "completed" ? "Completed" : sheet.status === "deleted" ? "Deleted" : "Incomplete";
+  const status = sheet.status === "completed" ? "Completed" : sheet.status === "deleted" ? "Deleted" : sheet.status === "deleting" ? "Deleting" : "Incomplete";
   const statusColor = sheet.status === "completed" ? green : sheet.status === "deleted" ? rgb(0.66, 0.2, 0.2) : amber;
   const filenameLines: string[] = [];
   let filenameImage: Awaited<ReturnType<typeof pdf.embedPng>> | undefined;
@@ -77,7 +77,7 @@ export async function createLeadImportPdf(sheet: LeadImportSheet): Promise<Uint8
   const metrics = [
     { label: "Total leads in sheet", value: sheet.total_rows, color: blue, background: rgb(0.94, 0.96, 1) },
     { label: "Leads imported", value: sheet.imported_rows, color: green, background: rgb(0.92, 0.97, 0.94) },
-    { label: "Duplicates skipped", value: sheet.duplicate_rows, color: amber, background: rgb(1, 0.96, 0.89) },
+    { label: "Rows skipped", value: sheet.duplicate_rows, color: amber, background: rgb(1, 0.96, 0.89) },
   ];
   metrics.forEach((metric, index) => {
     const x = 36 + index * 178;
@@ -100,13 +100,13 @@ export async function createLeadImportPdf(sheet: LeadImportSheet): Promise<Uint8
     }
   }
   text("Imported", 36, sectionTop + 164, 10, green);
-  text("Duplicates", 116, sectionTop + 164, 10, amber);
+  text("Skipped", 116, sectionTop + 164, 10, amber);
   text("Not processed", 36, sectionTop + 195, 11, muted);
   const pendingLabel = pending.toLocaleString("en-US");
   text(pendingLabel, 559 - bold.widthOfTextAtSize(pendingLabel, 13), sectionTop + 193, 13, navy, true);
   block(36, sectionTop + 232, 523, 70, rgb(0.96, 0.97, 0.99));
   text("ABOUT THIS IMPORT", 50, sectionTop + 245, 9, muted, true);
-  text("Duplicates include repeated sheet rows and existing CRM matches.", 50, sectionTop + 263, 10, muted);
+  text("Rows with blank email or phone, repeated rows and existing CRM matches are skipped.", 50, sectionTop + 263, 10, muted);
   text("Only new leads belong to this sheet. Existing leads are unchanged.", 50, sectionTop + 279, 10, muted);
   text(`Import ID: ${sheet.id}`, 36, height - 64, 8, muted);
   text("DMHCA CRM", 36, height - 40, 9, muted, true);

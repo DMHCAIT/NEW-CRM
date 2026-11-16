@@ -112,7 +112,7 @@ function elements(node) {
   if (Array.isArray(node)) return node.flatMap(elements);
   return [node, ...elements(node.props?.children)];
 }
-function composer({ fail = false, disabled = false } = {}) {
+function composer({ fail = false, disabled = false, save } = {}) {
   const states = [], refs = [], saves = [];
   let stateIndex = 0, refIndex = 0, content = "", images = [];
   const Component = load("src\\components\\lead-note-composer.tsx", {
@@ -136,12 +136,69 @@ function composer({ fail = false, disabled = false } = {}) {
       stateIndex = 0; refIndex = 0;
       return Component({ disabled, content, onContentChange: value => { content = value; }, images, onImagesChange: value => { images = value; }, onSave: async (text, images) => {
         if (fail) throw new Error("Save failed; retry.");
+        if (save) await save();
         saves.push({ text, images });
       } });
     },
   };
 }
 const file = { name: "admission.png", type: "image/png", size: 200 };
+
+function pressNoteKey(ui, overrides = {}) {
+  const tree = ui.render();
+  let prevented = false, submitted;
+  elements(tree).find(node => node.type === "textarea").props.onKeyDown({
+    key: "Enter", nativeEvent: { isComposing: false, keyCode: 13 }, repeat: false,
+    currentTarget: { form: { requestSubmit() { submitted = tree.props.onSubmit({ preventDefault() {} }); } } },
+    preventDefault() { prevented = true; }, ...overrides,
+  });
+  return { prevented, submitted };
+}
+
+test("note Enter saves through the form while multiline, composition and repeated keys do not submit", async () => {
+  const ui = composer();
+  elements(ui.render()).find(node => node.type === "textarea").props.onChange({ target: { value: "Conversation recorded" } });
+  for (const change of [
+    { shiftKey: true }, { ctrlKey: true }, { metaKey: true }, { altKey: true },
+    { nativeEvent: { isComposing: true } }, { nativeEvent: { isComposing: false, keyCode: 229 } }, { key: "a" },
+  ]) {
+    const key = pressNoteKey(ui, change);
+    assert.equal(key.prevented, false);
+    assert.equal(key.submitted, undefined);
+  }
+  assert.equal(pressNoteKey(ui, { repeat: true }).submitted, undefined);
+  const key = pressNoteKey(ui);
+  assert.equal(key.prevented, true);
+  await key.submitted;
+  assert.deepEqual(ui.saves, [{ text: "Conversation recorded", images: [] }]);
+  assert.equal(elements(ui.render()).find(node => node.type === "textarea").props.value, "");
+  await pressNoteKey(ui).submitted;
+  assert.equal(ui.saves.length, 1, "Enter must not create blank notes");
+});
+
+test("note Enter keeps failed drafts and attachments and prevents duplicate saves while busy", async () => {
+  const failed = composer({ fail: true });
+  elements(failed.render()).find(node => node.type === "textarea").props.onChange({ target: { value: "Keep this note" } });
+  failed.render().props.onPaste({ preventDefault() {}, clipboardData: { files: [file], getData: () => "" } });
+  assert.equal(pressNoteKey(failed).submitted, undefined, "wait until attachments finish reading");
+  await new Promise(setImmediate);
+  await pressNoteKey(failed).submitted;
+  const html = renderToStaticMarkup(failed.render());
+  assert.match(html, /Save failed; retry/);
+  assert.match(html, /Keep this note/);
+  assert.match(html, /Attached images/);
+  let finishSave, attempts = 0;
+  const waiting = new Promise(resolve => { finishSave = resolve; });
+  const ui = composer({ save: () => { attempts++; return waiting; } });
+  elements(ui.render()).find(node => node.type === "textarea").props.onChange({ target: { value: "Save once" } });
+  const first = pressNoteKey(ui);
+  assert.equal(pressNoteKey(ui).submitted, undefined);
+  assert.equal(attempts, 1);
+  finishSave();
+  await first.submitted;
+  assert.equal(ui.saves.length, 1);
+  assert.equal(pressNoteKey(composer({ disabled: true })).submitted, undefined);
+});
 
 test("note composer uploads, previews, removes and saves image-only notes", async () => {
   const ui = composer();

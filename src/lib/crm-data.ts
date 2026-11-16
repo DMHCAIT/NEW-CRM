@@ -84,12 +84,12 @@ function missingLeadAdmissionColumns(error: { code?: string; message?: string; d
 
 let dateTimeFormatter: Intl.DateTimeFormat | undefined;
 
-export function formatDateTime(value: string | null | undefined): string {
+export function formatDateTime(value: string | null | undefined, formatter?: Intl.DateTimeFormat): string {
   if (!value) return "";
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return "";
   dateTimeFormatter ??= new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" });
-  return dateTimeFormatter.format(date);
+  return (formatter ?? dateTimeFormatter).format(date);
 }
 
 export function mapLead(row: LeadRow): Lead {
@@ -242,6 +242,12 @@ export function getCachedApiRead<T>(path: string, maxAgeMs = 30000): T | undefin
   return undefined;
 }
 
+export class ApiError extends Error {
+  constructor(message: string, public readonly status: number) {
+    super(message);
+  }
+}
+
 export async function apiRequest<T = unknown>(path: string, init: { method?: string; body?: unknown; maxAgeMs?: number; usePrefetched?: boolean; forceFresh?: boolean } = {}): Promise<T> {
   const method = (init.method ?? (init.body === undefined ? "GET" : "POST")).toUpperCase();
   const browserRead = typeof window !== "undefined" && method === "GET" && path.startsWith("/api/") && !path.startsWith("/api/auth/");
@@ -299,8 +305,8 @@ async function fetchApi<T>(path: string, method: string, body: unknown): Promise
   const payload: unknown = await response.json().catch(() => ({}));
   if (!response.ok) {
     if (response.status === 401 || response.status === 403) clearApiReadCache();
-    const message = typeof payload === "object" && payload !== null && "error" in payload && typeof payload.error === "string" ? payload.error : `Request failed (${response.status}).`;
-    throw new Error(message);
+    const message = typeof payload === "object" && payload !== null && "error" in payload && typeof payload.error === "string" && !/^\s*(?:<!doctype html|<html\b)/i.test(payload.error) ? payload.error : `Request failed (${response.status}).`;
+    throw new ApiError(message, response.status);
   }
   return payload as T;
 }

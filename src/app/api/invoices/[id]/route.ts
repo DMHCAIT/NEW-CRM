@@ -33,6 +33,11 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
     const { data: invoice, error } = await supabase.from("invoices").select("*").eq("id", id).maybeSingle();
     databaseError(error);
     if (!invoice) throw new HttpError(404, "Invoice not found or inaccessible.");
+    if (Number(invoice.discount_percent) > 0 && user.profile.role !== "super_admin"
+      && (input.action === "approve" || input.action === "reject"
+        || (input.action === "close_expired" && invoice.status === "pending_approval" && !invoice.parent_invoice_id))) {
+      throw new HttpError(403, "Super Admin approval is required for discounts.");
+    }
     const admin = getSupabaseAdminClient();
 
     if (input.action === "review_tax" || input.action === "close_expired") {
@@ -127,7 +132,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
       if (!issued || !lead) throw new HttpError(500, "Approved invoice could not be loaded for delivery.");
       try {
         const result = await deliverInvoice(admin, issued, lead, issued.creator_email);
-        return NextResponse.json({ message: "Invoice approved and saved in CRM; email accepted by SMTP for the lead, with the current lead owner and creator copied.", messageId: result.messageId });
+        return NextResponse.json({ message: "Invoice approved and saved in CRM; email accepted by SMTP for the lead, with the current lead owner, creator and sales@dmhca.in copied.", messageId: result.messageId });
       } catch (deliveryError) {
         const message = `Invoice approved, but automatic delivery failed: ${deliveryError instanceof Error ? deliveryError.message : "Delivery failed."}`;
         return NextResponse.json({ message, warning: message });

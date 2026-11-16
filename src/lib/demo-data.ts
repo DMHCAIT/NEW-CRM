@@ -76,7 +76,7 @@ export const permissionGroups: {
       { key: "pipeline.view", label: "View pipeline", description: "View permitted leads on the pipeline board." },
       { key: "meetings.manage", label: "Manage meetings", description: "Schedule and update meetings for permitted leads." },
       { key: "invoices.create", label: "Create invoices", description: "Prepare invoices and submit discount requests." },
-      { key: "invoices.approve", label: "Approve discounts", description: "Approve, edit or reject invoice discounts." },
+      { key: "invoices.approve", label: "Invoice finance approvals", description: "Verify financing. Discount decisions require the Super Admin role." },
     ],
   },
   {

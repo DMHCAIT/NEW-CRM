@@ -93,6 +93,7 @@ export async function GET(request: Request) {
       status: ["sent", "pending_approval"].includes(invoice.status) && invoiceWindowExpired(invoice) ? "expired" : invoice.status,
     })), courseBalances, installmentParents, leads, profiles: profiles ?? [], userId: user.id,
       canCreate: user.permissions.includes("invoices.create"), canApprove: ["admin", "super_admin"].includes(user.profile.role) && user.permissions.includes("invoices.approve"),
+      canApproveDiscount: user.profile.role === "super_admin" && user.permissions.includes("invoices.approve"),
       razorpay, smtp }, { headers: { "Cache-Control": "private, no-store" } });
   } catch (error) { return jsonError(error); }
 }
@@ -138,9 +139,9 @@ export async function POST(request: Request) {
       } else delivery = { sent: false, error: "The invoice lead is unavailable." };
     }
     const message = invoice.status === "pending_approval"
-      ? "Discount request submitted for admin approval."
+      ? "Discount request submitted for Super Admin approval."
       : delivery.sent
-        ? "Invoice saved in CRM; email accepted by SMTP for the lead, with the current lead owner and creator copied."
+        ? "Invoice saved in CRM; email accepted by SMTP for the lead, with the current lead owner, creator and sales@dmhca.in copied."
         : `Invoice issued, but automatic delivery failed: ${delivery.error ?? "check configuration and reconcile."}`;
     return NextResponse.json({ id: data, status: invoice.status, delivery, message, warning: delivery.error ? message : undefined }, { status: 201 });
   } catch (error) { return jsonError(error); }

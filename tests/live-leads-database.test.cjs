@@ -360,6 +360,47 @@ test("lead import skips existing and in-file duplicates by email or canonical ph
   assert.deepEqual(Array.from(precheck.rows[0].duplicates), [0, 1, 3, 4]);
 });
 
+test("import duplicate checks can index legacy local-number matches", async () => {
+  await db.transaction(async tx => {
+    await tx.exec("set local enable_seqscan=off");
+    const plan = await tx.query(`explain select id from public.leads l where
+      l.normalized_phone = '9876543210' or l.normalized_email = 'unmatched@example.test'
+      or (public.lead_country_calling_prefix(l.country_code) <> ''
+        and '9876543210' = substring(l.normalized_phone from length(public.lead_country_calling_prefix(l.country_code)) + 1))`);
+    assert.match(plan.rows.map(row => row["QUERY PLAN"]).join("\n"), /leads_import_local_phone_idx/);
+    const batchPlan = await tx.query(`explain with candidates as materialized (
+      select n::text as phone, n::text || '@example.test' as email, ''::text as country_code
+      from generate_series(7000000000,7000000100) n
+    )
+    select c.phone from candidates c where not exists (
+      select 1 from public.leads l
+      where l.normalized_phone = c.phone or l.normalized_email = c.email
+        or (coalesce(l.country_code,'') = '' and public.lead_country_calling_prefix(c.country_code) <> ''
+          and l.normalized_phone = substring(c.phone from length(public.lead_country_calling_prefix(c.country_code)) + 1))
+        or (coalesce(c.country_code,'') = '' and public.lead_country_calling_prefix(l.country_code) <> ''
+          and c.phone = substring(l.normalized_phone from length(public.lead_country_calling_prefix(l.country_code)) + 1))
+    )`);
+    assert.match(batchPlan.rows.map(row => row["QUERY PLAN"]).join("\n"), /leads_import_local_phone_idx/);
+  });
+});
+
+test("lead import accepts any non-empty email containing @ and rejects values without it", async () => {
+  const rows = [
+    { name: "Yahoo underscore address", phone: "8181920101", email: "schy_74@yahoo.com", assignee_id: owner },
+    { name: "Unusual address", phone: "8181920102", email: "unusual @ format", assignee_id: owner },
+  ];
+  const result = await asUser(owner, tx => tx.query("select public.import_live_leads($1::jsonb) as result", [JSON.stringify(rows)]));
+  assert.deepEqual({ ...result.rows[0].result }, { imported: 2, skipped: 0 });
+  const saved = (await db.query("select email,normalized_email from public.leads where name in ('Yahoo underscore address','Unusual address') order by name")).rows;
+  assert.deepEqual(saved, [
+    { email: "unusual @ format", normalized_email: "unusual @ format" },
+    { email: "schy_74@yahoo.com", normalized_email: "schy_74@yahoo.com" },
+  ]);
+  await assert.rejects(asUser(owner, tx => tx.query("select public.import_live_leads($1::jsonb)", [JSON.stringify([
+    { name: "Email without marker", phone: "8181920103", email: "no-email-marker", assignee_id: owner },
+  ])])), /invalid lead fields/);
+});
+
 test("lead inserts and edits retain new picklist values independently of configuration saves", async () => {
   const { rows: [row] } = await db.query(`insert into public.leads(name,phone,normalized_phone,created_by,assignee_id,course,source,category,qualification)
     values('New choice fixture','7181920124','7181920124',$1,$1,'New Facebook course','Additional Facebook form','New category','New qualification') returning id`, [owner]);
@@ -775,6 +816,42 @@ test("all-duplicate imports are recorded as completed without claiming existing 
   for (const [total, duplicates] of [[0, 0], [200001, 0], [2, 3], [2, -1]]) {
     await assert.rejects(asUser(owner, tx => tx.query("select public.start_live_lead_import('invalid.csv',$1,$2)", [total, duplicates])), /Invalid import sheet/);
   }
+});
+
+test("sheet deletion commits bounded batches, resumes safely and preserves audit history", async () => {
+  const sheet = (await asUser(owner, tx => tx.query("select public.start_live_lead_import('batched-delete.csv',3,0) as sheet"))).rows[0].sheet;
+  const rows = Array.from({ length: 3 }, (_, index) => ({
+    name: `Batched delete ${index}`, phone: `76543210${index}0`, email: `batched-delete-${index}@example.test`, assignee_id: owner,
+  }));
+  await asUser(owner, tx => tx.query("select public.import_live_lead_sheet_batch($1,0,$2::jsonb)", [sheet.id, JSON.stringify(rows)]));
+  const batch = (actor, size) => asUser(actor, tx => tx.query("select public.delete_live_lead_import_batch($1,$2) as result", [sheet.id, size]));
+  await assert.rejects(batch(owner, 1), /Administrator/);
+  await assert.rejects(batch(admin, 0), /Invalid deletion batch size/);
+  await assert.rejects(batch(admin, 2001), /Invalid deletion batch size/);
+  assert.deepEqual((await batch(admin, 1)).rows[0].result, { deleted: 1, done: false });
+  assert.equal((await db.query("select status from public.lead_import_sheets where id=$1", [sheet.id])).rows[0].status, "deleting");
+  await assert.rejects(asUser(admin, tx => tx.query("select public.delete_live_lead_import($1)", [sheet.id])), /in progress/);
+  assert.deepEqual((await batch(admin, 1)).rows[0].result, { deleted: 2, done: false });
+  assert.deepEqual((await batch(admin, 1)).rows[0].result, { deleted: 3, done: true });
+  assert.deepEqual((await batch(admin, 1)).rows[0].result, { deleted: 3, done: true });
+  assert.equal((await db.query("select count(*)::int as count from public.leads where import_sheet_id=$1 and is_archived", [sheet.id])).rows[0].count, 3);
+  assert.ok((await db.query("select count(*)::int as count from public.audit_logs where entity_type='leads' and entity_id in (select id::text from public.leads where import_sheet_id=$1)", [sheet.id])).rows[0].count >= 6);
+});
+
+test("batched deletion enforces lead scope and blocks new imports on a partially deleted sheet", async () => {
+  const sheet = (await asUser(admin, tx => tx.query("select public.start_live_lead_import('scope-delete.csv',3,0) as sheet"))).rows[0].sheet;
+  const rows = [0, 1].map(index => ({ name: `Scope ${index}`, phone: `76543211${index}0`, email: `scope-delete-${index}@example.test`, assignee_id: admin }));
+  await asUser(admin, tx => tx.query("select public.import_live_lead_sheet_batch($1,0,$2::jsonb)", [sheet.id, JSON.stringify(rows)]));
+  const leads = (await db.query("select id from public.leads where import_sheet_id=$1 order by id", [sheet.id])).rows;
+  await db.query("update public.leads set assignee_id=$1 where id=$2", [outsider, leads[1].id]);
+  await db.query("insert into public.user_permission_overrides(user_id,permission_key,allowed) values($1,'users.view',false)", [admin]);
+  const batch = () => asUser(admin, tx => tx.query("select public.delete_live_lead_import_batch($1,1) as result", [sheet.id]));
+  await assert.rejects(batch(), /outside your accessible scope/);
+  assert.equal((await db.query("select count(*)::int as count from public.leads where import_sheet_id=$1 and is_archived", [sheet.id])).rows[0].count, 0);
+  await db.query("delete from public.user_permission_overrides where user_id=$1 and permission_key='users.view'", [admin]);
+  assert.deepEqual((await batch()).rows[0].result, { deleted: 1, done: false });
+  await assert.rejects(asUser(admin, tx => tx.query("select public.import_live_lead_sheet_batch($1,1,$2::jsonb)", [sheet.id, JSON.stringify([{ name: "Late", phone: "7654321190", email: "late-scope@example.test", assignee_id: admin }])])), /remaining sheet rows/);
+  assert.deepEqual((await batch()).rows[0].result, { deleted: 2, done: true });
 });
 
 test("plus-prefix migration preserves all other lead state and is enforced for service-role writes", async () => {

@@ -3,14 +3,25 @@
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CheckCircle2, Download, FileSpreadsheet, Trash2, UploadCloud, Users } from "lucide-react";
-import { apiRequest, formatDateTime } from "@/lib/crm-data";
+import { ApiError, apiRequest, formatDateTime } from "@/lib/crm-data";
 import { createLeadCsvSample, MAX_LEAD_IMPORT_FILE_BYTES, MAX_LEAD_IMPORT_ROWS, parseLeadSpreadsheet } from "@/lib/live-leads-csv";
 import { isDateKey } from "@/lib/lead-filters";
 import { countryCodeMatchesOptions, normalizePhone } from "@/lib/lead-phone";
 import { useLiveLeadData } from "@/lib/live-leads-client";
 import { downloadLeadImportPdf, type LeadImportSheet } from "@/lib/lead-import-report";
 
-const IMPORT_REQUEST_BATCH_SIZE = 5_000;
+const DUPLICATE_CHECK_BATCH_SIZE = 2_000;
+const IMPORT_REQUEST_BATCH_SIZE = 500;
+const MAX_IMPORT_REQUEST_BATCH_SIZE = 2_000;
+const DELETE_BATCH_SIZE = 500;
+const MAX_DELETE_BATCH_SIZE = 2_000;
+
+// Grow fast batches to cut round trips; shrink slow ones before they reach the database statement timeout.
+function nextBatchSize(current: number, elapsedMs: number, limit: number) {
+  if (elapsedMs < 2_000) return Math.min(limit, current * 2);
+  if (elapsedMs > 5_000) return Math.max(1, Math.floor(current / 2));
+  return current;
+}
 
 export default function LeadImportPage() {
   const { data, error, loading, reload, setError } = useLiveLeadData("/api/leads?metadata=only");
@@ -20,7 +31,7 @@ export default function LeadImportPage() {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [filename, setFilename] = useState("");
-  const [skippedDuplicates, setSkippedDuplicates] = useState(0);
+  const [skippedRows, setSkippedRows] = useState(0);
   const [assignmentChoice, setAssignmentChoice] = useState("");
   const [progress, setProgress] = useState("");
   const [totalRows, setTotalRows] = useState(0);
@@ -32,7 +43,8 @@ export default function LeadImportPage() {
   const [historyError, setHistoryError] = useState("");
   const [historyAction, setHistoryAction] = useState("");
   const [deleteSheet, setDeleteSheet] = useState<LeadImportSheet | null>(null);
-  const importSession = useRef<{ sheet: LeadImportSheet; offset: number } | null>(null);
+  const [deleteProgress, setDeleteProgress] = useState("");
+  const importSession = useRef<{ sheet: LeadImportSheet; offset: number; batchIndex: number; batchSize: number; batchLimit: number } | null>(null);
   const canImport = Boolean(data?.user.permissions.includes("leads.import") && data.user.permissions.includes("leads.create"));
   const loadHistory = useCallback(async (offset: number) => {
     setHistoryLoading(true); setHistoryError("");
@@ -51,18 +63,50 @@ export default function LeadImportPage() {
     finally { setHistoryAction(""); }
   }
   async function removeSheet(sheet: LeadImportSheet) {
-    setHistoryAction(sheet.id); setHistoryError("");
+    setHistoryAction(sheet.id); setHistoryError(""); setDeleteProgress("");
     try {
-      const result = await apiRequest<{ deleted: number }>(`/api/leads/imports/${sheet.id}`, { method: "DELETE" });
-      setDeleteSheet(null);
       if (importSession.current?.sheet.id === sheet.id) await readFile();
+      let batchSize = DELETE_BATCH_SIZE;
+      let batchLimit = MAX_DELETE_BATCH_SIZE;
+      let result: { deleted: number; done: boolean };
+      for (;;) {
+        let retries = 0;
+        const started = Date.now();
+        try {
+          for (;;) {
+            try {
+              result = await apiRequest<{ deleted: number; done: boolean }>(`/api/leads/imports/${sheet.id}?batchSize=${batchSize}`, { method: "DELETE" });
+              break;
+            } catch (error) {
+              const transient = error instanceof TypeError || (error instanceof ApiError && [429, 502, 503, 504, 520].includes(error.status));
+              if (!transient || retries >= 3) throw error;
+              retries++;
+              setDeleteProgress(`Connection interrupted. Retrying deletion (attempt ${retries} of 3)...`);
+              await new Promise(resolve => setTimeout(resolve, 500 * 2 ** (retries - 1)));
+            }
+          }
+        } catch (error) {
+          if (!(error instanceof Error) || error.message !== "canceling statement due to statement timeout" || batchSize === 1) throw error;
+          batchSize = Math.max(1, Math.floor(batchSize / 2));
+          batchLimit = batchSize;
+          setDeleteProgress(`Database timed out. Retrying with batches of ${batchSize.toLocaleString()} leads.`);
+          continue;
+        }
+        setDeleteProgress(`Removing leads: ${result.deleted.toLocaleString()} archived.`);
+        if (result.done) break;
+        batchSize = nextBatchSize(batchSize, Date.now() - started, batchLimit);
+      }
+      setDeleteSheet(null);
       setNotice(`Deleted "${sheet.filename}" and removed ${result.deleted.toLocaleString()} imported leads from the CRM.`);
       await loadHistory(sheets.length === 1 ? Math.max(0, historyOffset - 20) : historyOffset);
-    } catch (e) { setHistoryError(e instanceof Error ? e.message : "Could not delete the import sheet."); }
-    finally { setHistoryAction(""); }
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Could not delete the import sheet.";
+      try { await loadHistory(historyOffset); setHistoryError(message); }
+      catch (error) { setHistoryError(`${message} History refresh failed: ${error instanceof Error ? error.message : "Please refresh."}`); }
+    } finally { setHistoryAction(""); setDeleteProgress(""); }
   }
   async function readFile(file?: File) {
-    setRows([]); setPreview([]); setPreviewCount(0); setTotalRows(0); setError(""); setNotice(""); setFilename(file?.name ?? ""); setSkippedDuplicates(0); setAssignmentChoice(""); setAssignAll(false); setProgress("");
+    setRows([]); setPreview([]); setPreviewCount(0); setTotalRows(0); setError(""); setNotice(""); setFilename(file?.name ?? ""); setSkippedRows(0); setAssignmentChoice(""); setAssignAll(false); setProgress("");
     importSession.current = null;
     if (!file || !data) return;
     setBusy(true);
@@ -70,15 +114,15 @@ export default function LeadImportPage() {
       if (file.size > MAX_LEAD_IMPORT_FILE_BYTES) throw new Error("Choose a file smaller than 50 MB.");
       if (!/\.(csv|xlsx)$/i.test(file.name)) throw new Error("Choose a CSV or Excel .xlsx file.");
       const parsed = await parseLeadSpreadsheet(file, data.configuration.fields.filter((f) => f.active).map((f) => f.name));
-      const mapped: Record<string, unknown>[] = parsed.map(({ stage, assignee, note, ...row }, index) => {
-        const fail = (message: string): never => { throw new Error(`Row ${index + 2}: ${message}`); };
+      const incompleteRows = parsed.flatMap((row, index) => !row.email?.trim() || !row.email.includes("@") || !row.phone?.trim() ? [index] : []);
+      const completeRows = parsed.flatMap((row, sourceIndex) => row.email?.trim() && row.email.includes("@") && row.phone?.trim() ? [{ row, sourceIndex }] : []);
+      const mapped: { lead: Record<string, unknown>; sourceIndex: number }[] = completeRows.map(({ row: { stage, assignee, note, ...row }, sourceIndex }) => {
+        const fail = (message: string): never => { throw new Error(`Row ${sourceIndex + 2}: ${message}`); };
         if (!row.name?.trim()) fail("Name is required.");
-        if (!row.email?.trim()) fail("Email is required.");
         if (row.countryCode?.trim() && data.configuration.picklists.countryCode.length && !data.configuration.picklists.countryCode.includes(row.countryCode) && !countryCodeMatchesOptions(row.countryCode, data.configuration.picklists.countryCode)) fail(`Choose a valid country code "${row.countryCode}".`);
         if (note && note.length > 10000) fail("Note cannot exceed 10,000 characters.");
         const normalized = (row.phone ?? "").replace(/\D/g, "");
         if (normalized.length < 7 || !/^\+?[\d\s().-]+$/.test(row.phone ?? "")) fail("A valid phone is required.");
-        if (row.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(row.email)) fail("Invalid email address.");
         const stageRow = stage ? data.stages.find((s) => s.name.toLowerCase() === stage.toLowerCase()) : data.stages[0];
         if (stage && !stageRow) fail(`Unknown active stage "${stage}".`);
         const matches = assignee ? data.profiles.filter((p) => p.status === "active" && (p.email.toLowerCase() === assignee.toLowerCase() || p.fullName.toLowerCase() === assignee.toLowerCase())) : [];
@@ -91,46 +135,69 @@ export default function LeadImportPage() {
         if (!Number.isFinite(closureFee) || closureFee < 0) fail("Expected closure fee must be a nonnegative number.");
         const customFields = Object.fromEntries(Object.entries(row).filter(([key]) => key.startsWith("custom:")).map(([key, value]) => [key.slice(7), value]));
         const builtIn = Object.fromEntries(Object.entries(row).filter(([key]) => !key.startsWith("custom:")));
-        return { ...builtIn, phone: `+${normalizePhone(row.phone, row.countryCode)}`, customFields, note, source: row.source || "import", stageId: stageRow?.id ?? null, assigneeId, followUpAt: row.followUpAt || null, closureFee };
+        return { lead: { ...builtIn, phone: `+${normalizePhone(row.phone, row.countryCode)}`, customFields, note, source: row.source || "import", stageId: stageRow?.id ?? null, assigneeId, followUpAt: row.followUpAt || null, closureFee }, sourceIndex };
       });
-      if (mapped.length > MAX_LEAD_IMPORT_ROWS) throw new Error(`Import at most ${MAX_LEAD_IMPORT_ROWS.toLocaleString()} leads at a time.`);
+      if (parsed.length > MAX_LEAD_IMPORT_ROWS) throw new Error(`Import at most ${MAX_LEAD_IMPORT_ROWS.toLocaleString()} leads at a time.`);
       const duplicateIndexes = new Set<number>();
       const seenEmails = new Set<string>();
       const seenPhones = new Set<string>();
-      for (let offset = 0; offset < mapped.length; offset += IMPORT_REQUEST_BATCH_SIZE) {
-        const batch = mapped.slice(offset, offset + IMPORT_REQUEST_BATCH_SIZE);
-        const candidates: { row: Record<string, unknown>; index: number }[] = [];
-        const localDuplicates: number[] = [];
-        batch.forEach((row, index) => {
-          const email = String(row.email ?? "").trim().toLowerCase();
-          const phone = normalizePhone(String(row.phone ?? ""), String(row.countryCode ?? ""));
-          if (seenEmails.has(email) || seenPhones.has(phone)) localDuplicates.push(index);
-          else candidates.push({ row, index });
-          seenEmails.add(email);
-          seenPhones.add(phone);
-        });
-        for (const index of localDuplicates) duplicateIndexes.add(offset + index);
-        if (candidates.length) {
-          const { duplicates } = await apiRequest<{ duplicates: number[] }>("/api/leads/import", { body: { rows: candidates.map(candidate => candidate.row), checkOnly: true } });
-          if (!Array.isArray(duplicates) || duplicates.some(index => !Number.isInteger(index) || index < 0 || index >= candidates.length)) throw new Error("Duplicate check returned an invalid result.");
-          for (const index of duplicates) duplicateIndexes.add(offset + candidates[index].index);
+      const candidates: { row: Record<string, unknown>; index: number }[] = [];
+      mapped.forEach(({ lead: row }, index) => {
+        const email = String(row.email ?? "").trim().toLowerCase();
+        const phone = normalizePhone(String(row.phone ?? ""), String(row.countryCode ?? ""));
+        if (seenEmails.has(email) || seenPhones.has(phone)) duplicateIndexes.add(index);
+        else candidates.push({ row, index });
+        seenEmails.add(email);
+        seenPhones.add(phone);
+      });
+      let checkBatchSize = DUPLICATE_CHECK_BATCH_SIZE;
+      for (let offset = 0; offset < candidates.length;) {
+        const batch = candidates.slice(offset, offset + checkBatchSize);
+        try {
+          let retries = 0;
+          let duplicates: number[];
+          for (;;) {
+            try {
+              ({ duplicates } = await apiRequest<{ duplicates: number[] }>("/api/leads/import", { body: { rows: batch.map(candidate => candidate.row), checkOnly: true } }));
+              break;
+            } catch (error) {
+              const transient = error instanceof TypeError || (error instanceof ApiError && [429, 502, 503, 504, 520].includes(error.status));
+              if (!transient || retries >= 3) throw error;
+              retries++;
+              setProgress(`Connection interrupted. Retrying duplicate check (attempt ${retries} of 3)...`);
+              await new Promise(resolve => setTimeout(resolve, 500 * 2 ** (retries - 1)));
+            }
+          }
+          if (!Array.isArray(duplicates) || duplicates.some(index => !Number.isInteger(index) || index < 0 || index >= batch.length)) throw new Error("Duplicate check returned an invalid result.");
+          for (const index of duplicates) duplicateIndexes.add(batch[index].index);
+        } catch (error) {
+          if (!(error instanceof Error) || error.message !== "canceling statement due to statement timeout" || batch.length === 1) throw error;
+          checkBatchSize = Math.floor(batch.length / 2);
+          setProgress(`Database timed out. Retrying duplicate checks with batches of ${checkBatchSize.toLocaleString()} leads.`);
+          continue;
         }
-        setProgress(`Checking duplicates: ${Math.min(offset + batch.length, mapped.length).toLocaleString()} of ${mapped.length.toLocaleString()} leads`);
+        offset += batch.length;
+        setProgress(`Checking duplicates: ${offset.toLocaleString()} of ${candidates.length.toLocaleString()} leads`);
       }
-      const remainingRows = mapped.filter((_, index) => !duplicateIndexes.has(index));
+      const remainingRows = mapped.filter((_, index) => !duplicateIndexes.has(index)).map(({ lead }) => lead);
       setRows(remainingRows);
       const sampleRows: Record<string, string>[] = [];
-      for (let index = 0; index < parsed.length && sampleRows.length < 20; index++) {
-        if (!duplicateIndexes.has(index)) sampleRows.push({ ...parsed[index], phone: String(mapped[index].phone) });
+      for (let index = 0; index < mapped.length && sampleRows.length < 20; index++) {
+        if (!duplicateIndexes.has(index)) sampleRows.push({ ...parsed[mapped[index].sourceIndex], phone: String(mapped[index].lead.phone) });
       }
       setPreviewCount(remainingRows.length);
       setPreview(sampleRows);
-      setSkippedDuplicates(duplicateIndexes.size);
+      const skippedCount = incompleteRows.length + duplicateIndexes.size;
+      setSkippedRows(skippedCount);
       setTotalRows(parsed.length);
       setProgress("");
-      if (duplicateIndexes.size) setNotice(remainingRows.length
-        ? `${duplicateIndexes.size.toLocaleString()} duplicate row${duplicateIndexes.size === 1 ? "" : "s"} removed from the import preview.`
-        : `All ${duplicateIndexes.size.toLocaleString()} rows matched existing or repeated leads and were removed. Nothing to import.`);
+      if (skippedCount) {
+        const reasons = [
+          incompleteRows.length ? `${incompleteRows.length.toLocaleString()} with a blank phone/email or an email without @` : "",
+          duplicateIndexes.size ? `${duplicateIndexes.size.toLocaleString()} duplicates` : "",
+        ].filter(Boolean).join(" and ");
+        setNotice(`${skippedCount.toLocaleString()} row${skippedCount === 1 ? "" : "s"} skipped (${reasons}).`);
+      }
     } catch (e) { setProgress(""); setError(e instanceof Error ? e.message : "Could not read the spreadsheet."); }
     finally { setBusy(false); }
   }
@@ -150,21 +217,45 @@ export default function LeadImportPage() {
     setBusy(true); setError(""); setProgress("");
     try {
       if (!importSession.current) {
-        const { sheet } = await apiRequest<{ sheet: LeadImportSheet }>("/api/leads/imports", { body: { filename, totalRows, duplicates: skippedDuplicates } });
-        importSession.current = { sheet, offset: 0 };
+        const { sheet } = await apiRequest<{ sheet: LeadImportSheet }>("/api/leads/imports", { body: { filename, totalRows, duplicates: skippedRows } });
+        importSession.current = { sheet, offset: 0, batchIndex: 0, batchSize: IMPORT_REQUEST_BATCH_SIZE, batchLimit: MAX_IMPORT_REQUEST_BATCH_SIZE };
       }
       const session = importSession.current;
-      for (let offset = session.offset; offset < rows.length; offset += IMPORT_REQUEST_BATCH_SIZE) {
-        const batch = rows.slice(offset, offset + IMPORT_REQUEST_BATCH_SIZE);
-        const result = await apiRequest<{ imported: number; skipped: number }>("/api/leads/import", { body: { rows: batch, importId: session.sheet.id, batchIndex: offset / IMPORT_REQUEST_BATCH_SIZE } });
+      while (session.offset < rows.length) {
+        const batch = rows.slice(session.offset, session.offset + session.batchSize);
+        let result: { imported: number; skipped: number };
+        let retries = 0;
+        const started = Date.now();
+        try {
+          for (;;) {
+            try {
+              result = await apiRequest<{ imported: number; skipped: number }>("/api/leads/import", { body: { rows: batch, importId: session.sheet.id, batchIndex: session.batchIndex } });
+              break;
+            } catch (error) {
+              const transient = error instanceof TypeError || (error instanceof ApiError && [429, 502, 503, 504, 520].includes(error.status));
+              if (!transient || retries >= 3) throw error;
+              retries++;
+              setProgress(`Connection interrupted. Retrying batch ${session.batchIndex + 1} (attempt ${retries} of 3)...`);
+              await new Promise(resolve => setTimeout(resolve, 500 * 2 ** (retries - 1)));
+            }
+          }
+        } catch (error) {
+          if (!(error instanceof Error) || error.message !== "canceling statement due to statement timeout" || batch.length === 1) throw error;
+          session.batchSize = Math.floor(batch.length / 2);
+          session.batchLimit = session.batchSize;
+          setProgress(`Database timed out. Retrying with batches of ${session.batchSize.toLocaleString()} leads.`);
+          continue;
+        }
         session.sheet = { ...session.sheet, imported_rows: session.sheet.imported_rows + result.imported, duplicate_rows: session.sheet.duplicate_rows + result.skipped };
-        session.offset = offset + batch.length;
-        setProgress(`Importing: ${Math.min(offset + batch.length, rows.length).toLocaleString()} of ${rows.length.toLocaleString()} leads`);
+        session.offset += batch.length;
+        session.batchIndex++;
+        session.batchSize = nextBatchSize(batch.length, Date.now() - started, session.batchLimit);
+        setProgress(`Importing: ${session.offset.toLocaleString()} of ${rows.length.toLocaleString()} leads`);
       }
       const sheet = { ...session.sheet, status: "completed" as const };
       importSession.current = null;
-      setRows([]); setPreview([]); setPreviewCount(0); setTotalRows(0); setSkippedDuplicates(0); setProgress("");
-      const summary = `"${sheet.filename}": ${sheet.imported_rows.toLocaleString()} leads imported; ${sheet.duplicate_rows.toLocaleString()} duplicates skipped.`;
+      setRows([]); setPreview([]); setPreviewCount(0); setTotalRows(0); setSkippedRows(0); setProgress("");
+      const summary = `"${sheet.filename}": ${sheet.imported_rows.toLocaleString()} leads imported; ${sheet.duplicate_rows.toLocaleString()} rows skipped.`;
       setNotice(summary);
       try { await downloadLeadImportPdf(sheet); setNotice(`${summary} PDF summary downloaded.`); }
       catch (e) { setError(`Import completed, but the PDF could not be downloaded: ${e instanceof Error ? e.message : "Please retry from import history."}`); }
@@ -199,9 +290,9 @@ export default function LeadImportPage() {
       <label className="import-dropzone" onDragOver={event => { if (!busy && !historyAction) event.preventDefault(); }} onDrop={event => { event.preventDefault(); if (!busy && !historyAction) void readFile(event.dataTransfer.files[0]); }}>
         <input aria-label="CSV or Excel file" type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" disabled={busy || Boolean(historyAction)} onChange={event => readFile(event.target.files?.[0])} /><span className="import-upload-icon"><UploadCloud size={21} /></span><strong>{filename || "Choose a CSV or Excel .xlsx file or drag it here"}</strong><span>Up to {MAX_LEAD_IMPORT_ROWS.toLocaleString()} leads · Maximum file size 50 MB</span>
       </label>
-      <div className="import-selection"><div className="import-counts"><span><strong>{totalRows.toLocaleString()}</strong> total rows</span><span><strong>{rows.length.toLocaleString()}</strong> ready to review</span><span><strong>{skippedDuplicates.toLocaleString()}</strong> duplicates</span><span><strong>{assignedCount.toLocaleString()}</strong> assigned</span></div><button className="button button-primary" disabled={busy || !totalRows || firstUnassignedIndex >= 0 || Boolean(historyAction)} onClick={() => importRows()}>{busy ? "Processing…" : importSession.current ? "Retry import" : rows.length ? "Import validated leads" : "Save duplicate report"}</button></div>
+      <div className="import-selection"><div className="import-counts"><span><strong>{totalRows.toLocaleString()}</strong> total rows</span><span><strong>{rows.length.toLocaleString()}</strong> ready to review</span><span><strong>{skippedRows.toLocaleString()}</strong> skipped</span><span><strong>{assignedCount.toLocaleString()}</strong> assigned</span></div><button className="button button-primary" disabled={busy || !totalRows || firstUnassignedIndex >= 0 || Boolean(historyAction)} onClick={() => importRows()}>{busy ? "Processing…" : importSession.current ? "Retry import" : rows.length ? "Import validated leads" : "Save skipped-row report"}</button></div>
       {progress && <p className="import-progress" role="status">{progress}</p>}
-      <details className="import-instructions"><summary>Import format and duplicate rules</summary><p>Upload up to 200,000 leads per file (maximum 50 MB). Required columns: name, phone and email. countryCode is optional; when provided, choose a configured country code. Phone numbers may include the code with or without a + sign, or be a local number paired with countryCode. Duplicate email addresses and equivalent phone numbers are skipped automatically, including duplicates within this file. If assignee is blank, choose an owner for that lead before importing. Assignee accepts an active user&apos;s email or full name. Notes are added to each lead&apos;s Notes timeline. The sample includes two example rows with a value or format for every column; delete both sample rows before importing your own leads. Custom fields use custom:Field name headers from the template. Follow-up timestamps require an explicit timezone (for example, 2026-12-02T10:00:00+05:30). Excel uploads read the first worksheet from an .xlsx workbook.</p><p>Any validation failure rejects the entire batch. Imports use active database stages.</p></details>
+      <details className="import-instructions"><summary>Import format and duplicate rules</summary><p>Upload up to 200,000 leads per file (maximum 50 MB). Required columns: name, phone and email. Rows with an empty phone/email or an email without @ are skipped automatically. Any non-empty email containing @ is accepted. Duplicate email addresses and equivalent phone numbers are skipped automatically, including duplicates within this file. Blank optional fields in other columns are accepted. countryCode is optional; when provided, choose a configured country code. Phone numbers may include the code with or without a + sign, or be a local number paired with countryCode. If assignee is blank, choose an owner for that lead before importing. Assignee accepts an active user&apos;s email or full name. Notes are added to each lead&apos;s Notes timeline. The sample includes two example rows with a value or format for every column; delete both sample rows before importing your own leads. Custom fields use custom:Field name headers from the template. Follow-up timestamps require an explicit timezone (for example, 2026-12-02T10:00:00+05:30). Excel uploads read the first worksheet from an .xlsx workbook.</p><p>Imports are saved in batches. Temporary connection errors are retried automatically, and database statement timeouts are retried with smaller batches. If retries fail, use Retry import without leaving this page. Any validation failure rejects the affected batch. Imports use active database stages.</p></details>
     </div></section>
     {preview.length > 0 && <div className={`import-review${firstUnassignedIndex >= 0 ? " has-assignment" : ""}`}>
       {firstUnassignedIndex >= 0 && <section className="panel import-assignment" aria-label="Assign lead owners"><div className="import-section-heading"><Users size={17} /><h2>Assign lead owner</h2><span className="import-pending-count">{unassignedCount.toLocaleString()} pending</span></div><div className="import-assignment-body"><div className="import-lead-identity"><strong>{String(rows[firstUnassignedIndex].name ?? `Row ${firstUnassignedIndex + 2}`)}</strong><span>{String(rows[firstUnassignedIndex].email ?? "")}</span><span>{String(rows[firstUnassignedIndex].phone ?? "")}</span></div><label className="form-field"><span>Assign to</span><select aria-label={`Assign ${String(rows[firstUnassignedIndex].name ?? `row ${firstUnassignedIndex + 2}`)}`} value={assignmentChoice} disabled={busy} onChange={event => setAssignmentChoice(event.target.value)}><option value="">Choose an active lead owner</option>{availableAssignees.map(profile => <option key={profile.id} value={profile.id}>{profile.fullName} · {profile.email}</option>)}</select></label>{unassignedCount > 1 && <label className="import-assign-all"><input type="checkbox" checked={assignAll} disabled={busy} onChange={event => setAssignAll(event.target.checked)} />Apply to all {unassignedCount.toLocaleString()} unassigned leads</label>}<button className="button button-primary" disabled={busy || !assignmentChoice} onClick={() => { setRows(current => current.map((row, index) => index === firstUnassignedIndex || (assignAll && !row.assigneeId) ? { ...row, assigneeId: assignmentChoice } : row)); setAssignmentChoice(""); }}>Assign and continue</button></div></section>}
@@ -209,10 +300,10 @@ export default function LeadImportPage() {
     </div>}
     <section className="panel imported-files-panel"><div className="import-section-heading"><FileSpreadsheet size={17} /><h2>Import history</h2><span>{historyTotal.toLocaleString()} sheets</span><button className="button button-secondary" disabled={historyLoading || busy || Boolean(historyAction)} onClick={() => void loadHistory(historyOffset).catch(e => setHistoryError(e instanceof Error ? e.message : "Could not load import history."))}>Refresh</button></div>
       {historyError && <p className="helper-banner" role="alert">{historyError}</p>}
-      {deleteSheet && <div className="import-delete-confirm" role="alertdialog" aria-modal="false" aria-labelledby="delete-import-title" aria-describedby="delete-import-description"><strong id="delete-import-title">Delete {deleteSheet.filename}?</strong><p id="delete-import-description">This removes the sheet and all {deleteSheet.imported_rows.toLocaleString()} leads it created from the CRM, including reassigned leads. Existing duplicate leads are not affected. Audit history is retained.</p><div><button className="button button-secondary" disabled={Boolean(historyAction)} onClick={() => setDeleteSheet(null)}>Cancel</button><button className="button button-danger" disabled={busy || Boolean(historyAction)} onClick={() => void removeSheet(deleteSheet)}>Delete sheet and leads</button></div></div>}
-      {historyLoading ? <p className="import-empty" role="status">Loading import history…</p> : sheets.length ? <div className="imported-file-list">{sheets.map(sheet => <div className="imported-file-row" key={sheet.id}><span className="imported-file-icon"><FileSpreadsheet size={18} /></span><div className="imported-file-details"><strong title={sheet.filename}>{sheet.filename}</strong><span>{formatDateTime(sheet.created_at)} · {sheet.status === "completed" ? "Completed" : "Incomplete"}</span><div className="import-counts"><span>{sheet.total_rows.toLocaleString()} total</span><span className="import-ready">{sheet.imported_rows.toLocaleString()} imported</span><span>{sheet.duplicate_rows.toLocaleString()} duplicates</span>{sheet.total_rows > sheet.imported_rows + sheet.duplicate_rows && <span>{(sheet.total_rows - sheet.imported_rows - sheet.duplicate_rows).toLocaleString()} not processed</span>}</div></div><button className="button button-secondary" aria-label={`Download PDF for ${sheet.filename}`} disabled={busy || Boolean(historyAction)} onClick={() => void report(sheet)}><Download size={14} />PDF</button>{canDelete && <button className="button button-secondary" aria-label={`Delete ${sheet.filename} and its imported leads`} disabled={busy || Boolean(historyAction)} onClick={() => setDeleteSheet(sheet)}><Trash2 size={14} />Delete</button>}</div>)}</div> : <p className="import-empty">No saved imports yet. New imports appear here with their sheet name and counts.</p>}
+      {deleteSheet && <div className="import-delete-confirm" role="alertdialog" aria-modal="false" aria-labelledby="delete-import-title" aria-describedby="delete-import-description"><strong id="delete-import-title">Delete {deleteSheet.filename}?</strong><p id="delete-import-description">This removes the sheet and all {deleteSheet.imported_rows.toLocaleString()} leads it created from the CRM, including reassigned leads. Existing duplicate leads are not affected. Audit history is retained. Deletion is saved in batches and can be resumed if interrupted.</p>{deleteProgress && <p role="status">{deleteProgress}</p>}<div><button className="button button-secondary" disabled={Boolean(historyAction)} onClick={() => setDeleteSheet(null)}>Cancel</button><button className="button button-danger" disabled={busy || Boolean(historyAction)} onClick={() => void removeSheet(deleteSheet)}>Delete sheet and leads</button></div></div>}
+      {historyLoading ? <p className="import-empty" role="status">Loading import history…</p> : sheets.length ? <div className="imported-file-list">{sheets.map(sheet => <div className="imported-file-row" key={sheet.id}><span className="imported-file-icon"><FileSpreadsheet size={18} /></span><div className="imported-file-details"><strong title={sheet.filename}>{sheet.filename}</strong><span>{formatDateTime(sheet.created_at)} · {sheet.status === "completed" ? "Completed" : sheet.status === "deleting" ? "Deletion incomplete" : "Incomplete"}</span><div className="import-counts"><span>{sheet.total_rows.toLocaleString()} total</span><span className="import-ready">{sheet.imported_rows.toLocaleString()} imported</span><span>{sheet.duplicate_rows.toLocaleString()} skipped</span>{sheet.total_rows > sheet.imported_rows + sheet.duplicate_rows && <span>{(sheet.total_rows - sheet.imported_rows - sheet.duplicate_rows).toLocaleString()} not processed</span>}</div></div><button className="button button-secondary" aria-label={`Download PDF for ${sheet.filename}`} disabled={busy || Boolean(historyAction)} onClick={() => void report(sheet)}><Download size={14} />PDF</button>{canDelete && <button className="button button-secondary" aria-label={`Delete ${sheet.filename} and its imported leads`} disabled={busy || Boolean(historyAction)} onClick={() => setDeleteSheet(sheet)}><Trash2 size={14} />{sheet.status === "deleting" ? "Resume deletion" : "Delete"}</button>}</div>)}</div> : <p className="import-empty">No saved imports yet. New imports appear here with their sheet name and counts.</p>}
       {historyTotal > 20 && <div className="import-history-pagination"><button className="button button-secondary" disabled={historyOffset === 0 || historyLoading || busy || Boolean(historyAction)} onClick={() => void loadHistory(Math.max(0, historyOffset - 20)).catch(e => setHistoryError(e instanceof Error ? e.message : "Could not load import history."))}>Previous</button><span>{historyOffset + 1}–{Math.min(historyOffset + 20, historyTotal)} of {historyTotal}</span><button className="button button-secondary" disabled={historyOffset + 20 >= historyTotal || historyLoading || busy || Boolean(historyAction)} onClick={() => void loadHistory(historyOffset + 20).catch(e => setHistoryError(e instanceof Error ? e.message : "Could not load import history."))}>Next</button></div>}
-      <p className="import-storage-note">History tracks new imports only. Sheet names and counts are saved, not the original files. PDF counts include duplicates skipped during preview and import.</p>
+      <p className="import-storage-note">History tracks new imports only. Sheet names and counts are saved, not the original files. PDF counts include duplicate and incomplete-contact rows skipped during preview and import.</p>
     </section>
   </div>;
 }

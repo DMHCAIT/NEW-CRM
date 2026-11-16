@@ -218,8 +218,8 @@ test("saving preserves the CRM invoice and returns a warning when automatic emai
   assert.match(result.data.warning, /automatic delivery failed: SMTP unavailable/);
 });
 test("discount approval sends the issued invoice without a second email action", async () => {
-  const { detail, calls } = fixture({ role: "admin",
-    singleInvoice: { id: leadId, lead_id: leadId, status: "pending_approval" },
+  const { detail, calls } = fixture({ role: "super_admin",
+    singleInvoice: { id: leadId, lead_id: leadId, status: "pending_approval", discount_percent: 10 },
     issuedInvoice: { id: leadId, lead_id: leadId, status: "sent", creator_email: "creator@example.com" } });
   const result = await detail.PATCH(new Request(`https://crm.example/api/invoices/${leadId}`, {
     method: "PATCH", body: JSON.stringify({ action: "approve" }),
@@ -270,8 +270,8 @@ test("saving today's installments attempts targeted delivery and preserves saved
 });
 
 test("approving a scheduled enrollment sends eligible installments without sending unrelated invoices", async () => {
-  const { detail, calls } = fixture({ role: "admin", invoiceRows: [{ id: "child" }],
-    singleInvoice: { id: leadId, status: "pending_approval", lead_id: leadId },
+  const { detail, calls } = fixture({ role: "super_admin", invoiceRows: [{ id: "child" }],
+    singleInvoice: { id: leadId, status: "pending_approval", lead_id: leadId, discount_percent: 10 },
     issuedInvoice: { id: leadId, status: "scheduled", lead_id: leadId },
     deliveries: [{ id: leadId, sent: true }],
   });
@@ -284,9 +284,9 @@ test("approving a scheduled enrollment sends eligible installments without sendi
 });
 
 test("closing an expired unapproved enrollment rejects its single approval and cancels future installments", async () => {
-  const { detail, calls } = fixture({ role: "admin", singleInvoice: {
+  const { detail, calls } = fixture({ role: "super_admin", singleInvoice: {
     id: leadId, status: "pending_approval", scheduled_for: "2020-01-01T03:30:00Z",
-    parent_invoice_id: null, payment_expires_at: "2020-01-05T03:30:00Z",
+    parent_invoice_id: null, payment_expires_at: "2020-01-05T03:30:00Z", discount_percent: 10,
   } });
   const result = await detail.PATCH(new Request(`https://crm.example/api/invoices/${leadId}`, {
     method: "PATCH", body: JSON.stringify({ action: "close_expired" }),
@@ -294,6 +294,49 @@ test("closing an expired unapproved enrollment rejects its single approval and c
   assert.equal(result.status, 200);
   assert.match(result.data.message, /scheduled installments cancelled/);
   assert.equal(calls.find(call => call[0] === "rpc")[2].p_decision, "rejected");
+});
+
+test("discount decisions require Super Admin even when other roles hold invoices.approve", async () => {
+  for (const role of ["counselor", "team_lead", "manager", "admin"]) {
+    for (const action of ["approve", "reject", "close_expired"]) {
+      const { detail, calls } = fixture({ role, singleInvoice: {
+        id: leadId, lead_id: leadId, status: "pending_approval", discount_percent: 10,
+        scheduled_for: "2020-01-01T03:30:00Z", payment_expires_at: "2020-01-05T03:30:00Z",
+      } });
+      const response = await detail.PATCH(new Request(`https://crm.example/api/invoices/${leadId}`, {
+        method: "PATCH", body: JSON.stringify({ action }),
+      }), { params: Promise.resolve({ id: leadId }) });
+      assert.equal(response.status, 403, `${role}: ${action}`);
+      assert.equal(calls.some(call => ["rpc", "deliverInvoice", "deliverScheduled", "cancelLinks"].includes(call[0])), false);
+    }
+  }
+  const { detail } = fixture({ role: "admin", singleInvoice: {
+    id: leadId, lead_id: leadId, status: "pending_approval", discount_percent: 0,
+  }, issuedInvoice: { id: leadId, lead_id: leadId, status: "sent" } });
+  const response = await detail.PATCH(new Request(`https://crm.example/api/invoices/${leadId}`, {
+    method: "PATCH", body: JSON.stringify({ action: "approve" }),
+  }), { params: Promise.resolve({ id: leadId }) });
+  assert.equal(response.status, 200, "non-discount finance approvals retain admin access");
+});
+
+test("counselors team leads and managers can create INR and USD invoices without discount decision access", async () => {
+  const invoiceSchema = load("src\\lib\\server\\operational-validation.ts", {}).invoiceInput;
+  for (const role of ["counselor", "team_lead", "manager"]) {
+    for (const currency of ["INR", "USD"]) {
+      const { route, calls } = fixture({ role, invoiceSchema, singleInvoice: { id: "new-invoice", lead_id: leadId, status: "sent" } });
+      const result = await route.POST(new Request("https://crm.example/api/invoices", { method: "POST",
+        body: JSON.stringify({ lead_id: leadId, course_id: leadId, company_code: "DMHCA", currency,
+          billing_address: "Lead address", due_date: "2027-01-05", discount_percent: 0 }),
+      }));
+      assert.equal(result.status, 201, `${role}: ${currency}`);
+      assert.equal(calls.find(call => call[0] === "rpc")[2].p_input.currency, currency);
+      const snapshot = await route.GET(new Request(`https://crm.example/api/invoices?leadId=${leadId}`));
+      assert.equal(snapshot.data.canCreate, true);
+      assert.equal(snapshot.data.canApproveDiscount, false);
+    }
+  }
+  const { route } = fixture({ role: "super_admin" });
+  assert.equal((await route.GET(new Request("https://crm.example/api/invoices"))).data.canApproveDiscount, true);
 });
 
 test("course schedules and balances group only the original enrollment and retain fully paid courses", async () => {

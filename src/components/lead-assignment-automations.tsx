@@ -5,7 +5,7 @@ import { apiRequest, errorMessage } from "@/lib/crm-data";
 import { Check, LoaderCircle, RotateCw, Save } from "lucide-react";
 import { SearchableDropdown } from "@/components/searchable-dropdown";
 
-type RuleKey = "facebook" | "website" | "junk" | "not_interested" | "closed_won";
+type RuleKey = "facebook" | "website" | "junk" | "not_interested" | "closed_won" | "cold";
 type Strategy = "single" | "round_robin";
 type AssignmentRule = { rule_key: RuleKey; enabled: boolean; strategy: Strategy; owner_ids: string[]; next_owner_index: number };
 type AssignmentUser = { id: string; full_name: string; active: boolean };
@@ -17,6 +17,7 @@ const definitions: { key: RuleKey; title: string; description: string; rotating:
   { key: "junk", title: "Junk stage", description: "Reassign a lead whenever it enters the Junk stage.", rotating: false },
   { key: "not_interested", title: "Not Interested stage", description: "Reassign a lead whenever it enters the Not Interested stage.", rotating: false },
   { key: "closed_won", title: "Closed Won stage", description: "Reassign a lead whenever it enters the Closed Won stage.", rotating: false },
+  { key: "cold", title: "Cold stage", description: "Reassign a lead whenever it enters the Cold stage.", rotating: false },
 ];
 
 export function LeadAssignmentAutomations() {

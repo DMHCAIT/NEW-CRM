@@ -5,7 +5,7 @@ import { checkOrigin } from "@/lib/server/login";
 import { getSupabaseAdminClient } from "@/lib/supabase/server";
 import { databaseError, parseInput } from "@/lib/server/operational";
 
-const ruleKeys = ["facebook", "website", "junk", "not_interested", "closed_won"] as const;
+const ruleKeys = ["facebook", "website", "junk", "not_interested", "closed_won", "cold"] as const;
 const assignmentSchema = z.object({
   rule_key: z.enum(ruleKeys),
   enabled: z.boolean(),

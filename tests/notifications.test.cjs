@@ -317,6 +317,7 @@ test("notification bell refreshes automatically, suppresses overlapping/hidden r
     addEventListener: (key, callback) => listeners.set(key, callback), removeEventListener: key => listeners.delete(key),
   };
   const { NotificationBell } = load("src\\components\\notification-bell.tsx", {
+    "@/components/call-reminder-popups": { useCallReminders: () => null },
     react: { ...React, useEffect: effect => effects.push(effect), useState: initial => {
       const key = index++; if (!(key in states)) states[key] = initial;
       return [states[key], value => { states[key] = value; }];
@@ -343,4 +344,215 @@ test("notification bell refreshes automatically, suppresses overlapping/hidden r
   cleanup();
   assert.equal(timers.has("interval"), false);
   assert.equal(writeListener, null);
+});
+
+function reminderHarness() {
+  const states = [], refs = [], effects = [], requests = [], destinations = [];
+  let stateIndex = 0, refIndex = 0, pathname = "/leads", fail = false;
+  const { CallReminderProvider } = load("src\\components\\call-reminder-popups.tsx", {
+    react: { ...React, useEffect: (effect, deps) => effects.push({ effect, deps }),
+      useRef(initial) { const key = refIndex++; return refs[key] ?? (refs[key] = { current: initial }); },
+      useCallback: callback => callback,
+      useState(initial) {
+        const key = stateIndex++;
+        if (!(key in states)) states[key] = initial;
+        return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }];
+      },
+    },
+    "next/navigation": { usePathname: () => pathname, useRouter: () => ({ push: path => destinations.push(path) }) },
+    "@/lib/crm-data": { apiRequest: async (path, options) => {
+      requests.push({ path, options });
+      if (fail) throw new Error("Reminder save failed");
+    }, errorMessage: error => error.message },
+  }, { window: { dispatchEvent() {} } });
+  function render() {
+    stateIndex = 0; refIndex = 0; effects.length = 0;
+    return CallReminderProvider({ children: null });
+  }
+  const context = () => render().props.value;
+  const windowProps = () => render().props.children[1].props;
+  function openRoute(path) {
+    pathname = path; render();
+    effects[1].effect();
+  }
+  return { context, windowProps, openRoute, requests, destinations, fail: value => { fail = value; } };
+}
+
+test("due-call popup stays visible on lead opening and clears only confirmed updates or X", async () => {
+  const h = reminderHarness();
+  const rows = Array.from({ length: 3 }, (_, index) => ({
+    id: `reminder-${index}`, lead_id: `31000000-0000-4000-8000-00000000000${index + 1}`,
+    type: "call_due", payload: { message: `Call ${index + 1}` }, is_read: false, created_at: "2026-11-16T08:30:00Z",
+  }));
+  h.context().receive({ notifications: [...rows, { ...rows[0], id: "assignment", type: "lead_assigned" },
+    { ...rows[0], id: "read", is_read: true }, { ...rows[0], id: "invalid", lead_id: "bad" }], unread: 6 });
+  assert.equal(h.windowProps().reminders.length, 3);
+  h.openRoute("/reports");
+  assert.equal(h.context().reminders.length, 3, "unrelated navigation must not dismiss popups");
+  h.context().open(rows[0]);
+  assert.equal(h.context().queueActive, true);
+  assert.deepEqual(h.destinations, [`/leads/${rows[0].lead_id}`]);
+  assert.equal(h.requests.length, 0);
+  h.openRoute(h.destinations[0]);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.requests.length, 0, "opening the lead must not mark its reminder read");
+  assert.equal(h.context().reminders.length, 3);
+  assert.deepEqual(h.context().openedReminderIds, [rows[0].id]);
+  h.context().open(rows[0]);
+  assert.equal(h.requests.length, 0, "clicking a popup for the already-open lead must not dismiss it");
+  h.context().receive({ notifications: rows, unread: 3 });
+  assert.equal(h.context().reminders.length, 3, "polling must keep an opened lead's reminder visible");
+  h.context().receive({ notifications: rows.slice(1), unread: 2 });
+  assert.deepEqual(h.context().reminders.map(row => row.id), ["reminder-1", "reminder-2"], "a confirmed update clears only that lead");
+  h.windowProps().dismiss(rows[1]);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(h.requests[0], { path: "/api/notifications", options: { method: "PATCH", body: { id: rows[1].id } } });
+  assert.deepEqual(h.context().reminders.map(row => row.id), ["reminder-2"]);
+  h.context().receive({ notifications: rows.slice(1), unread: 2 });
+  assert.deepEqual(h.context().reminders.map(row => row.id), ["reminder-2"], "old snapshots cannot recreate confirmed X dismissals");
+  h.context().receive({ notifications: [], unread: 0 });
+  assert.equal(h.windowProps().reminders.length, 0, "confirmed database lead changes clear popups");
+  h.openRoute("/leads");
+  assert.equal(h.context().queueActive, false, "leaving details restores filtered Next navigation");
+  assert.deepEqual(h.context().openedReminderIds, []);
+});
+
+test("failed popup dismissal remains actionable without automatic retries, including multiple calls on one lead", async () => {
+  const h = reminderHarness();
+  const rows = [0, 1].map(index => ({ id: `call-${index}`, lead_id: id, type: "call_due", payload: null,
+    is_read: false, created_at: "2026-11-16T08:30:00Z" }));
+  h.context().receive({ notifications: rows, unread: 2 });
+  h.fail(true);
+  h.openRoute(`/leads/${id}`);
+  h.context().open(rows[0]);
+  assert.deepEqual(h.context().openedReminderIds, rows.map(row => row.id), "Next must skip every call reminder for the opened lead");
+  assert.equal(h.requests.length, 0, "opening a lead with multiple reminders must not dismiss any of them");
+  h.windowProps().dismiss(rows[0]);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.requests.length, 1);
+  assert.equal(h.context().reminders.length, 2);
+  assert.equal(h.windowProps().error, "Reminder save failed");
+  h.openRoute(`/leads/${id}`);
+  assert.equal(h.requests.length, 1, "failures must not cause a write/render loop");
+  h.fail(false);
+  h.windowProps().dismiss(rows[0]);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.context().reminders.length, 1, "X retries a failed dismissal");
+  h.context().receive({ notifications: [], unread: 0 });
+  assert.equal(h.windowProps().error, "", "a confirmed lead change must also clear stale dismissal errors");
+});
+
+test("bell forwards due-call snapshots to popups and ignores reads overtaken by a completed write", async () => {
+  const effects = [], requests = [], snapshots = [];
+  let completed;
+  const { NotificationBell } = load("src\\components\\notification-bell.tsx", {
+    react: { ...React, useState: initial => [initial, () => {}], useEffect: effect => effects.push(effect) },
+    "next/link": { __esModule: true, default: () => null },
+    "next/navigation": { usePathname: () => "/leads" },
+    "@/components/call-reminder-popups": { useCallReminders: () => ({ receive: snapshot => snapshots.push(snapshot) }) },
+    "@/lib/crm-data": { apiRequest: () => new Promise(resolve => requests.push(resolve)), errorMessage: error => error.message,
+      subscribeApiWrites: callback => { completed = callback; return () => {}; } },
+  }, {
+    window: { setInterval: () => 1, clearInterval() {}, addEventListener() {}, removeEventListener() {} },
+    document: { visibilityState: "visible", addEventListener() {}, removeEventListener() {} },
+  });
+  NotificationBell({ userId: "owner" });
+  const cleanup = effects[0]();
+  completed();
+  requests[1]({ notifications: [], unread: 0 });
+  await new Promise(resolve => setImmediate(resolve));
+  requests[0]({ notifications: [{ id }], unread: 1 });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(snapshots, [{ notifications: [], unread: 0 }]);
+  cleanup();
+});
+
+test("Next visits pending popup leads rather than filters, excludes the current lead, and respects saves", async () => {
+  const rows = [1, 2, 3].map(index => ({ id: `reminder-${index}`, lead_id: `31000000-0000-4000-8000-00000000000${index}`,
+    type: "call_due", payload: null, is_read: false, created_at: "2026-11-16T08:30:00Z" }));
+  const opened = [];
+  let saving = false, current = rows[0].lead_id;
+  const queue = { queueActive: true, reminders: rows, openedReminderIds: [rows[0].id], open: row => {
+    opened.push(row.lead_id); current = row.lead_id; queue.openedReminderIds.push(row.id);
+  } };
+  const states = [];
+  let index = 0;
+  const { NextLeadButton } = load("src\\components\\next-lead-button.tsx", {
+    react: { ...React, useEffect() {}, useRef: initial => ({ current: initial }),
+      useState(initial) {
+        const key = index++;
+        if (!(key in states)) states[key] = initial;
+        return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }];
+      },
+    },
+    "next/navigation": { useRouter: () => ({ push: () => assert.fail("Reminder Next must use the popup queue") }) },
+    "@/components/lead-filter-state": { useLeadNavigation: () => null },
+    "@/components/call-reminder-popups": { useCallReminders: () => queue },
+    "@/lib/live-leads-client": {},
+    "@/lib/crm-data": { apiRequest: () => assert.fail("Do not query filtered leads for reminder navigation") },
+  });
+  function collect(node) {
+    if (Array.isArray(node)) return node.flatMap(collect);
+    if (!node?.props) return [];
+    return [node, ...collect(node.props.children)];
+  }
+  const render = () => { index = 0; return collect(NextLeadButton({ lead: { id: current }, disabled: false, isSaving: () => saving })); };
+  const button = () => render().find(node => node.type === "button");
+  saving = true;
+  button().props.onClick();
+  assert.equal(opened.length, 0);
+  assert.ok(render().some(node => node.props.role === "alert"));
+  saving = false;
+  button().props.onClick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(opened, [rows[1].lead_id], "skip the current popup without dismissing its reminder");
+  button().props.onClick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(opened, [rows[1].lead_id, rows[2].lead_id]);
+  assert.equal(queue.reminders.length, 3, "opened reminders remain visible while Next advances");
+  assert.equal(button().props.disabled, true);
+  assert.ok(render().some(node => node.props.role === "status" && node.props.children === "No more call reminder leads."));
+  queue.reminders = [{ ...rows[0], id: "new-reminder" }];
+  assert.equal(button().props.disabled, false, "new due calls reactivate reminder Next");
+});
+
+test("call popup uses a narrower width and keeps its controls within desktop and mobile viewports", async () => {
+  const { chromium } = require("playwright-core");
+  const { CallReminderProvider } = load("src\\components\\call-reminder-popups.tsx", {
+    react: { ...React, useEffect() {}, useLayoutEffect() {}, useRef: initial => ({ current: initial }),
+      useCallback: callback => callback, useState: initial => [initial === false ? true : initial, () => {}] },
+    "react-dom": { createPortal: content => content },
+    "next/navigation": { usePathname: () => "/leads", useRouter: () => ({ push() {} }) },
+    "@/lib/crm-data": { formatDateTime: value => value },
+  }, { document: { body: {} } });
+  const windowElement = CallReminderProvider({ children: null }).props.children[1];
+  const html = renderToStaticMarkup(windowElement.type({
+    ...windowElement.props,
+    reminders: [1, 2, 3].map(index => ({ id: `call-${index}`, type: "call_due", is_read: false, lead_id: id,
+      payload: { message: `Scheduled call is due - Long lead name ${index}` }, created_at: "2026-11-16T08:30:00Z" })),
+  }));
+  const css = readFileSync(path.join(__dirname, "..", "src", "app", "globals.css"), "utf8");
+  const browser = await chromium.launch({ channel: "msedge", headless: true });
+  try {
+    for (const viewport of [{ width: 1400, height: 900 }, { width: 390, height: 640 }, { width: 280, height: 480 }]) {
+      const page = await browser.newPage({ viewport });
+      try {
+        await page.setContent(`<style>${css}</style>${html}`);
+        const result = await page.evaluate(() => {
+          const popup = document.querySelector(".call-reminder-popup");
+          const bounds = popup.getBoundingClientRect();
+          return { width: bounds.width, left: bounds.left, right: bounds.right,
+            overflow: popup.scrollWidth > popup.clientWidth,
+            controlsFit: [...popup.querySelectorAll(".call-reminder-dismiss")].every(button => {
+              const control = button.getBoundingClientRect();
+              return control.left >= bounds.left && control.right <= bounds.right;
+            }) };
+        });
+        assert.equal(result.width, Math.min(320, viewport.width - 16));
+        assert.ok(result.left >= 8 && result.right <= viewport.width - 8, JSON.stringify({ viewport, result }));
+        assert.equal(result.overflow, false);
+        assert.equal(result.controlsFit, true);
+      } finally { await page.close(); }
+    }
+  } finally { await browser.close(); }
 });

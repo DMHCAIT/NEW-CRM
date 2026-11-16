@@ -10,7 +10,9 @@ function load(file, dependencies = {}, globals = {}) {
   vm.runInNewContext(ts.transpileModule(readFileSync(join(__dirname,"..",file),"utf8"), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021 },
   }).outputText, { exports, URL, URLSearchParams, TextEncoder, ReadableStream, Response, console,
-    require: name => name in dependencies ? dependencies[name] : require(name), ...globals });
+    require: name => name in dependencies ? dependencies[name]
+      : name === "@/lib/server/lead-list" ? load("src\\lib\\server\\lead-list.ts", dependencies)
+      : require(name), ...globals });
   return exports;
 }
 class HttpError extends Error { constructor(status,message) { super(message); this.status = status; } }
@@ -189,6 +191,54 @@ test("pipeline starts stage pages before slow profiles finish and never reads un
   assert.equal("configuration" in data, false);
   assert.equal("filters" in data, false);
   assert.equal("columns" in data, false);
+});
+
+test("shared lead list loader bounds records, scopes preferences to the actor and reports metadata failures", async () => {
+  const scopes = [];
+  const actor = { id: "actor" };
+  let reads = 0, invalidFilter = false, columnError = null;
+  const client = { from: table => {
+    assert.ok(["saved_filters", "user_columns"].includes(table));
+    const chain = {
+      select: () => chain,
+      eq(key, value) { scopes.push({ table, key, value }); return chain; },
+      order: async () => ({ data: [{ id: "saved", name: "Saved", filter_json: invalidFilter ? {} : base().filter, pinned_to_dashboard: false }], error: null }),
+      maybeSingle: async () => ({ data: { columns_json: ["name"] }, error: columnError }),
+    };
+    return chain;
+  } };
+  const query = base();
+  const { fetchLeadListData } = load("src\\lib\\server\\lead-list.ts", {
+    "@/lib/crm-data": {
+      fetchStages: async supabase => { assert.equal(supabase, client); return []; },
+      fetchProfiles: async supabase => { assert.equal(supabase, client); return []; },
+    },
+    "@/lib/lead-filters": filters, "@/lib/server/auth": auth,
+    "@/lib/live-leads": { dbError, fetchLeadConfiguration: async supabase => { assert.equal(supabase, client); return { fields: [] }; } },
+    "@/lib/server/lead-query": { fetchLeadPage: async (supabase, actualQuery, size) => {
+      reads++;
+      assert.equal(supabase, client);
+      assert.equal(actualQuery, query);
+      assert.equal(size, 100);
+      return { leads: [{ id: "accessible-lead" }], hasMore: false, nextCursor: null };
+    } },
+  });
+  const result = await fetchLeadListData(client, actor, query, 100);
+  assert.equal(result.leads[0].id, "accessible-lead");
+  assert.equal(result.user, actor);
+  assert.deepEqual(normalized(result.columns), ["name"]);
+  assert.deepEqual(scopes, [
+    { table: "saved_filters", key: "owner_id", value: actor.id },
+    { table: "user_columns", key: "user_id", value: actor.id },
+    { table: "user_columns", key: "view_name", value: "leads" },
+  ]);
+  assert.equal((await fetchLeadListData(client, actor, query, 100, true)).leads.length, 0);
+  assert.equal(reads, 1, "metadata-only reads must still avoid querying records");
+  invalidFilter = true;
+  await assert.rejects(fetchLeadListData(client, actor, query, 100), /invalid configuration/);
+  invalidFilter = false;
+  columnError = { message: "Preferences unavailable" };
+  await assert.rejects(fetchLeadListData(client, actor, query, 100), /Preferences unavailable/);
 });
 
 test("new/import metadata requests never invoke the lead query", async () => {

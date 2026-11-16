@@ -53,7 +53,7 @@ export const leadInput = z.object({
   phone: z.string().trim().min(7).max(30).refine((v) => /^\+?[\d\s().-]+$/.test(v) && v.replace(/\D/g, "").length >= 7, "Invalid phone"),
   countryCode: z.string().trim().max(160).optional().default(""),
   altPhone: z.string().trim().max(30).optional().default(""),
-  email: z.union([z.literal(""), z.string().trim().email().max(254)]).optional().default(""),
+  email: z.string().trim().max(254).refine(value => !value || value.includes("@"), "Invalid email").optional().default(""),
   country: z.string().trim().max(100).optional().default(""),
   billingAddress: z.string().trim().max(2000).optional().default(""),
   course: z.string().trim().max(200).optional().default(""),
@@ -110,7 +110,17 @@ export function uuid(value: string) {
 }
 
 export function dbError(error: { message: string } | null) {
-  if (error) throw new HttpError(400, error.message);
+  if (error) {
+    if (/^\s*(?:<!doctype html|<html\b)/i.test(error.message)) {
+      console.error("Database service returned an unexpected HTML error response.");
+      throw new HttpError(503, "The database service is temporarily unavailable. Please retry.");
+    }
+    if (/\b(?:fetch failed|networkerror|network request failed|econnreset|etimedout|enotfound)\b/i.test(error.message)) {
+      console.error("Database request failed:", error.message);
+      throw new HttpError(503, "The database connection is temporarily unavailable. Please retry.");
+    }
+    throw new HttpError(400, error.message);
+  }
 }
 
 export function validateCustomFields(fields: Record<string, string>, config: LeadConfiguration, previous: Record<string, string> = {}) {

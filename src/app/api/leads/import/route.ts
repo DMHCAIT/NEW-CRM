@@ -36,14 +36,22 @@ export async function POST(request: Request) {
       } catch (error) { throw new HttpError(400, `Row ${index + 2}: ${error instanceof Error ? error.message : "Invalid lead"}`); }
     });
     if (body.checkOnly) {
-      const { data, error } = await supabase.rpc("find_live_lead_import_duplicates", { rows_json: rows });
+      const { data, error, status } = await supabase.rpc("find_live_lead_import_duplicates", { rows_json: rows });
+      if (error && status >= 500 && error.code !== "57014") {
+        console.error("Lead import duplicate check failed", { status, code: error.code });
+        throw new HttpError(503, "The database service is temporarily unavailable. Please retry.");
+      }
       dbError(error);
       if (!Array.isArray(data) || data.some(index => !Number.isInteger(index) || index < 0 || index >= rows.length)) throw new HttpError(500, "Duplicate check returned an invalid result.");
       return NextResponse.json({ duplicates: data });
     }
-    const { data, error } = importId
+    const { data, error, status } = importId
       ? await supabase.rpc("import_live_lead_sheet_batch", { sheet_id: importId, batch_index: body.batchIndex, rows_json: rows })
       : await supabase.rpc("import_live_leads", { rows_json: rows });
+    if (error && status >= 500 && error.code !== "57014") {
+      console.error("Lead import batch failed", { status, code: error.code });
+      throw new HttpError(503, "The database service is temporarily unavailable. Please retry.");
+    }
     dbError(error);
     if (!data || typeof data !== "object" || !("imported" in data) || !("skipped" in data)
       || !Number.isInteger(data.imported) || !Number.isInteger(data.skipped)

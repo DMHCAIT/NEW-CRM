@@ -3,6 +3,7 @@ import type { CurrentUser } from "@/lib/types";
 
 export function sectionReadPaths(href: string, user: CurrentUser) {
   const params = new URLSearchParams({ timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
+  if (href === "/leads") params.set("pageSize", "100");
   if (href === "/pipeline") params.set("view", "pipeline");
   if (href === "/leads" || href === "/pipeline") return [`/api/leads?${params}`];
   const paths: Record<string, string[]> = {

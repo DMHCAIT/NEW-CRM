@@ -73,7 +73,7 @@ async function sendInvoice(admin: SupabaseClient, invoice: InvoiceRow, lead: Lea
   if (!lead.email || !isEmail(lead.email)) throw new HttpError(400, "Set a valid email address on the lead first.");
   const smtp = await integrationStatus("smtp", integrationRequirements.smtp);
   if (invoice.email_message_id) throw new HttpError(409, "Invoice email was already accepted by SMTP.");
-  const cc = await deliveryRecipients(admin, invoice, lead.email, creatorEmail);
+  const cc = invoiceRecipients(lead.email, ...await deliveryRecipients(admin, invoice, creatorEmail), "sales@dmhca.in");
   const emailLock = new Date().toISOString();
   const { data: emailClaim, error: emailClaimError } = await admin.from("invoices").update({ email_lock_at: emailLock })
     .eq("id", invoice.id).eq("status", "sent").is("email_lock_at", null).select("id").maybeSingle();
@@ -196,7 +196,7 @@ export async function sendPaymentReceipt(admin: SupabaseClient, invoiceId: strin
   if (!lead?.email || !isEmail(lead.email)) throw new Error("Payment recorded, but receipt email could not be sent: lead email is missing or invalid.");
   const smtp = await integrationStatus("smtp", integrationRequirements.smtp);
   if (!smtp.configured) throw new Error(`Payment recorded, but receipt email setup is missing: ${smtp.missing.join(", ")}.`);
-  const cc = await deliveryRecipients(admin, invoice, lead.email);
+  const cc = invoiceRecipients(lead.email, ...await deliveryRecipients(admin, invoice));
   const branding = invoiceBranding(invoice.company_snapshot ?? { ...legacyCompany, code: invoice.company_code === "IBMP" ? "IBMP" : "DMHCA", legal_name: invoice.company_code ?? legacyCompany.legal_name });
   const [pdf, logo] = await Promise.all([
     buildInvoicePdf(invoice, lead),
@@ -233,14 +233,14 @@ export async function sendPaymentReceipt(admin: SupabaseClient, invoiceId: strin
   return messageId;
 }
 
-async function deliveryRecipients(admin: SupabaseClient, invoice: InvoiceRow, to: string, creatorEmail?: string | null) {
+async function deliveryRecipients(admin: SupabaseClient, invoice: InvoiceRow, creatorEmail?: string | null) {
   const { data: lead, error: leadError } = await admin.from("leads").select("assignee_id").eq("id", invoice.lead_id).maybeSingle();
   databaseError(leadError);
   if (!lead?.assignee_id) throw new HttpError(400, "Assign a lead owner before sending the invoice.");
   const { data: owner, error: ownerError } = await admin.from("profiles").select("email").eq("id", lead.assignee_id).maybeSingle();
   databaseError(ownerError);
   if (!owner?.email || !isEmail(owner.email)) throw new HttpError(400, "Set a valid email address for the lead owner before sending the invoice.");
-  return invoiceRecipients(to, invoice.creator_email || creatorEmail, owner.email);
+  return [invoice.creator_email || creatorEmail, owner.email];
 }
 
 export function invoiceRecipients(to: string, ...addresses: (string | null | undefined)[]) {

@@ -6,6 +6,7 @@ import { useParams, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, BookOpen, CalendarClock, Clock3, Eye, FileText, GitMerge, Mail, Phone, UserRound, X } from "lucide-react";
 import { LeadInlineField } from "@/components/lead-inline-field";
+import { NextLeadButton } from "@/components/next-lead-button";
 import { StageBadge, initials } from "@/components/lead-helpers";
 import { apiRequest, formatDateTime, prefetchApiRead, type StageRow } from "@/lib/crm-data";
 import type { CurrentUser, Lead, Profile } from "@/lib/types";
@@ -19,6 +20,7 @@ import { LeadNoteComposer } from "@/components/lead-note-composer";
 import { NoteImageAttachments } from "@/components/note-image-attachments";
 import type { NoteImage, NoteImageInput } from "@/lib/note-images";
 import { TELECMI_CALL_MESSAGE } from "@/lib/telecmi";
+import { rememberStageAssignment, registerLeadSaveQueue } from "@/lib/lead-stage-assignment";
 
 const loadInvoiceWorkspace = () => import("@/components/invoice-workspace").then(module => module.InvoiceWorkspace);
 const loadCourseCatalog = () => import("@/components/course-catalog").then(module => module.CourseCatalog);
@@ -35,6 +37,7 @@ type DetailData = {
   scheduledCalls: { id: string; user_id: string; scheduled_at: string; status: string; created_at: string }[];
   duplicates: DuplicateOwner[];
   canScheduleCall: boolean;
+  assignmentPendingId?: string | null;
   counts?: { notes: number; emails: number };
 };
 export default function LeadDetailPage() {
@@ -109,6 +112,14 @@ export default function LeadDetailPage() {
     return () => { active = false; };
   }, [id, modifiedAt, userId, canViewInvoices, canEditLead, preparationAttempt]);
   useEffect(() => { setNoteContent(""); setNoteImages([]); setEmailContent(""); setSubject(""); }, [id]);
+  useEffect(() => registerLeadSaveQueue({
+    leadId: id, wait: () => saves.current, isSaving: () => pendingSaves.current > 0,
+  }), [id]);
+  useEffect(() => {
+    if (data?.lead.id === id && data.assignmentPendingId) {
+      rememberStageAssignment(data.user.id, id, data.assignmentPendingId);
+    }
+  }, [id, data?.user.id, data?.lead.id, data?.assignmentPendingId]);
   async function reload() {
     await reloadData();
     setPreparationAttempt(value => value + 1);
@@ -137,10 +148,19 @@ export default function LeadDetailPage() {
   async function save(patch: Partial<LeadDraft>) {
     pendingSaves.current++; setSaving(true);
     const operation = saves.current.then(async () => {
-      const updated = await apiRequest<{ lead: DetailData["lead"]; scheduleUnlocked: boolean }>(`/api/leads/${id}`, { method: "PATCH", body: patch });
+      const path = `/api/leads/${id}${Object.hasOwn(patch, "stageId") ? "?assignment=on-exit" : ""}`;
+      const updated = await apiRequest<{ id: string; reassigned: true } | { lead: DetailData["lead"]; scheduleUnlocked: boolean; assignmentPendingId?: string | null }>(path, { method: "PATCH", body: patch });
+      if (!("reassigned" in updated) && data && updated.assignmentPendingId !== undefined) {
+        rememberStageAssignment(data.user.id, id, updated.assignmentPendingId);
+      }
       if (activeLeadId.current !== id) return;
+      if ("reassigned" in updated) {
+        router.push("/leads?reassigned=1");
+        return;
+      }
       acceptLatestData.current(previous => previous?.lead.id === id ? {
         ...previous, lead: updated.lead, canScheduleCall: updated.scheduleUnlocked || previous.canScheduleCall,
+        assignmentPendingId: updated.assignmentPendingId ?? null,
       } : previous);
     });
     // A failed field remains visibly unsaved without blocking later field saves.
@@ -161,7 +181,7 @@ export default function LeadDetailPage() {
     } catch (reason) { setCallError(reason instanceof Error ? reason.message : "Could not schedule the call."); }
     finally { schedulingRef.current = false; setScheduling(false); }
   }
-  if (!data) return <section className="panel live-panel"><Link href="/leads">Back to leads</Link>{loading ? <SectionLoading title="Lead details" /> : <><p role="alert">{error}</p><button className="button button-secondary" onClick={() => void reload().catch(() => {})}>Retry</button></>}</section>;
+  if (!data) return <section className="panel live-panel"><Link className="button lead-navigation-button" href="/leads"><ArrowLeft size={13} />Back to leads</Link>{loading ? <SectionLoading title="Lead details" /> : <><p role="alert">{error}</p><button className="button button-secondary" onClick={() => void reload().catch(() => {})}>Retry</button></>}</section>;
   const lead = data.lead;
   const callNumber = leadCallNumber(lead.phone, lead.countryCode);
   const scheduledCalls = (data.scheduledCalls ?? []).filter(call => call.status === "scheduled").sort((a, b) => new Date(a.scheduled_at).getTime() - new Date(b.scheduled_at).getTime());
@@ -237,7 +257,8 @@ export default function LeadDetailPage() {
     return typeof value === "object" ? JSON.stringify(value) : String(value);
   }
   return <>
-    <div className="detail-back"><Link href="/leads"><ArrowLeft size={13} />Back to leads</Link></div>
+    <div className="detail-back lead-detail-navigation"><Link className="button lead-navigation-button" href="/leads"><ArrowLeft size={13} />Back to leads</Link><NextLeadButton key={id} lead={lead} disabled={busy || saving || scheduling || loading || lead.id !== id} isSaving={() => pendingSaves.current > 0} /></div>
+    {data.assignmentPendingId && <p className="helper-banner" role="status">Stage saved. Assignment will run when you leave this lead.</p>}
     <section className="panel lead-header-panel lead-record-header"><div className="lead-header-main"><span className="lead-large-avatar">{initials(lead.name)}</span><div className="lead-main-copy"><div className="lead-record-eyebrow">LEAD DETAILS</div><h1>{lead.name}</h1><span>{lead.course || "No course"} · {lead.assignee || "Unassigned"}</span></div><StageBadge stage={lead.stage || "No stage"} /><div className="heading-actions lead-header-actions">
       {duplicates.length > 0 && <>
         <button className="button button-secondary" aria-expanded={viewDuplicates} aria-controls="lead-duplicate-owners" onClick={() => { setViewDuplicates(!viewDuplicates); setMergeOpen(false); setMergeSearch(""); setMergeTargetId(""); }}><Eye size={14} />View duplicates ({duplicates.length})</button>
@@ -334,8 +355,9 @@ export default function LeadDetailPage() {
         await apiRequest(`/api/leads/${id}/actions`, { body: { action: "note", content, images } });
         if (activeLeadId.current !== id) return;
         setNotice("Note added.");
-        try { await reload(); }
-        catch (failure) { setError(`Note saved, but the timeline could not refresh: ${failure instanceof Error ? failure.message : "Reload this lead to see it."}`); }
+        void reload().catch(failure => {
+          if (activeLeadId.current === id) setError(`Note saved, but the timeline could not refresh. Do not resend: ${failure instanceof Error ? failure.message : "Reload this lead to see it."}`);
+        });
       } finally { setBusy(false); }
     }} /></section>}
     {tab === "note" && <section aria-label="Notes timeline" className="lead-section-history"><div className="detail-history-heading">{sectionIntro("Notes timeline", "Notes and conversations, newest first", FileText)}</div>{history(data.notes, "No notes yet. Open Notes to add your first note.")}</section>}
