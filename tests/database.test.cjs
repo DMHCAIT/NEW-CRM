@@ -592,6 +592,10 @@ test("counselor team lead and manager requests appear for Super Admin in both cu
   try {
     for (const role of ["counselor", "team_lead", "manager"]) {
       await db.query("update public.profiles set role=$1 where id=$2", [role, counselorId]);
+      const companies = await asUser(counselorId, counselorSession, tx => tx.query(
+        "select code,address from public.invoice_companies order by code"));
+      assert.deepEqual(companies.rows.map(company => company.code), ["DMHCA", "IBMP"]);
+      assert.ok(companies.rows.every(company => company.address), `${role} must be able to read the issuer address needed to enable invoice submission`);
       for (const currency of ["INR", "USD"]) {
         const course = (await db.query("insert into public.courses(name,price_inr,price_usd) values($1,200,20) returning id",
           [`Role invoice ${role} ${currency}`])).rows[0].id;

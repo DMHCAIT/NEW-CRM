@@ -11,7 +11,7 @@ export async function GET() {
     const canManage = ["admin", "super_admin"].includes(user.profile.role);
     const [courses, companies] = await Promise.all([
       supabase.from("courses").select("*").order("name").limit(1000),
-      canManage ? supabase.from("invoice_companies").select("*").order("code") : Promise.resolve({ data: [], error: null }),
+      supabase.from("invoice_companies").select("*").order("code"),
     ]);
     databaseError(courses.error); databaseError(companies.error);
     return NextResponse.json({ courses: courses.data, companies: companies.data, canManage });

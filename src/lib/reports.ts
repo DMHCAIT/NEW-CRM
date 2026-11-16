@@ -15,16 +15,17 @@ export const REPORT_COLUMNS = [
   { key: "id", label: "Lead ID" },
 ] as const satisfies readonly { key: keyof Lead; label: string }[];
 export type ReportColumn = (typeof REPORT_COLUMNS)[number]["key"];
-export type LeadColumn = ReportColumn | `custom:${string}`;
+export type LeadColumn = ReportColumn | "latestNote" | `custom:${string}`;
 export type LeadColumnDefinition = { key: LeadColumn; label: string };
 
 export function leadColumns(fields: { name: string; active: boolean }[] = []): LeadColumnDefinition[] {
-  return [...REPORT_COLUMNS, ...fields.filter(field => field.active).map((field): LeadColumnDefinition => ({
+  return [...REPORT_COLUMNS, { key: "latestNote", label: "Note" }, ...fields.filter(field => field.active).map((field): LeadColumnDefinition => ({
     key: `custom:${field.name}`, label: field.name,
   }))];
 }
 
 export function leadColumnValue(lead: Lead, key: LeadColumn): string | number | undefined {
+  if (key === "latestNote") return lead.latestNote;
   if (key.startsWith("custom:")) return lead.customFields?.[key.slice(7)];
   const column = REPORT_COLUMNS.find(column => column.key === key);
   return column ? lead[column.key] : undefined;

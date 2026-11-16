@@ -17,7 +17,7 @@ import type { Lead } from "@/lib/types";
 
 const columnWidths: Partial<Record<LeadColumn, number>> = {
   name: 220, phone: 180, altPhone: 180, email: 260, course: 240, stage: 190,
-  createdAt: 190, modifiedAt: 190, lastVisitAt: 190, billingAddress: 240, id: 280,
+  createdAt: 190, modifiedAt: 190, lastVisitAt: 190, billingAddress: 240, id: 280, latestNote: 320,
 };
 const columnWidth = (key: LeadColumn) => columnWidths[key] ?? 170;
 const serverDateTimeFormatter = new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" });
@@ -147,7 +147,7 @@ export default function LeadsWorkspace({ initialFilter, dashboard = false, initi
   }
   const selectedColumns = savedColumns ?? data?.columns;
   const validColumns = selectedColumns?.filter((key): key is LeadColumn => availableColumns.some(column => column.key === key));
-  const columns: LeadColumn[] = validColumns?.length ? validColumns : ["name", "phone", "country", "course", "stage", "assignee", "followUp"];
+  const columns: LeadColumn[] = validColumns?.length ? validColumns : ["name", "phone", "country", "course", "stage", "assignee", "followUp", "latestNote"];
   const can = (permission: string) => data?.user.permissions.some((p) => p === permission) ?? false;
   const canDelete = can("leads.delete") && ["admin", "super_admin"].includes(data?.user.profile.role ?? "");
   const canTransfer = can("leads.edit") && can("leads.assign") && ["team_lead", "manager", "admin", "super_admin"].includes(data?.user.profile.role ?? "");

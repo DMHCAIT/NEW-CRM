@@ -92,16 +92,27 @@ async function fetchLeadPageIds(client: SupabaseClient, query: LeadQuery, pageSi
   } : null };
 }
 
-export async function fetchLeadPages(client: SupabaseClient, queries: LeadQuery[], pageSize = 25): Promise<LeadPage[]> {
+export async function fetchLeadPages(client: SupabaseClient, queries: LeadQuery[], pageSize = 25, options: { latestNote?: boolean } = {}): Promise<LeadPage[]> {
   const pages = await Promise.all(queries.map(query => fetchLeadPageIds(client, query, pageSize)));
   const ids = [...new Set(pages.flatMap(page => page.ids))];
   const batches: string[][] = [];
   // Bound PostgREST URL length and row counts while sharing reads across stages.
   for (let offset = 0; offset < ids.length; offset += 100) batches.push(ids.slice(offset, offset + 100));
   const records = await Promise.all(batches.map(async batch => {
-    const result = await client.from("leads").select(LEAD_SELECT).in("id", batch).eq("is_archived", false).returns<LeadRow[]>();
+    let request = client.from("leads").select(options.latestNote ? `${LEAD_SELECT},latest_note:notes(content)` : LEAD_SELECT)
+      .in("id", batch).eq("is_archived", false);
+    if (options.latestNote) request = request
+      .order("created_at", { referencedTable: "latest_note", ascending: false })
+      .order("id", { referencedTable: "latest_note", ascending: false })
+      .limit(1, { referencedTable: "latest_note" });
+    const result = await request.returns<(LeadRow & { latest_note?: { content: string }[] })[]>();
     dbError(result.error);
-    return (result.data ?? []).map(mapLead);
+    return (result.data ?? []).map(row => {
+      const lead = mapLead(row);
+      if (!options.latestNote) return lead;
+      const note = row.latest_note?.[0];
+      return { ...lead, latestNote: note ? note.content || "Image attachment" : undefined };
+    });
   }));
   const byId = new Map(records.flat().map(lead => [lead.id, lead]));
   return pages.map(({ ids: pageIds, ...page }) => ({
@@ -110,6 +121,6 @@ export async function fetchLeadPages(client: SupabaseClient, queries: LeadQuery[
 }
 
 export async function fetchLeadPage(client: SupabaseClient, query: LeadQuery, pageSize = 50): Promise<LeadPage> {
-  const [page] = await fetchLeadPages(client, [query], pageSize);
+  const [page] = await fetchLeadPages(client, [query], pageSize, { latestNote: true });
   return page;
 }

@@ -21,7 +21,7 @@ const dbError = error => { if (error) throw new HttpError(400,error.message); };
 const filters = load("src\\lib\\lead-filters.ts");
 const leadQuery = load("src\\lib\\server\\lead-query.ts", {
   "@/lib/server/auth": auth, "@/lib/live-leads": { dbError },
-  "@/lib/lead-filters": filters, "@/lib/crm-data": { LEAD_SELECT: "id",mapLead: row => row },
+  "@/lib/lead-filters": filters, "@/lib/crm-data": { LEAD_SELECT: "id",mapLead: ({ latest_note, ...row }) => row },
 });
 const base = () => leadQuery.queryParameters(new URLSearchParams());
 const normalized = value => JSON.parse(JSON.stringify(value));
@@ -70,7 +70,8 @@ test("paged reads fetch only returned IDs, preserve SQL order, and keep a cursor
     from: table => {
       assert.equal(table,"leads");
       const chain = { select: () => chain, in: (_key,ids) => { selections.push(ids); return chain; },
-        eq: () => chain, returns: async () => ({ data: [{ id: "b" },{ id: "a" }],error: null }) };
+        eq: () => chain, order: () => chain, limit: () => chain,
+        returns: async () => ({ data: [{ id: "b" },{ id: "a" }],error: null }) };
       return chain;
     },
   };
@@ -78,9 +79,45 @@ test("paged reads fetch only returned IDs, preserve SQL order, and keep a cursor
   assert.deepEqual(normalized(page.leads),[{ id: "a" },{ id: "b" }]);
   assert.equal(rpcCalls[0].args.page_size,50);
   assert.deepEqual(normalized(selections),[["a","b"]]);
-  client.from = () => ({ select() { return this; }, in() { return this; },eq() { return this; },returns: async () => ({ data: [],error: null }) });
+  client.from = () => ({ select() { return this; }, in() { return this; },eq() { return this; },
+    order() { return this; }, limit() { return this; }, returns: async () => ({ data: [],error: null }) });
   const empty = await leadQuery.fetchLeadPage(client,base());
   assert.deepEqual(normalized(empty.nextCursor),cursor);
+});
+
+test("lead pages fetch only the newest note per lead without truncating the lead page or issuing per-row requests", async () => {
+  const { createClient } = require("@supabase/supabase-js");
+  const requests = [];
+  let failNotes = false;
+  const client = createClient("https://database.example.test", "test-key", {
+    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+    global: { fetch: async input => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      requests.push(url);
+      if (url.pathname.endsWith("/rpc/crm_lead_page")) return Response.json({ ids: ["a", "b", "c"], hasMore: false });
+      assert.equal(url.pathname, "/rest/v1/leads");
+      assert.equal(url.searchParams.get("select"), "id,latest_note:notes(content)");
+      assert.equal(url.searchParams.get("latest_note.order"), "created_at.desc,id.desc");
+      assert.equal(url.searchParams.get("latest_note.limit"), "1");
+      assert.equal(url.searchParams.has("limit"), false, "the note limit must not limit the lead page");
+      assert.equal(url.searchParams.get("is_archived"), "eq.false");
+      if (failNotes) return Response.json({ message: "Note access failed", code: "42501" }, { status: 403 });
+      return Response.json([
+        { id: "b", latest_note: [] },
+        { id: "c", latest_note: [{ content: "" }] },
+        { id: "a", latest_note: [{ content: "Latest note\nCall after 5 PM" }] },
+      ]);
+    } },
+  });
+  const page = await leadQuery.fetchLeadPage(client, base(), 100);
+  assert.deepEqual(normalized(page.leads), [
+    { id: "a", latestNote: "Latest note\nCall after 5 PM" },
+    { id: "b" },
+    { id: "c", latestNote: "Image attachment" },
+  ]);
+  assert.equal(requests.length, 2, "one bounded IDs request and one embedded record read, not one note read per lead");
+  failNotes = true;
+  await assert.rejects(leadQuery.fetchLeadPage(client, base()), /Note access failed/);
 });
 
 test("count-only reads never request lead records and database failures are not disguised as empty results", async () => {

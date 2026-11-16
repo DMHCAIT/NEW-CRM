@@ -545,6 +545,30 @@ test("legacy create-lead links redirect without preloading the list", async () =
   await assert.rejects(Component({ searchParams: Promise.resolve({ create: "1" }) }), /Redirect: \/leads\/new/);
 });
 
+test("Leads Note column shows the latest text or attachment label and a dash when no note exists", async () => {
+  for (const columns of [null, ["name", "latestNote"]]) {
+    const data = { ...live, columns, leads: [
+      { ...lead, latestNote: "Requested a callback\nAfter 5 PM" },
+      { ...lead, id: "no-note", name: "No notes yet" },
+      { ...lead, id: "image-note", name: "Image note lead", latestNote: "Image attachment" },
+    ] };
+    const html = await renderPage("src\\app\\leads\\page.tsx", {
+      overrides: { "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({ data, loading: false, error: "", reload() {}, setError() {} }) } },
+    });
+    assert.match(html, /<th[^>]*>Note<\/th>/);
+    assert.match(html, /title="Requested a callback\nAfter 5 PM"/);
+    assert.match(html, /Image attachment/);
+    const emptyRow = html.match(/<tr>[^]*?href="\/leads\/no-note"[^]*?<\/tr>/)?.[0];
+    assert.ok(emptyRow);
+    assert.match(emptyRow, /<td title="—">—<\/td>/);
+  }
+  const hidden = { ...live, columns: ["name"] };
+  const html = await renderPage("src\\app\\leads\\page.tsx", {
+    overrides: { "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({ data: hidden, loading: false, error: "", reload() {}, setError() {} }) } },
+  });
+  assert.doesNotMatch(html, /<th[^>]*>Note<\/th>/, "explicit column preferences remain respected");
+});
+
 test("lead filters use the retained compact sidebar with columns in the results toolbar", async () => {
   const html = await renderPage("src\\app\\leads\\page.tsx", { overrides: { "@/lib/live-leads-client": liveMock } });
   const sidebar = html.match(/<aside class="lead-filter-sidebar"[\s\S]*?<\/aside>/)?.[0];
@@ -1382,6 +1406,75 @@ test("open invoice checks lightweight payment status automatically without overl
   } finally {
     cleanup?.();
     global.window = previous.window; global.document = previous.document; global.fetch = previous.fetch;
+  }
+});
+
+test("invoice staff can request discount approval using the real catalog response without gaining company editing access", async () => {
+  for (const role of ["counselor", "team_lead", "manager", "admin", "super_admin"]) {
+    const catalogData = operations["/api/courses"];
+    const tables = [];
+    let companyError = null;
+    const catalogRoute = load("src\\app\\api\\courses\\route.ts", {
+      "next/server": { NextResponse: Response },
+      "@/lib/server/auth": {
+        requireUser: async () => ({
+          user: { ...user, profile: { ...profile, role }, permissions: ["invoices.view", "invoices.create"] },
+          supabase: { from: table => {
+            tables.push(table);
+            assert.ok(["courses", "invoice_companies"].includes(table));
+            const result = () => ({ data: table === "courses" ? catalogData.courses : catalogData.companies,
+              error: table === "invoice_companies" ? companyError : null });
+            const query = { select: () => query, order: () => query, limit: () => query,
+              then: (resolve, reject) => Promise.resolve(result()).then(resolve, reject) };
+            return query;
+          } },
+        }),
+        HttpError: class extends Error { constructor(status, message) { super(message); this.status = status; } },
+        jsonError: error => Response.json({ error: error.message }, { status: error.status ?? 500 }),
+      },
+      "@/lib/server/operational": { databaseError: error => { if (error) throw error; } },
+      "@/lib/server/login": { checkOrigin() {} },
+    });
+    const response = await catalogRoute.GET();
+    assert.equal(response.status, 200);
+    const catalog = await response.json();
+    const isAdmin = ["admin", "super_admin"].includes(role);
+    assert.equal(catalog.canManage, isAdmin);
+    assert.deepEqual(tables, ["courses", "invoice_companies"]);
+    for (const [company, currency] of [["DMHCA", "INR"], ["DMHCA", "USD"], ["IBMP", "USD"]]) {
+      let submitted;
+      const { InvoiceCreateForm } = load("src\\components\\invoice-create-form.tsx", {
+        react: hookStates([lead.id, { lead: { id: lead.id, email: lead.email }, canSaveAddress: true },
+          "", "Lead address", "course-1", company, currency, "one_shot", "", "", "10"]),
+        "@/app/integrations/operational-ui": {
+          ...opMock, useOperationalData: () => operational(catalog),
+          formValues: () => ({ lead_id: lead.id, course_id: "course-1", company_code: company, currency,
+            billing_address: "Lead address", discount_reason: "Enrollment concession" }),
+        },
+      });
+      const nodes = elements(InvoiceCreateForm({ leadId: lead.id, leads: [lead], parents: [], busy: false,
+        onSubmit: async payload => { submitted = payload; return true; }, onClose() {} }));
+      const save = nodes.find(node => node.type === "button" && node.props.className === "button button-primary");
+      assert.equal(save.props.children, "Save & request approval");
+      assert.equal(save.props.disabled, false, `${role} must be able to request approval for ${company} ${currency}`);
+      assert.equal(nodes.find(node => node.props?.["aria-label"] === "Approver").props.value, "Super Admin");
+      assert.equal(nodes.find(node => node.props?.name === "discount_reason").props.required, true);
+      await nodes.find(node => node.type === "form").props.onSubmit({ preventDefault() {}, currentTarget: {} });
+      assert.equal(submitted.discount_percent, 10);
+      assert.equal(submitted.currency, currency);
+    }
+    if (!isAdmin) {
+      const reads = tables.length;
+      const denied = await catalogRoute.POST(new Request("https://crm.example/api/courses", {
+        method: "POST", body: JSON.stringify({ kind: "company", values: { code: "DMHCA" } }),
+      }));
+      assert.equal(denied.status, 403);
+      assert.equal(tables.length, reads, "invoice creation must not grant company editing");
+    }
+    companyError = new Error("Company query failed");
+    const failed = await catalogRoute.GET();
+    assert.equal(failed.status, 500);
+    assert.match((await failed.json()).error, /Company query failed/);
   }
 });
 
@@ -3439,8 +3532,8 @@ test("lead columns float without layout shifts and save each checkbox change aut
   const options = () => render().filter((node) => node.props?.className === "lead-column-option");
 
   toggle().props.onClick();
-  assert.equal(options().length, 25);
-  for (const label of ["Country code", "Alternate phone", "Billing address", "Speciality", "Expected closure fee", "Expected closure date", "Preferred campus", "Counselor note"]) {
+  assert.equal(options().length, 26);
+  for (const label of ["Country code", "Alternate phone", "Billing address", "Speciality", "Expected closure fee", "Expected closure date", "Preferred campus", "Counselor note", "Note"]) {
     assert.ok(options().some(option => option.props.children[1].props.children === label), label);
   }
   search("  EMAIL ");
@@ -3468,7 +3561,7 @@ test("lead columns float without layout shifts and save each checkbox change aut
   assert.equal(options().length, 0);
   assert.ok(render().some((node) => node.props?.role === "status" && node.props.children === "No columns match your search."));
   search("");
-  assert.equal(options().length, 25);
+  assert.equal(options().length, 26);
   assert.ok(!render().some((node) => node.type === "button" && ["Cancel", "Save columns"].includes(node.props.children)));
   search("email");
   options()[0].props.children[0].props.onChange({ target: { checked: false } });
@@ -3479,7 +3572,7 @@ test("lead columns float without layout shifts and save each checkbox change aut
   assert.equal(options()[0].props.children[0].props.disabled, false);
   toggle().props.onClick();
   toggle().props.onClick();
-  assert.equal(options().length, 25);
+  assert.equal(options().length, 26);
   assert.equal(options().find((node) => node.props.children[1].props.children === "Email").props.children[0].props.checked, true);
 
   for (const option of options()) {

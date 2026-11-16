@@ -56,6 +56,29 @@ async function asUser(id, callback, verified = true) {
   });
 }
 
+test("latest-note column migration preserves saved layout order, defaults and other views without duplicate columns", async () => {
+  const sql = readFileSync(join(__dirname, "..", "supabase", "migrations", "202611160005_latest_note_column.sql"), "utf8")
+    .replace(/^begin;\s*/i, "").replace(/\s*commit;\s*$/i, "");
+  await db.exec("begin");
+  try {
+    for (const [userId, view, columns] of [
+      [owner, "leads", ["phone", "name"]],
+      [outsider, "leads", []],
+      [admin, "leads", ["name", "latestNote"]],
+      [owner, "pipeline", ["stage"]],
+    ]) await db.query(`insert into public.user_columns(user_id,view_name,columns_json) values($1,$2,$3::jsonb)
+      on conflict (user_id,view_name) do update set columns_json=excluded.columns_json`, [userId, view, JSON.stringify(columns)]);
+    await db.exec(sql);
+    await db.exec(sql);
+    const rows = (await db.query("select user_id,view_name,columns_json from public.user_columns")).rows;
+    const columns = (userId, view = "leads") => rows.find(row => row.user_id === userId && row.view_name === view).columns_json;
+    assert.deepEqual(columns(owner), ["phone", "name", "latestNote"]);
+    assert.deepEqual(columns(outsider), []);
+    assert.deepEqual(columns(admin), ["name", "latestNote"]);
+    assert.deepEqual(columns(owner, "pipeline"), ["stage"]);
+  } finally { await db.exec("rollback"); }
+});
+
 test("database writes combine country codes and preserve explicit international phone numbers", async () => {
   for (const [phone, code, expected] of [
     ["9123456789", "India (+91)", "+919123456789"],

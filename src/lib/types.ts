@@ -93,6 +93,7 @@ export interface Lead {
   expectedClosureDate?: string;
   customFields?: Record<string, string>;
   billingAddress?: string;
+  latestNote?: string;
 }
 
 export interface Profile {

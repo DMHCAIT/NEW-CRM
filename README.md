@@ -17,6 +17,11 @@ the signed-in user's database permissions. Search and dashboard filters apply
 before rendering; a different retained filter still loads its own matching data.
 Hydration reuses a fresh server result without a duplicate initial list request;
 prefetched server results older than 30 seconds are revalidated.
+The Leads table includes a Note column showing the newest note for each lead.
+Image-only notes display "Image attachment"; leads without notes display a dash.
+Only one note per lead is fetched, within the existing bounded page read and
+access permissions. Apply `202611160005_latest_note_column.sql` to add the column
+once to existing saved Leads layouts; it can still be hidden through Columns.
 Lead list filters reuse fresh metadata even when the first visit is a filtered
 view. Cached data expires after 30 seconds; writes and manual refresh invalidate
 it. Lead pages fetch up to 100 records so page-size changes can reuse the same
@@ -499,6 +504,10 @@ course details, availability and currency-specific pricing with a dedicated save
 The Invoice companies tab and profile editor are no longer displayed; existing
 billing-company records and invoice snapshots are preserved. Catalog prices are references, not enrollment
 records; course selection and pricing confirmation still happen in invoice creation.
+Invoice staff receive read-only billing-company details with the course catalog
+so counselors, team leads and managers can save invoices and request discount
+approval. Company/course editing remains admin-only, and discounts still require
+Super Admin approval.
 Invoice views group all invoices, approvals, awaiting payment and paid records.
 The register renders 25 rows at a time; filtering and totals cover all fetched
 records, including records beyond the first page. Financial data still refreshes
