@@ -795,15 +795,15 @@ test("lead Back and Next buttons are visible navy controls on desktop and mobile
   }
 });
 
-test("page sizes use the same 100-lead page immediately and advance at the selected boundary", () => {
+test("page sizes reuse the loaded leads and fetch the next page only on navigation", async () => {
   const records = Array.from({ length: 100 }, (_, i) => ({
     ...lead, id: `lead-${i}`, name: `Lead ${i}`, createdAt: `2026-10-21T09:${String(Math.floor(i / 60)).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}Z`,
   }));
-  const states = [];
+  const states = [], effects = [], speculativeReads = [], errors = [];
   let index = 0, requestPath = "";
   const { default: Workspace } = load("src\\components\\leads-workspace.tsx", {
     "@/components/lead-filter-state": { useLeadFilterState: () => null, useLeadNavigation: () => null },
-    react: { ...React, useEffect() {}, useLayoutEffect() {}, useMemo: factory => factory(), useRef: initial => ({ current: initial }),
+    react: { ...React, useEffect: effect => effects.push(effect), useLayoutEffect() {}, useMemo: factory => factory(), useRef: initial => ({ current: initial }),
       useState(initial) {
         const key = index++;
         if (!(key in states)) states[key] = typeof initial === "function" ? initial() : initial;
@@ -812,13 +812,23 @@ test("page sizes use the same 100-lead page immediately and advance at the selec
     },
     "@/lib/live-leads-client": {
       ...liveMock,
+      loadLeadListData: async path => {
+        speculativeReads.push(path);
+        throw new Error("canceling statement due to statement timeout");
+      },
       useLiveLeadData(path) {
         requestPath = path;
-        return { data: { ...live, leads: records, hasMore: true, nextCursor: { id: records[99].id, createdAt: records[99].createdAt } }, loading: false, error: "", reload() {}, setError() {} };
+        return { data: { ...live, leads: records, hasMore: true, nextCursor: { id: records[99].id, createdAt: records[99].createdAt } }, loading: false, error: "", reload() {}, setError: error => errors.push(error) };
       },
     },
   });
-  const render = () => { index = 0; return elements(Workspace()); };
+  const render = () => {
+    index = 0;
+    effects.length = 0;
+    const nodes = elements(Workspace());
+    effects.forEach(effect => effect());
+    return nodes;
+  };
   let nodes = render();
   const initialPath = requestPath;
   assert.equal(new URL(initialPath, "http://crm.local").searchParams.get("pageSize"), "100");
@@ -828,6 +838,9 @@ test("page sizes use the same 100-lead page immediately and advance at the selec
     assert.equal(requestPath, initialPath, "changing size does not fetch another page");
     assert.equal(nodes.filter(node => node.type === "input" && node.props?.["aria-label"]?.startsWith("Select Lead ")).length, size);
   }
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(speculativeReads, [], "opening Leads and resizing the page must not start unused database reads");
+  assert.deepEqual(errors, [], "an unused next page must not put a timeout banner on loaded leads");
   nodes.find(node => node.props?.["aria-label"] === "Leads per page").props.onChange({ target: { value: "20" } });
   nodes = render();
   nodes.find(node => node.type === "button" && node.props.children === "Next").props.onClick();
@@ -1046,7 +1059,7 @@ function elements(node) {
   return [node, ...elements(node.props?.children)];
 }
 
-function importHarness({ unassigned = false, failFirstBatch = false, failPdf = false, allDuplicates = false, parsedRows, timeoutAbove, loseResponseAt, transientResponseAt, alwaysTransient = false, checkTimeoutAbove, duplicateEmail, deleteTimeoutAbove, deleteFailureAt, deleteTransientAt } = {}) {
+function importHarness({ unassigned = false, failFirstBatch = false, failPdf = false, allDuplicates = false, parsedRows, importStages = [...stages, { ...stages[0], id: "fresh-stage", name: "Fresh" }], timeoutAbove, loseResponseAt, transientResponseAt, alwaysTransient = false, checkTimeoutAbove, duplicateEmail, deleteTimeoutAbove, deleteFailureAt, deleteTransientAt } = {}) {
   const states = [], requests = [], downloads = [], reference = { current: null }, completedBatches = new Map();
   states[14] = false;
   let stateIndex = 0, currentError = "", saved = [], failed = false, deleted = 0, deleteFailed = false;
@@ -1064,7 +1077,7 @@ function importHarness({ unassigned = false, failFirstBatch = false, failPdf = f
         return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }];
       },
     },
-    "@/lib/live-leads-client": { useLiveLeadData: () => ({ data: live, error: currentError, loading: false, setError: value => { currentError = value; } }) },
+    "@/lib/live-leads-client": { useLiveLeadData: () => ({ data: { ...live, stages: importStages }, error: currentError, loading: false, setError: value => { currentError = value; } }) },
     "@/lib/live-leads-csv": { MAX_LEAD_IMPORT_FILE_BYTES: 50000000, MAX_LEAD_IMPORT_ROWS: 200000, parseLeadSpreadsheet: async () => parsed },
     "@/lib/lead-import-report": { downloadLeadImportPdf: async sheet => {
       if (failPdf) throw new Error("PDF download unavailable");
@@ -1124,6 +1137,26 @@ function importHarness({ unassigned = false, failFirstBatch = false, failPdf = f
   };
 }
 
+test("import defaults only empty stages to Fresh regardless of stage order", async () => {
+  const ui = importHarness({ parsedRows: [
+    { name: "Empty stage", phone: "880987651001", email: "empty-stage@example.test", stage: "", assignee: user.email },
+    { name: "Missing stage", phone: "880987651002", email: "missing-stage@example.test", assignee: user.email },
+    { name: "Whitespace stage", phone: "880987651003", email: "whitespace-stage@example.test", stage: "  ", assignee: user.email },
+    { name: "Supplied stage", phone: "880987651004", email: "supplied-stage@example.test", stage: "Application under review", assignee: user.email },
+  ] });
+  await ui.read();
+  await elements(ui.render()).find(node => node.type === "button" && node.props.children === "Import validated leads").props.onClick();
+  const batch = ui.requests.find(request => request.body?.importId);
+  assert.deepEqual(batch.body.rows.map(row => row.stageId), ["fresh-stage", "fresh-stage", "fresh-stage", "stage-2"]);
+});
+
+test("import reports missing Fresh instead of defaulting empty stages to another stage", async () => {
+  const ui = importHarness({ importStages: stages });
+  await ui.read();
+  assert.match(renderToStaticMarkup(ui.render()), /An active &quot;Fresh&quot; stage is required/);
+  assert.equal(ui.requests.some(request => request.body?.checkOnly || request.body?.importId), false);
+});
+
 test("import review compactly assigns owners and shows normalized phones without a wide all-column preview", async () => {
   const ui = importHarness({ unassigned: true });
   await ui.read();
@@ -1153,13 +1186,15 @@ test("import skips rows missing phone or email @ and accepts any non-empty email
     { name: "Missing phone", phone: "", email: "missing-phone@example.test", assignee: user.email },
     { name: "Missing email", phone: "880987650002", email: "", assignee: user.email },
     { name: "No email marker", phone: "880987650003", email: "no-email-marker", assignee: user.email },
-    { name: "Complete student", phone: "880987650004", email: "schy_74@yahoo.com", course: "", altPhone: "", assignee: user.email },
-    { name: "Unusual email", phone: "880987650005", email: "unusual @ format", assignee: user.email },
+    { name: "", phone: "880987650004", email: "no-name@example.test", assignee: user.email },
+    { name: "Invalid mobile", phone: "abc1234567", email: "invalid-mobile@example.test", assignee: user.email },
+    { name: "Complete student", phone: "880987650005", email: "schy_74@yahoo.com", course: "", altPhone: "", assignee: user.email },
+    { name: "Unusual email", phone: "880987650006", email: "unusual @ format", assignee: user.email },
   ] });
   await ui.read();
   let tree = ui.render();
   let html = renderToStaticMarkup(tree);
-  assert.match(html, /3 rows skipped \(3 with a blank phone\/email or an email without @\)/);
+  assert.match(html, /5 rows skipped \(5 with missing or invalid required lead fields\)/);
   assert.match(html, /2 of 2 leads/);
   assert.doesNotMatch(html, /Missing phone|Missing email|No email marker/);
   const check = ui.requests.find(request => request.body?.checkOnly);
@@ -1169,9 +1204,40 @@ test("import skips rows missing phone or email @ and accepts any non-empty email
   assert.equal(batch.body.rows.length, 2);
   assert.equal(batch.body.rows[0].course, "");
   assert.equal(batch.body.rows[0].altPhone, "");
-  assert.equal(ui.downloads[0].total_rows, 5);
+  assert.equal(ui.downloads[0].total_rows, 7);
   assert.equal(ui.downloads[0].imported_rows, 2);
-  assert.equal(ui.downloads[0].duplicate_rows, 3);
+  assert.equal(ui.downloads[0].duplicate_rows, 5);
+});
+
+test("import ignores invalid optional values and imports remaining lead fields", async () => {
+  const ui = importHarness({ parsedRows: [{
+    name: "Before bad cells", phone: "880987650009", email: "before@example.test", assignee: user.email,
+    course: "Keep course before", note: "Keep note before", "custom:Preferred campus": "Delhi",
+  }, {
+    name: "Valid student", phone: "880987650010", email: "valid@example.test", assignee: user.email,
+    countryCode: "Invalid country", expectedClosureDate: "2026-02-30", followUpAt: "tomorrow",
+    closureFee: "-5", note: "x".repeat(10001), "custom:Disabled": "ignored",
+    course: "x".repeat(201), "custom:Preferred campus": "Unknown",
+  }, {
+    name: "After bad cells", phone: "880987650011", email: "after@example.test", assignee: user.email,
+    course: "Keep course after", note: "Keep note after", "custom:Preferred campus": "Dubai",
+  }] });
+  await ui.read();
+  const tree = ui.render();
+  assert.match(renderToStaticMarkup(tree), /3 of 3 leads/);
+  assert.match(renderToStaticMarkup(tree), /invalid optional cells cleared. Valid values in the same columns are preserved/);
+  await elements(tree).find(node => node.type === "button" && node.props.children === "Import validated leads").props.onClick();
+  const batch = ui.requests.find(request => request.body?.importId);
+  assert.equal(batch.body.rows.length, 3);
+  assert.equal(batch.body.rows[1].countryCode, "");
+  assert.equal(batch.body.rows[1].expectedClosureDate, "");
+  assert.equal(batch.body.rows[1].followUpAt, "");
+  assert.equal(batch.body.rows[1].closureFee, 0);
+  assert.deepEqual(batch.body.rows.map(row => row.note), ["Keep note before", "", "Keep note after"]);
+  assert.deepEqual(batch.body.rows.map(row => row.course), ["Keep course before", "", "Keep course after"]);
+  assert.deepEqual(batch.body.rows.map(row => row.customFields["Preferred campus"]), ["Delhi", "", "Dubai"]);
+  assert.equal(ui.downloads[0].imported_rows, 3);
+  assert.equal(ui.downloads[0].duplicate_rows, 0);
 });
 
 test("import completion automatically downloads exact sheet counts and confirms before deleting its leads", async () => {
@@ -3135,6 +3201,39 @@ test("New lead uses a separate route and preserves creation permissions", async 
   } });
   assert.match(denied, /You do not have permission to create leads/);
   assert.doesNotMatch(denied, /class="live-lead-form"/);
+});
+
+test("new leads expose an optional next follow-up and submit the selected local date as UTC", async () => {
+  const states = [], submissions = [];
+  let index = 0;
+  const initial = actualLeads.leadDraft();
+  const { LeadForm } = load("src\\lib\\live-leads-client.tsx", {
+    "@/lib/crm-data": crm,
+    react: { ...React, useEffect() {}, useState(value) {
+      const key = index++;
+      if (!(key in states)) states[key] = typeof value === "function" ? value() : value;
+      return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }];
+    } },
+  });
+  const render = () => {
+    index = 0;
+    return elements(LeadForm({ initial, stages, profiles: [profile], canAssign: true,
+      newLead: true, busy: false, onSave: async draft => { submissions.push(draft); } }));
+  };
+  const followUp = () => render().find(node => node.type === "input" && node.props.type === "datetime-local");
+  assert.ok(followUp(), "the creation form must display the next follow-up date/time input");
+  assert.match(renderToStaticMarkup(render()[0]), /Next follow-up/);
+  assert.equal(followUp().props.required, undefined);
+  assert.equal(followUp().props.value, "");
+  const localDate = "2099-12-01T10:30";
+  followUp().props.onChange({ target: { value: localDate } });
+  assert.equal(followUp().props.value, localDate);
+  const submit = () => render()[0].props.onSubmit({ preventDefault() {} });
+  await submit();
+  assert.equal(submissions[0].followUpAt, new Date(localDate).toISOString());
+  followUp().props.onChange({ target: { value: "" } });
+  await submit();
+  assert.equal(submissions[1].followUpAt, null);
 });
 
 test("dedicated lead creation saves, confirms duplicates and surfaces failures", async (t) => {

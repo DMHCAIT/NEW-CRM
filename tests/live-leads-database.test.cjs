@@ -285,7 +285,7 @@ test("lead import persists notes to the lead Notes timeline in the same transact
     imported = await asUser(owner, tx => tx.query("select public.import_live_leads($1::jsonb) as count", [JSON.stringify([{
         name: "Imported note fixture", phone: "7181920124", normalized_phone: "7181920124",
         country_code: "India (+91)", email: "imported-note@example.test", normalized_email: "imported-note@example.test",
-        assignee_id: owner, note: "Initial enquiry from the CSV sample",
+        assignee_id: owner, note: "x".repeat(10000),
       }])]));
   } finally {
     await db.query("delete from public.user_permission_overrides where user_id=$1 and permission_key='leads.edit'", [owner]);
@@ -296,8 +296,46 @@ test("lead import persists notes to the lead Notes timeline in the same transact
     from public.notes n join public.leads l on l.id=n.lead_id
     where l.name='Imported note fixture'
   `);
-  assert.equal(note.content, "Initial enquiry from the CSV sample");
+  assert.equal(note.content.length, 10000);
   assert.equal(note.user_id, owner);
+  const oversizedNote = await asUser(owner, tx => tx.query("select public.import_live_leads($1::jsonb) as result", [JSON.stringify([{
+    name: "Oversized imported note", phone: "7181920125", email: "oversized-note@example.test",
+    assignee_id: owner, note: "x".repeat(10001),
+  }])]));
+  assert.deepEqual({ ...oversizedNote.rows[0].result }, { imported: 1, skipped: 0 });
+  assert.equal((await db.query("select count(*)::integer as count from public.notes n join public.leads l on l.id=n.lead_id where l.email='oversized-note@example.test'")).rows[0].count, 0);
+});
+
+test("lead import skips invalid rows without rejecting valid rows in the batch", async () => {
+  const result = await asUser(owner, tx => tx.query("select public.import_live_leads($1::jsonb) as result", [JSON.stringify([
+    { name: "Valid in mixed import", phone: "7181920131", email: "valid-mixed@example.test", assignee_id: owner },
+    { name: "Invalid assignee", phone: "7181920132", email: "invalid-assignee@example.test", assignee_id: "not-a-uuid" },
+    { name: "Missing email", phone: "7181920133", email: "", assignee_id: owner },
+  ])]));
+  assert.deepEqual({ ...result.rows[0].result }, { imported: 1, skipped: 2 });
+  assert.equal((await db.query("select count(*)::integer as count from public.leads where email='valid-mixed@example.test'")).rows[0].count, 1);
+});
+
+test("mixed import persists valid notes around an invalid note without losing the note column", async () => {
+  const rows = [
+    { name: "Note before invalid cell", phone: "7191920901", email: "note-cell-before@example.test", note: "Keep before" },
+    { name: "Invalid note cell", phone: "7191920902", email: "note-cell-invalid@example.test", note: "x".repeat(10001) },
+    { name: "Note after invalid cell", phone: "7191920903", email: "note-cell-after@example.test", note: "Keep after" },
+    { name: "Missing contact with valid note", phone: "", email: "note-cell-no-phone@example.test", note: "Do not import" },
+    { name: "Invalid email with valid note", phone: "7191920905", email: "invalid-email", note: "Do not import" },
+  ].map(row => ({ ...row, assignee_id: owner, course: "Keep this course" }));
+  const result = await asUser(owner, tx => tx.query("select public.import_live_leads($1::jsonb) as result", [JSON.stringify(rows)]));
+  assert.deepEqual({ ...result.rows[0].result }, { imported: 3, skipped: 2 });
+  const saved = (await db.query(`
+    select l.email,l.course,n.content from public.leads l
+    left join public.notes n on n.lead_id=l.id
+    where l.email like 'note-cell-%@example.test' order by l.email
+  `)).rows;
+  assert.deepEqual(saved, [
+    { email: "note-cell-after@example.test", course: "Keep this course", content: "Keep after" },
+    { email: "note-cell-before@example.test", course: "Keep this course", content: "Keep before" },
+    { email: "note-cell-invalid@example.test", course: "Keep this course", content: null },
+  ]);
 });
 
 test("lead import accepts an international phone without a country code", async () => {
@@ -419,9 +457,10 @@ test("lead import accepts any non-empty email containing @ and rejects values wi
     { email: "unusual @ format", normalized_email: "unusual @ format" },
     { email: "schy_74@yahoo.com", normalized_email: "schy_74@yahoo.com" },
   ]);
-  await assert.rejects(asUser(owner, tx => tx.query("select public.import_live_leads($1::jsonb)", [JSON.stringify([
+  const invalidEmail = await asUser(owner, tx => tx.query("select public.import_live_leads($1::jsonb) as result", [JSON.stringify([
     { name: "Email without marker", phone: "8181920103", email: "no-email-marker", assignee_id: owner },
-  ])])), /invalid lead fields/);
+  ])]));
+  assert.deepEqual({ ...invalidEmail.rows[0].result }, { imported: 0, skipped: 1 });
 });
 
 test("lead inserts and edits retain new picklist values independently of configuration saves", async () => {
@@ -774,6 +813,45 @@ test("duplicate discovery exposes only assignees across buckets and rejects unre
   assert.equal((await asUser(child, tx => tx.query("select * from public.lead_duplicate_owners($1)", [owned[0]]))).rows.length,2);
 });
 
+test("duplicate-owner lookup preserves phone and email matches without per-row phone normalization", async () => {
+  await db.exec("begin");
+  try {
+    const records = [];
+    for (const [phone, countryCode, email, archived] of [
+      ["8118820001", "India (+91)", "indexed-owner@example.test", false],
+      ["+918118820001", null, null, false],
+      ["8118820001", null, null, false],
+      ["8118820001", "+44", null, false],
+      ["+614118820009", null, "indexed-owner@example.test", false],
+      ["8118820001", "India (+91)", null, true],
+    ]) {
+      const { rows: [row] } = await db.query(`insert into public.leads(name,phone,country_code,email,normalized_email,created_by,assignee_id,is_archived)
+        values('Indexed duplicate fixture',$1,$2,$3,$3,$4,$4,$5) returning id`, [phone, countryCode, email, admin, archived]);
+      records.push(row.id);
+    }
+    const expected = [];
+    for (const id of records.slice(0, 3)) {
+      expected.push((await db.query(`select l.id from public.leads l join public.leads current_lead on current_lead.id=$1
+        where l.id<>current_lead.id and not l.is_archived and l.merged_into_id is null
+          and (public.lead_phones_match(current_lead.phone,current_lead.country_code,l.phone,l.country_code)
+            or (nullif(current_lead.normalized_email,'') is not null and l.normalized_email=current_lead.normalized_email))
+        order by l.id`, [id])).rows.map(row => row.id));
+    }
+    assert.deepEqual(expected[0], records.slice(1, 3).concat(records[4]).sort());
+    assert.ok(expected[2].includes(records[3]), "legacy local numbers still match either country's explicit prefix");
+    await db.exec(`create or replace function public.lead_phones_match(phone_a text,country_code_a text,phone_b text,country_code_b text)
+      returns boolean language plpgsql immutable as $$ begin
+        raise exception 'Full-table phone normalization must not run during duplicate-owner lookup';
+      end $$`);
+    await db.exec("set local role authenticated");
+    await db.query("select set_config('request.jwt.claims',$1,true)", [JSON.stringify({ sub: admin, session_id: sessions[admin] })]);
+    for (const [index, id] of records.slice(0, 3).entries()) {
+      const rows = (await db.query("select * from public.lead_duplicate_owners($1)", [id])).rows;
+      assert.deepEqual(rows.map(row => row.merge_target_id).sort(), expected[index]);
+    }
+  } finally { await db.exec("rollback"); }
+});
+
 test("tracked imports save sheet counts and provenance atomically and replay batches without duplicating leads", async () => {
   const { rows: [existing] } = await db.query(
     "insert into public.leads(name,phone,email,created_by,assignee_id) values('Existing sheet duplicate','7601234500','sheet-existing@example.test',$1,$1) returning id", [owner]);
@@ -815,18 +893,79 @@ test("tracked imports save sheet counts and provenance atomically and replay bat
   await assert.rejects(send(rows), /not found/);
 });
 
-test("tracked imports retain accurate partial counts and roll back failed batches and their notes", async () => {
+for (const deletionMode of ["single", "batched"]) test(`reimporting a ${deletionMode}-deleted sheet ignores its archived leads but retains other duplicate checks`, async () => {
+  const suffix = deletionMode === "single" ? "1" : "2";
+  const originalRows = [0, 1].map(index => ({
+    name: `Reimport ${deletionMode} ${index}`, phone: `7823456${suffix}0${index}`,
+    country_code: "India (+91)", email: `reimport-${deletionMode}-${index}@example.test`,
+    assignee_id: owner, note: `Original ${index}`,
+  }));
+  const sheet = (await asUser(owner, tx => tx.query(
+    "select public.start_live_lead_import($1,2,0) as sheet", [`reimport-${deletionMode}.csv`]))).rows[0].sheet;
+  const send = (sheetId, rows) => asUser(owner, tx => tx.query(
+    "select public.import_live_lead_sheet_batch($1,0,$2::jsonb) as result", [sheetId, JSON.stringify(rows)]));
+  const duplicates = async rows => (await asUser(owner, tx => tx.query(
+    "select public.find_live_lead_import_duplicates($1::jsonb) as result", [JSON.stringify(rows)]))).rows[0].result;
+  assert.deepEqual((await send(sheet.id, originalRows)).rows[0].result, { imported: 2, skipped: 0 });
+  assert.deepEqual(await duplicates(originalRows), [0, 1]);
+  if (deletionMode === "single") {
+    await asUser(admin, tx => tx.query("select public.delete_live_lead_import($1)", [sheet.id]));
+  } else {
+    const removeBatch = () => asUser(admin, tx => tx.query(
+      "select public.delete_live_lead_import_batch($1,1) as result", [sheet.id]));
+    assert.deepEqual((await removeBatch()).rows[0].result, { deleted: 1, done: false });
+    assert.deepEqual(await duplicates(originalRows), [0, 1], "incomplete deletion must still block duplicates");
+    assert.deepEqual((await removeBatch()).rows[0].result, { deleted: 2, done: true });
+  }
+  assert.deepEqual(await duplicates(originalRows), []);
+  assert.deepEqual(await duplicates([{
+    ...originalRows[0], country_code: "", email: `local-reimport-${deletionMode}@example.test`,
+  }]), [], "legacy local-phone matches must ignore the deleted sheet too");
+
+  const otherRows = [false, true].map((archived, index) => ({
+    name: `Unrelated ${deletionMode} ${index}`, phone: `7823456${suffix}1${index}`,
+    email: `other-reimport-${deletionMode}-${index}@example.test`, assignee_id: owner, archived,
+  }));
+  for (const row of otherRows) await db.query(
+    "insert into public.leads(name,phone,email,created_by,assignee_id,is_archived) values($1,$2,$3,$4,$4,$5)",
+    [row.name, row.phone, row.email, owner, row.archived]);
+  const retryRows = [
+    ...originalRows.map(row => ({ ...row, note: "Reuploaded note" })),
+    originalRows[0],
+    ...otherRows.map(({ archived, ...row }) => row),
+  ];
+  assert.deepEqual(await duplicates(retryRows), [2, 3, 4], "in-file, active and unrelated archived matches must still be skipped");
+  const retrySheet = (await asUser(owner, tx => tx.query(
+    "select public.start_live_lead_import($1,5,0) as sheet", [`reimport-${deletionMode}.csv`]))).rows[0].sheet;
+  assert.deepEqual((await send(retrySheet.id, retryRows)).rows[0].result, { imported: 2, skipped: 3 });
+  assert.deepEqual((await send(retrySheet.id, retryRows)).rows[0].result, { imported: 2, skipped: 3 });
+  assert.deepEqual(await duplicates(originalRows), [0, 1], "the new import must block subsequent duplicates");
+  const saved = (await db.query(
+    "select imported_rows,duplicate_rows,status from public.lead_import_sheets where id=$1", [retrySheet.id])).rows[0];
+  assert.deepEqual(saved, { imported_rows: 2, duplicate_rows: 3, status: "completed" });
+  const originals = (await db.query(
+    "select l.is_archived,n.content from public.leads l join public.notes n on n.lead_id=l.id where l.import_sheet_id=$1 order by n.content", [sheet.id])).rows;
+  assert.deepEqual(originals, [
+    { is_archived: true, content: "Original 0" }, { is_archived: true, content: "Original 1" },
+  ]);
+  assert.equal((await db.query(
+    "select count(*)::integer as count from public.leads l join public.notes n on n.lead_id=l.id where l.import_sheet_id=$1 and not l.is_archived and n.content='Reuploaded note'",
+    [retrySheet.id])).rows[0].count, 2);
+});
+
+test("tracked imports retain accurate counts when invalid rows are skipped", async () => {
   const sheet = (await asUser(owner, tx => tx.query("select public.start_live_lead_import('partial.csv',2,0) as sheet"))).rows[0].sheet;
   const row = { name: "Partial import", phone: "7601234511", email: "sheet-partial@example.test", assignee_id: owner, note: "Partial note" };
   await asUser(owner, tx => tx.query("select public.import_live_lead_sheet_batch($1,0,$2)", [sheet.id, JSON.stringify([row])]));
-  await assert.rejects(asUser(owner, tx => tx.query("select public.import_live_lead_sheet_batch($1,1,$2)", [sheet.id, JSON.stringify([{ ...row, phone: "7601234512", email: "not-an-email" }])])), /invalid lead/);
+  const skipped = (await asUser(owner, tx => tx.query("select public.import_live_lead_sheet_batch($1,1,$2) as result", [sheet.id, JSON.stringify([{ ...row, phone: "7601234512", email: "not-an-email" }])]))).rows[0].result;
+  assert.deepEqual({ ...skipped }, { imported: 0, skipped: 1 });
   const saved = (await db.query("select imported_rows,duplicate_rows,status from public.lead_import_sheets where id=$1", [sheet.id])).rows[0];
-  assert.deepEqual(saved, { imported_rows: 1, duplicate_rows: 0, status: "importing" });
-  assert.equal((await db.query("select count(*)::int as count from public.lead_import_batches where sheet_id=$1", [sheet.id])).rows[0].count, 1);
+  assert.deepEqual(saved, { imported_rows: 1, duplicate_rows: 1, status: "completed" });
+  assert.equal((await db.query("select count(*)::int as count from public.lead_import_batches where sheet_id=$1", [sheet.id])).rows[0].count, 2);
   await assert.rejects(asUser(owner, tx => tx.query(
     "insert into public.leads(name,phone,created_by,assignee_id,import_sheet_id) values('Forged import','7601234599',$1,$1,$2)", [owner, sheet.id])), /authorized sheet import/);
   await assert.rejects(asUser(owner, tx => tx.query(
-    "select public.import_live_lead_sheet_batch($1,1,$2)", [sheet.id, JSON.stringify([row, row])])), /exceeds remaining/);
+    "select public.import_live_lead_sheet_batch($1,1,$2)", [sheet.id, JSON.stringify([row, row])])), /reuse an import batch index/);
   assert.equal((await asUser(admin, tx => tx.query("select public.delete_live_lead_import($1) as count", [sheet.id]))).rows[0].count, 1);
 });
 

@@ -4,6 +4,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { CurrentUser } from "@/lib/types";
 import { DEFAULT_LEAD_PICKLISTS, LEAD_PICKLIST_KEYS } from "@/lib/lead-picklists";
 import { countryCodeMatchesOptions, normalizePhone } from "@/lib/lead-phone";
+import { leadInput } from "@/lib/lead-input";
+export { leadInput } from "@/lib/lead-input";
 export { countryCallingPrefix, normalizePhone } from "@/lib/lead-phone";
 
 export const leadConfiguration = z.object({
@@ -47,27 +49,6 @@ export async function fetchLeadConfiguration(client: SupabaseClient): Promise<Le
   }
   return parsed.data;
 }
-
-export const leadInput = z.object({
-  name: z.string().trim().min(1).max(200),
-  phone: z.string().trim().min(7).max(30).refine((v) => /^\+?[\d\s().-]+$/.test(v) && v.replace(/\D/g, "").length >= 7, "Invalid phone"),
-  countryCode: z.string().trim().max(160).optional().default(""),
-  altPhone: z.string().trim().max(30).optional().default(""),
-  email: z.string().trim().max(254).refine(value => !value || value.includes("@"), "Invalid email").optional().default(""),
-  country: z.string().trim().max(100).optional().default(""),
-  billingAddress: z.string().trim().max(2000).optional().default(""),
-  course: z.string().trim().max(200).optional().default(""),
-  qualification: z.string().trim().max(200).optional().default(""),
-  speciality: z.string().trim().max(200).optional().default(""),
-  category: z.string().trim().max(100).optional().default(""),
-  source: z.string().trim().min(1).max(100).optional().default("manual"),
-  stageId: z.string().uuid().nullable().optional(),
-  assigneeId: z.string().uuid().nullable().optional(),
-  followUpAt: z.union([z.literal(""), z.string().datetime({ offset: true })]).nullable().optional(),
-  closureFee: z.number().finite().min(0).max(9999999999.99).optional().default(0),
-  expectedClosureDate: z.union([z.literal(""), z.string().date()]).nullable().optional(),
-  customFields: z.record(z.string().max(100), z.string().max(2000)).refine((v) => Object.keys(v).length <= 100, "Too many custom fields").optional().default({}),
-}).strict();
 
 export function parseLead(value: unknown) {
   const result = leadInput.safeParse(value);

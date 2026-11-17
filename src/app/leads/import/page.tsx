@@ -5,8 +5,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { CheckCircle2, Download, FileSpreadsheet, Trash2, UploadCloud, Users } from "lucide-react";
 import { ApiError, apiRequest, formatDateTime } from "@/lib/crm-data";
 import { createLeadCsvSample, MAX_LEAD_IMPORT_FILE_BYTES, MAX_LEAD_IMPORT_ROWS, parseLeadSpreadsheet } from "@/lib/live-leads-csv";
-import { isDateKey } from "@/lib/lead-filters";
-import { countryCodeMatchesOptions, normalizePhone } from "@/lib/lead-phone";
+import { normalizePhone } from "@/lib/lead-phone";
+import { sanitizeLeadImportCells } from "@/lib/lead-input";
 import { useLiveLeadData } from "@/lib/live-leads-client";
 import { downloadLeadImportPdf, type LeadImportSheet } from "@/lib/lead-import-report";
 
@@ -114,28 +114,40 @@ export default function LeadImportPage() {
       if (file.size > MAX_LEAD_IMPORT_FILE_BYTES) throw new Error("Choose a file smaller than 50 MB.");
       if (!/\.(csv|xlsx)$/i.test(file.name)) throw new Error("Choose a CSV or Excel .xlsx file.");
       const parsed = await parseLeadSpreadsheet(file, data.configuration.fields.filter((f) => f.active).map((f) => f.name));
-      const incompleteRows = parsed.flatMap((row, index) => !row.email?.trim() || !row.email.includes("@") || !row.phone?.trim() ? [index] : []);
-      const completeRows = parsed.flatMap((row, sourceIndex) => row.email?.trim() && row.email.includes("@") && row.phone?.trim() ? [{ row, sourceIndex }] : []);
-      const mapped: { lead: Record<string, unknown>; sourceIndex: number }[] = completeRows.map(({ row: { stage, assignee, note, ...row }, sourceIndex }) => {
-        const fail = (message: string): never => { throw new Error(`Row ${sourceIndex + 2}: ${message}`); };
-        if (!row.name?.trim()) fail("Name is required.");
-        if (row.countryCode?.trim() && data.configuration.picklists.countryCode.length && !data.configuration.picklists.countryCode.includes(row.countryCode) && !countryCodeMatchesOptions(row.countryCode, data.configuration.picklists.countryCode)) fail(`Choose a valid country code "${row.countryCode}".`);
-        if (note && note.length > 10000) fail("Note cannot exceed 10,000 characters.");
-        const normalized = (row.phone ?? "").replace(/\D/g, "");
-        if (normalized.length < 7 || !/^\+?[\d\s().-]+$/.test(row.phone ?? "")) fail("A valid phone is required.");
-        const stageRow = stage ? data.stages.find((s) => s.name.toLowerCase() === stage.toLowerCase()) : data.stages[0];
-        if (stage && !stageRow) fail(`Unknown active stage "${stage}".`);
+      const isComplete = (row: Record<string, string>) => {
+        const name = row.name?.trim() ?? "";
+        const phone = row.phone ?? "";
+        const email = row.email?.trim() ?? "";
+        return name.length > 0 && name.length <= 200 && phone.length <= 30
+          && phone.replace(/\D/g, "").length >= 7 && /^\+?[\d\s().-]+$/.test(phone)
+          && email.length <= 254 && email.includes("@");
+      };
+      const incompleteRows = parsed.flatMap((row, index) => isComplete(row) ? [] : [index]);
+      const completeRows = parsed.flatMap((row, sourceIndex) => isComplete(row) ? [{ row, sourceIndex }] : []);
+      const mapped: { lead: Record<string, unknown>; clearedCells: number; sourceIndex: number }[] = completeRows.map(({ row: { stage, assignee, ...row }, sourceIndex }) => {
+        const stageName = stage?.trim() ?? "";
+        const stageRow = stageName
+          ? data.stages.find((s) => s.name.toLowerCase() === stageName.toLowerCase()) ?? data.stages[0]
+          : data.stages.find((s) => s.name.trim().toLowerCase() === "fresh");
+        if (!stageName && !stageRow) throw new Error('An active "Fresh" stage is required for leads with an empty stage. Enable it in CRM settings and reload.');
         const matches = assignee ? data.profiles.filter((p) => p.status === "active" && (p.email.toLowerCase() === assignee.toLowerCase() || p.fullName.toLowerCase() === assignee.toLowerCase())) : [];
-        if (assignee && matches.length !== 1) fail(`Assignee "${assignee}" must match one accessible active user. Prefer their email.`);
-        const assigneeId = matches[0]?.id ?? null;
-        if (assigneeId && assigneeId !== data.user.id && !data.user.permissions.includes("leads.assign")) fail("Assignment permission is required.");
-        if (row.followUpAt && (!/^\d{4}-\d\d-\d\dT.*(?:Z|[+-]\d\d:\d\d)$/.test(row.followUpAt) || !Number.isFinite(Date.parse(row.followUpAt)))) fail("Follow-up must be an ISO timestamp with timezone.");
-        if (row.expectedClosureDate && !isDateKey(row.expectedClosureDate)) fail("Expected closure date must be a valid YYYY-MM-DD date.");
-        const closureFee = Number(row.closureFee || 0);
-        if (!Number.isFinite(closureFee) || closureFee < 0) fail("Expected closure fee must be a nonnegative number.");
+        const assigneeId = matches.length === 1 && (matches[0].id === data.user.id || data.user.permissions.includes("leads.assign")) ? matches[0].id : null;
         const customFields = Object.fromEntries(Object.entries(row).filter(([key]) => key.startsWith("custom:")).map(([key, value]) => [key.slice(7), value]));
         const builtIn = Object.fromEntries(Object.entries(row).filter(([key]) => !key.startsWith("custom:")));
-        return { lead: { ...builtIn, phone: `+${normalizePhone(row.phone, row.countryCode)}`, customFields, note, source: row.source || "import", stageId: stageRow?.id ?? null, assigneeId, followUpAt: row.followUpAt || null, closureFee }, sourceIndex };
+        const sanitized = sanitizeLeadImportCells({
+          ...builtIn, customFields, closureFee: Number(row.closureFee || 0), source: row.source || "import",
+          followUpAt: row.followUpAt || "", expectedClosureDate: row.expectedClosureDate || "",
+        }, data.configuration);
+        return {
+          lead: {
+            ...sanitized.values,
+            phone: `+${normalizePhone(row.phone, String(sanitized.values.countryCode ?? ""))}`,
+            stageId: stageRow?.id ?? null,
+            assigneeId,
+          },
+          clearedCells: sanitized.clearedCells,
+          sourceIndex,
+        };
       });
       if (parsed.length > MAX_LEAD_IMPORT_ROWS) throw new Error(`Import at most ${MAX_LEAD_IMPORT_ROWS.toLocaleString()} leads at a time.`);
       const duplicateIndexes = new Set<number>();
@@ -179,11 +191,15 @@ export default function LeadImportPage() {
         offset += batch.length;
         setProgress(`Checking duplicates: ${offset.toLocaleString()} of ${candidates.length.toLocaleString()} leads`);
       }
-      const remainingRows = mapped.filter((_, index) => !duplicateIndexes.has(index)).map(({ lead }) => lead);
+      const remaining = mapped.filter((_, index) => !duplicateIndexes.has(index));
+      const remainingRows = remaining.map(({ lead }) => lead);
       setRows(remainingRows);
       const sampleRows: Record<string, string>[] = [];
       for (let index = 0; index < mapped.length && sampleRows.length < 20; index++) {
-        if (!duplicateIndexes.has(index)) sampleRows.push({ ...parsed[mapped[index].sourceIndex], phone: String(mapped[index].lead.phone) });
+        if (!duplicateIndexes.has(index)) {
+          const cleanedCells = Object.fromEntries(Object.entries(mapped[index].lead).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+          sampleRows.push({ ...parsed[mapped[index].sourceIndex], ...cleanedCells });
+        }
       }
       setPreviewCount(remainingRows.length);
       setPreview(sampleRows);
@@ -191,13 +207,17 @@ export default function LeadImportPage() {
       setSkippedRows(skippedCount);
       setTotalRows(parsed.length);
       setProgress("");
+      const messages: string[] = [];
       if (skippedCount) {
         const reasons = [
-          incompleteRows.length ? `${incompleteRows.length.toLocaleString()} with a blank phone/email or an email without @` : "",
+          incompleteRows.length ? `${incompleteRows.length.toLocaleString()} with missing or invalid required lead fields` : "",
           duplicateIndexes.size ? `${duplicateIndexes.size.toLocaleString()} duplicates` : "",
         ].filter(Boolean).join(" and ");
-        setNotice(`${skippedCount.toLocaleString()} row${skippedCount === 1 ? "" : "s"} skipped (${reasons}).`);
+        messages.push(`${skippedCount.toLocaleString()} row${skippedCount === 1 ? "" : "s"} skipped (${reasons}).`);
       }
+      const clearedCells = remaining.reduce((count, row) => count + row.clearedCells, 0);
+      if (clearedCells) messages.push(`${clearedCells.toLocaleString()} invalid optional cell${clearedCells === 1 ? "" : "s"} cleared. Valid values in the same columns are preserved.`);
+      setNotice(messages.join(" "));
     } catch (e) { setProgress(""); setError(e instanceof Error ? e.message : "Could not read the spreadsheet."); }
     finally { setBusy(false); }
   }
@@ -292,7 +312,7 @@ export default function LeadImportPage() {
       </label>
       <div className="import-selection"><div className="import-counts"><span><strong>{totalRows.toLocaleString()}</strong> total rows</span><span><strong>{rows.length.toLocaleString()}</strong> ready to review</span><span><strong>{skippedRows.toLocaleString()}</strong> skipped</span><span><strong>{assignedCount.toLocaleString()}</strong> assigned</span></div><button className="button button-primary" disabled={busy || !totalRows || firstUnassignedIndex >= 0 || Boolean(historyAction)} onClick={() => importRows()}>{busy ? "Processing…" : importSession.current ? "Retry import" : rows.length ? "Import validated leads" : "Save skipped-row report"}</button></div>
       {progress && <p className="import-progress" role="status">{progress}</p>}
-      <details className="import-instructions"><summary>Import format and duplicate rules</summary><p>Upload up to 200,000 leads per file (maximum 50 MB). Required columns: name, phone and email. Rows with an empty phone/email or an email without @ are skipped automatically. Any non-empty email containing @ is accepted. Duplicate email addresses and equivalent phone numbers are skipped automatically, including duplicates within this file. Blank optional fields in other columns are accepted. countryCode is optional; when provided, choose a configured country code. Phone numbers may include the code with or without a + sign, or be a local number paired with countryCode. If assignee is blank, choose an owner for that lead before importing. Assignee accepts an active user&apos;s email or full name. Notes are added to each lead&apos;s Notes timeline. The sample includes two example rows with a value or format for every column; delete both sample rows before importing your own leads. Custom fields use custom:Field name headers from the template. Follow-up timestamps require an explicit timezone (for example, 2026-12-02T10:00:00+05:30). Excel uploads read the first worksheet from an .xlsx workbook.</p><p>Imports are saved in batches. Temporary connection errors are retried automatically, and database statement timeouts are retried with smaller batches. If retries fail, use Retry import without leaving this page. Any validation failure rejects the affected batch. Imports use active database stages.</p></details>
+      <details className="import-instructions"><summary>Import format and duplicate rules</summary><p>Upload up to 200,000 leads per file (maximum 50 MB). Required columns: name, phone and email. Rows with missing or invalid required lead fields are skipped. Unknown columns and invalid optional field values are ignored. Any non-empty email containing @ is accepted. Duplicate email addresses and equivalent phone numbers are skipped automatically, including duplicates within this file. Blank optional fields in other columns are accepted. countryCode is optional; when provided, choose a configured country code. Phone numbers may include the code with or without a + sign, or be a local number paired with countryCode. If assignee is blank, choose an owner for that lead before importing. Assignee accepts an active user&apos;s email or full name. Notes are added to each lead&apos;s Notes timeline (up to 10,000 characters). The sample includes two example rows with a value or format for every column; delete both sample rows before importing your own leads. Custom fields use custom:Field name headers from the template. Follow-up timestamps require an explicit timezone (for example, 2026-12-02T10:00:00+05:30). Excel uploads read the first worksheet from an .xlsx workbook.</p><p>Imports are saved in batches. Temporary connection errors are retried automatically, and database statement timeouts are retried with smaller batches. If retries fail, use Retry import without leaving this page. Rows with an inaccessible assignee are skipped without rejecting other valid rows. Imports use active database stages.</p></details>
     </div></section>
     {preview.length > 0 && <div className={`import-review${firstUnassignedIndex >= 0 ? " has-assignment" : ""}`}>
       {firstUnassignedIndex >= 0 && <section className="panel import-assignment" aria-label="Assign lead owners"><div className="import-section-heading"><Users size={17} /><h2>Assign lead owner</h2><span className="import-pending-count">{unassignedCount.toLocaleString()} pending</span></div><div className="import-assignment-body"><div className="import-lead-identity"><strong>{String(rows[firstUnassignedIndex].name ?? `Row ${firstUnassignedIndex + 2}`)}</strong><span>{String(rows[firstUnassignedIndex].email ?? "")}</span><span>{String(rows[firstUnassignedIndex].phone ?? "")}</span></div><label className="form-field"><span>Assign to</span><select aria-label={`Assign ${String(rows[firstUnassignedIndex].name ?? `row ${firstUnassignedIndex + 2}`)}`} value={assignmentChoice} disabled={busy} onChange={event => setAssignmentChoice(event.target.value)}><option value="">Choose an active lead owner</option>{availableAssignees.map(profile => <option key={profile.id} value={profile.id}>{profile.fullName} · {profile.email}</option>)}</select></label>{unassignedCount > 1 && <label className="import-assign-all"><input type="checkbox" checked={assignAll} disabled={busy} onChange={event => setAssignAll(event.target.checked)} />Apply to all {unassignedCount.toLocaleString()} unassigned leads</label>}<button className="button button-primary" disabled={busy || !assignmentChoice} onClick={() => { setRows(current => current.map((row, index) => index === firstUnassignedIndex || (assignAll && !row.assigneeId) ? { ...row, assigneeId: assignmentChoice } : row)); setAssignmentChoice(""); }}>Assign and continue</button></div></section>}

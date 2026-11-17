@@ -72,9 +72,6 @@ function mapLeadRecords(records: unknown[][], customFields: string[]): Record<st
   };
   const cellText = (value: unknown) => value === null || value === undefined ? "" : value instanceof Date ? value.toISOString() : String(value);
   const unnamedColumns = records[0].flatMap((cell, index) => cellText(cell).trim() ? [] : [index]);
-  if (unnamedColumns.some(index => records.slice(1).some(row => cellText(row[index]).trim()))) {
-    throw new Error("CSV contains values under an unnamed column. Add a header or remove that column.");
-  }
   const normalizedRecords = unnamedColumns.length
     ? records.map(row => row.filter((_, index) => !unnamedColumns.includes(index)))
     : records;
@@ -82,14 +79,15 @@ function mapLeadRecords(records: unknown[][], customFields: string[]): Record<st
     const value = cellText(cell).trim();
     if (value.startsWith("custom:") && customFields.includes(value.slice(7))) return value;
     const key = aliases[value.toLowerCase().replace(/\s*\(required\)\s*$/, "").replace(/[\s_-]/g, "")];
-    if (!key) throw new Error(`Unknown CSV column "${value}". Use the template headers.`);
-    return key;
+    return key ?? null;
   });
-  if (new Set(headers).size !== headers.length) throw new Error("CSV contains duplicate headers.");
-  if (!headers.includes("name") || !headers.includes("phone")) throw new Error("CSV requires name and phone columns.");
+  const recognizedHeaders = headers.filter((header): header is string => header !== null);
+  if (new Set(recognizedHeaders).size !== recognizedHeaders.length) throw new Error("CSV contains duplicate headers.");
+  if (!recognizedHeaders.includes("name") || !recognizedHeaders.includes("phone")) throw new Error("CSV requires name and phone columns.");
   return normalizedRecords.slice(1).map((cells, i) => {
-    if (cells.length !== headers.length) throw new Error(`Row ${i + 2} has ${cells.length} values; expected ${headers.length}.`);
-    return Object.fromEntries(headers.map((key, index) => [key, cellText(cells[index]).trim()]));
+    return Object.fromEntries(headers.flatMap((key, index) =>
+      key === null ? [] : [[key, cellText(cells[index]).trim()]],
+    ));
   });
 }
 

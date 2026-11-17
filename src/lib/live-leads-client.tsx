@@ -391,7 +391,8 @@ export function LeadForm({ initial, stages, profiles, canAssign, onSave, busy, s
     {renderAssigneeField()}
     {renderClosureFeeField()}
     <label className="form-field"><span>Expected closure date</span><input type="date" value={draft.expectedClosureDate ?? ""} onChange={event => setDraft({ ...draft, expectedClosureDate: event.target.value || null })} /></label>
-    {!newLead && <>{renderTextField("altPhone")}{renderFollowUpField()}</>}
+    {!newLead && renderTextField("altPhone")}
+    {renderFollowUpField()}
     {activeFields.map((field, index) => <div className="form-field" key={field.name}>
       <label htmlFor={`lead-custom-${index}`}>{field.name}</label>
       {field.type === "dropdown"

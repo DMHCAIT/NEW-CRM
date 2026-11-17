@@ -25,7 +25,9 @@ once to existing saved Leads layouts; it can still be hidden through Columns.
 Lead list filters reuse fresh metadata even when the first visit is a filtered
 view. Cached data expires after 30 seconds; writes and manual refresh invalidate
 it. Lead pages fetch up to 100 records so page-size changes can reuse the same
-data; pagination advances from the last displayed lead. While a new filter is
+data; pagination advances from the last displayed lead. Additional pages load
+on navigation rather than speculative background reads, so an unused page cannot
+produce an error banner over successfully loaded leads. While a new filter is
 being fetched, the previous results stay visible and cannot be selected.
 Sidebar preparation requests the same 100-lead page so navigation can reuse it.
 Bulk status changes and transfers use batches of up to 100 leads; deletions run up
@@ -122,6 +124,12 @@ through an authenticated, lead-scoped endpoint. Access follows the lead's curren
 archived leads' images are not served. Image bytes are fetched separately from
 the normal lead-detail response.
 
+Lead overview duplicate-owner discovery uses the stored normalized phone/email
+indexes, including legacy local/country-code matching, rather than normalizing
+every lead's phone on each overview request. Apply
+`202611170005_index_lead_duplicate_owners.sql` for this query optimization;
+lead visibility and cross-owner merge permissions are unchanged.
+
 ### Lead spreadsheet imports
 
 Apply migrations through `202611110006_lead_import_history.sql`. CSV and XLSX uploads
@@ -129,6 +137,9 @@ support up to 200,000 leads and 50 MB, with 5,000-row API batches. Email, name a
 phone are required; country code remains optional. Phone values from every source
 are stored with a leading `+`; an omitted country code is not guessed. The migration
 also adds `+` to existing unprefixed phone values without marking them as user edits.
+An empty or omitted stage defaults to the active **Fresh** stage, regardless of
+stage order. Valid supplied stages are preserved. If Fresh is not active, the
+upload reports an error instead of choosing another stage.
 
 New imports save the sheet name, total rows, imported count and skipped duplicates
 in database-backed **Import history**. Successful imports automatically download a
@@ -140,11 +151,26 @@ its selected sheet remains open; selecting another file starts a separate import
 Previously imported sheets cannot be reconstructed from leads and are not backfilled.
 Only metadata is retained, not the original uploaded file.
 
+Invalid optional values are cleared cell by cell, not column by column. For example,
+an oversized note is left blank only on that lead; valid notes on other leads are
+still added to their Notes timelines. Notes are limited to 10,000 characters in
+the app and database import function; apply
+`202611170004_restore_import_note_limit.sql` to restore this database limit.
+Existing notes are not modified. The review notice reports cleared optional
+cells. Empty or invalid email/mobile values skip the entire row, as do missing or
+invalid required names; duplicate rules and owner permissions still apply.
+
 Administrators with lead import/delete permissions can delete an accessible sheet
 after confirmation. This archives only leads actually created by that sheet,
 including reassigned leads still within the administrator's scope; duplicates and
 unrelated leads remain unchanged. This follows normal CRM deletion semantics and
-preserves audit history. Other users see only their own imports; users with the
+preserves audit history. Apply `202611170003_reimport_deleted_lead_sheets.sql` to
+allow re-uploading a deleted sheet: both the duplicate precheck and final import
+ignore archived leads belonging to fully deleted sheets. Active leads, unrelated
+archived leads, in-file duplicates, and sheets whose deletion is still in progress
+retain their existing duplicate protection. Re-imports create new leads; they do
+not restore or modify the archived originals.
+Other users see only their own imports; users with the
 existing user-view permission can view imports across users.
 
 ### Lead alerts and scheduled-call reminders
@@ -526,8 +552,8 @@ records into the live database.
 
 - Leads filters execute inside PostgreSQL under the signed-in user's RLS policies.
   Each page returns at most **50 leads**. Next/Previous use a `(created_at, id)`
-  cursor instead of skipping an ever-growing number of rows. The next page is
-  prefetched after the current page arrives. List counters describe the current
+  cursor instead of skipping an ever-growing number of rows. The next page loads
+  when requested rather than being prefetched. List counters describe the current
   page; they do not run an expensive exact count on every navigation. Bulk
   selection is page-scoped and cleared when changing pages or filters.
 - Search inputs are debounced by 250 ms. Incomplete conditions show validation
@@ -874,6 +900,8 @@ Maintain the Reporting to hierarchy in Users for team dashboards.
 New lead opens a dedicated `/leads/new` page instead of expanding the list.
 The page retains configured fields, assignment permissions and duplicate-policy
 confirmation. Saving opens the created lead; Back to leads returns to the list.
+An optional **Next follow-up** date/time can be selected while creating a lead;
+the local time is saved as a UTC timestamp, or left empty when not scheduled.
 Legacy `/leads?create=1` links redirect to the new page.
 
 Buttons use blue primary actions and bordered secondary actions. Keyboard navigation

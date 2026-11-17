@@ -18,6 +18,7 @@ function load(path, dependencies = {}) {
       name === "@/lib/note-images" ? load("src\\lib\\note-images.ts") :
       name === "@/lib/server/note-images" ? load("src\\lib\\server\\note-images.ts", { "@/lib/server/auth": auth }) :
       name === "@/lib/server/email-signature" ? load("src\\lib\\server\\email-signature.ts", dependencies) :
+      name === "@/lib/lead-input" ? load("src\\lib\\lead-input.ts") :
       name === "@/lib/lead-phone" ? load("src\\lib\\lead-phone.ts") : require(name),
     Date, Set, URL, Response, Buffer, console, crypto: require("node:crypto").webcrypto,
   });
@@ -550,15 +551,22 @@ test("expected closure date validates real calendar days without timezone conver
   assert.equal(csv.parseLeadCsv("name,phone,closureFee\nNew lead,9876543210,1250")[0].closureFee, "1250");
 });
 
-test("lead CSV import ignores unnamed empty columns but rejects data without a header", () => {
+test("lead CSV import ignores unnamed and unknown columns", () => {
   const parsed = csv.parseLeadCsv("name,phone,email,\nMina,9876543210,mina@example.test,\n");
   assert.equal(parsed.length, 1);
   assert.equal(parsed[0].name, "Mina");
   assert.equal(parsed[0].email, "mina@example.test");
-  assert.throws(
-    () => csv.parseLeadCsv("name,,phone,email\nMina,unexpected,9876543210,mina@example.test"),
-    /values under an unnamed column/,
-  );
+  const withUnknownColumns = csv.parseLeadCsv("name,legacy field,phone,email,unmapped\nMina,ignored,9876543210,mina@example.test,extra");
+  assert.equal(withUnknownColumns.length, 1);
+  assert.equal(withUnknownColumns[0].name, "Mina");
+  assert.equal(withUnknownColumns[0].phone, "9876543210");
+  assert.equal(withUnknownColumns[0].email, "mina@example.test");
+  assert.equal("legacy field" in withUnknownColumns[0], false);
+  const unnamed = csv.parseLeadCsv("name,,phone,email\nMina,ignored,9876543210,mina@example.test");
+  assert.equal(unnamed[0].phone, "9876543210");
+  assert.equal(unnamed[0].email, "mina@example.test");
+  const shortRow = csv.parseLeadCsv("name,phone,email,unmapped\nMina,9876543210,mina@example.test");
+  assert.equal(shortRow[0].email, "mina@example.test");
 });
 
 test("sample lead CSV marks required columns and includes two parseable examples for every field", () => {
@@ -774,16 +782,16 @@ test("CSV reads BOM, quoted commas, multiline values, quotes and CRLF", () => {
   assert.equal(rows[0].course, "Course\nTwo");
 });
 
-test("CSV rejects malformed headers, field counts, quotes and oversized imports", () => {
+test("CSV rejects malformed headers, quotes and oversized imports but tolerates short rows", () => {
   for (const source of [
     "name,Name,phone\nA,A,9876543210",
     "name,secret\nA,1",
-    "name,phone\nA",
     'name,phone\n"A,9876543210',
     'name,phone\n"A"x,9876543210',
     "name,phone\n",
     `name,phone\n${"A,9876543210\n".repeat(200001)}`,
   ]) assert.throws(() => csv.parseLeadCsv(source));
+  assert.equal(csv.parseLeadCsv("name,phone,email\nA").length, 1);
 });
 
 test("lead import limits support 200,000 rows and 50 MB files", () => {
@@ -853,7 +861,7 @@ test("import requires create permission, email and an authorized assignee; count
     [["leads.create", "leads.import"], [{ ...validLead, countryCode: "+91", assigneeId: self }], 201, 1],
     [["leads.create", "leads.import"], [{ ...validLead, countryCode: "91", assigneeId: self }], 201, 1],
     [["leads.create", "leads.import"], [{ ...validLead, countryCode: "India (+91)" }], 400, 0],
-    [["leads.create", "leads.import"], [{ ...validLead, countryCode: "Invalid (+999)", assigneeId: self }], 400, 0],
+    [["leads.create", "leads.import"], [{ ...validLead, countryCode: "Invalid (+999)", assigneeId: self }], 201, 1],
     [["leads.create", "leads.import"], [{ ...validLead, countryCode: "India (+91)", assigneeId: "00000000-0000-4000-8000-000000000002" }], 400, 0],
   ]) {
     let writes = 0;
@@ -915,14 +923,16 @@ test("duplicate precheck preserves a confirmed database timeout for batch splitt
   assert.match(await response.text(), /canceling statement due to statement timeout/);
 });
 
-test("lead import attaches optional notes in the atomic import RPC", async () => {
+test("lead import clears only invalid optional cells and retains valid values in the same columns", async () => {
   let rpcRows;
   const route = load("src\\app\\api\\leads\\import\\route.ts", {
     "next/server": { NextResponse: Response },
     "@/lib/live-leads": {
       ...validation,
-      fetchLeadConfiguration: async () => ({ fields: [], picklists: picklists.DEFAULT_LEAD_PICKLISTS }),
-      validateCustomFields() {},
+      fetchLeadConfiguration: async () => ({
+        fields: [{ name: "Campus", active: true, type: "dropdown", options: ["Delhi"] }],
+        picklists: picklists.DEFAULT_LEAD_PICKLISTS,
+      }),
       enforceDuplicatePolicy: async () => {},
     },
     "@/lib/server/auth": { ...auth, requireUser: async () => ({
@@ -937,17 +947,26 @@ test("lead import attaches optional notes in the atomic import RPC", async () =>
   });
   const response = await route.POST(new Request("http://localhost/api/leads/import", {
     method: "POST",
-    body: JSON.stringify({ rows: [{ ...validLead, countryCode: "India (+91)", assigneeId: "00000000-0000-4000-8000-000000000001", note: " Initial enquiry " }] }),
+    body: JSON.stringify({ rows: [{ ...validLead, countryCode: "India (+91)", assigneeId: "00000000-0000-4000-8000-000000000001", note: "x".repeat(10000) }] }),
   }));
   assert.equal(response.status, 201);
-  assert.equal(rpcRows[0].note, "Initial enquiry");
+  assert.equal(rpcRows[0].note.length, 10000);
   assert.equal(rpcRows[0].name, validLead.name);
 
-  const invalid = await route.POST(new Request("http://localhost/api/leads/import", {
+  const mixed = await route.POST(new Request("http://localhost/api/leads/import", {
     method: "POST",
-    body: JSON.stringify({ rows: [{ ...validLead, countryCode: "India (+91)", assigneeId: "00000000-0000-4000-8000-000000000001", note: "x".repeat(10001) }] }),
+    body: JSON.stringify({ rows: [
+      { ...validLead, assigneeId: "00000000-0000-4000-8000-000000000001", note: "Valid note before", course: "Valid course", customFields: { Campus: "Delhi" } },
+      { ...validLead, assigneeId: "00000000-0000-4000-8000-000000000001", note: "x".repeat(10001), course: "x".repeat(201), expectedClosureDate: "2026-02-30", customFields: { Campus: "Unknown" } },
+      { ...validLead, assigneeId: "00000000-0000-4000-8000-000000000001", note: "Valid note after", course: "Other course", customFields: { Campus: "Delhi" } },
+    ] }),
   }));
-  assert.equal(invalid.status, 400);
+  assert.equal(mixed.status, 201);
+  assert.deepEqual(await mixed.json(), { imported: 3, skipped: 0 });
+  assert.deepEqual(Array.from(rpcRows, row => row.note), ["Valid note before", "", "Valid note after"]);
+  assert.deepEqual(Array.from(rpcRows, row => row.course), ["Valid course", null, "Other course"]);
+  assert.deepEqual(Array.from(rpcRows, row => row.custom_fields.Campus), ["Delhi", "", "Delhi"]);
+  assert.equal(rpcRows[1].expected_closure_date, null);
 });
 
 test("import duplicate precheck allows unresolved owners and returns only duplicate row indexes", async () => {
@@ -1216,7 +1235,7 @@ test("merge API checks actual permissions and both RLS-scoped leads before the t
     assert.equal(merges, expected === 200 ? 1 : 0);
   }
 });
-test("custom fields accept active configuration and preserve existing inactive values only", () => {
+test("custom fields accept active configuration and ignore inactive CSV columns", () => {
   const config = { duplicateFields: "phone_email", creationPolicy: "block", fields: [
     { name: "Centre", active: true, type: "text", options: [] },
     { name: "Program", active: true, type: "dropdown", options: ["Cardiology", "Neurology"] },
@@ -1230,7 +1249,9 @@ test("custom fields accept active configuration and preserve existing inactive v
   assert.throws(() => validation.validateCustomFields({ Program: "Retired option" }, config), /valid value/);
   const rows = csv.parseLeadCsv("name,phone,custom:Centre\nStudent,9876543210,Delhi", ["Centre"]);
   assert.equal(rows[0]["custom:Centre"], "Delhi");
-  assert.throws(() => csv.parseLeadCsv("name,phone,custom:Legacy\nStudent,9876543210,Delhi", ["Centre"]), /Unknown CSV/);
+  const ignoredLegacy = csv.parseLeadCsv("name,phone,custom:Legacy\nStudent,9876543210,Delhi", ["Centre"]);
+  assert.equal(ignoredLegacy[0].name, "Student");
+  assert.equal("custom:Legacy" in ignoredLegacy[0], false);
 });
 
 test("active live lead flows never import demo stores or local storage", () => {

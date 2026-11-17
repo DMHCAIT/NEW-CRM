@@ -106,7 +106,7 @@ export async function createLeadImportPdf(sheet: LeadImportSheet): Promise<Uint8
   text(pendingLabel, 559 - bold.widthOfTextAtSize(pendingLabel, 13), sectionTop + 193, 13, navy, true);
   block(36, sectionTop + 232, 523, 70, rgb(0.96, 0.97, 0.99));
   text("ABOUT THIS IMPORT", 50, sectionTop + 245, 9, muted, true);
-  text("Rows with blank email or phone, repeated rows and existing CRM matches are skipped.", 50, sectionTop + 263, 10, muted);
+  text("Invalid required rows, duplicates and existing CRM matches are skipped.", 50, sectionTop + 263, 10, muted);
   text("Only new leads belong to this sheet. Existing leads are unchanged.", 50, sectionTop + 279, 10, muted);
   text(`Import ID: ${sheet.id}`, 36, height - 64, 8, muted);
   text("DMHCA CRM", 36, height - 40, 9, muted, true);

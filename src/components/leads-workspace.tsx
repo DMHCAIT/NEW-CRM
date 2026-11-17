@@ -100,11 +100,6 @@ export default function LeadsWorkspace({ initialFilter, dashboard = false, initi
       .finally(() => { if (active) setAllRowsLoading(false); });
     return () => { active = false; };
   }, [pageSize, settledQueryFilterKey, dashboard, validation, queryUpdating, queryFilter, setError, loading, data]);
-  useEffect(() => {
-    if (pageSize === "all" || !nextCursor || !hasMore || loading || queryUpdating || validation) return;
-    const nextPath = leadQueryPath(queryFilter, { cursor: nextCursor, dashboard, pageSize: 100 });
-    void loadLeadListData(nextPath, { maxAgeMs: 30000 }).catch((e: unknown) => setError(e instanceof Error ? e.message : "Could not prefetch the next page."));
-  }, [nextCursor?.id, nextCursor?.createdAt, hasMore, loading, queryFilter, queryUpdating, dashboard, pageSize, validation, setError]);
   const [bulkAction, setBulkAction] = useState<"transfer" | "stage" | "delete" | null>(null);
   const bulkDialogRef = useRef<HTMLDialogElement>(null);
   useEffect(() => {
