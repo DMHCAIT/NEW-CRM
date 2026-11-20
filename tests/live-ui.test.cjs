@@ -64,7 +64,7 @@ function load(relative, overrides = {}) {
       if (source.includes("@/components/course-catalog")) return load("src\\components\\course-catalog.tsx", overrides).CourseCatalog;
       throw new Error("Unmapped dynamic UI fixture.");
     } };
-    if (name === "next/navigation") return { usePathname: () => currentPath, useSearchParams: () => new URLSearchParams(), useParams: () => ({ id: "report-1", mode: "list" }), useRouter: () => ({ push() {}, replace() {}, prefetch() {} }), notFound() { throw new Error("Not found"); } };
+    if (name === "next/navigation") return { usePathname: () => currentPath, useSearchParams: () => new URLSearchParams(), useParams: () => ({ id: relative === "src\\app\\leads\\[id]\\page.tsx" ? lead.id : "report-1", mode: "list" }), useRouter: () => ({ push() {}, replace() {}, prefetch() {} }), notFound() { throw new Error("Not found"); } };
     if (name.startsWith("@/")) {
       const base = name.replace("@/", "src\\").replaceAll("/", "\\");
       return load(`${base}${existsSync(path.join(root, `${base}.ts`)) ? ".ts" : ".tsx"}`, overrides);
@@ -82,6 +82,10 @@ function hookStates(values) {
   let index = 0;
   return { ...React, useState: (initial) => [index < values.length ? values[index++] : typeof initial === "function" ? initial() : initial, () => {}], useRef: initial => ({ current: initial }), useEffect() {} };
 }
+function integrationPageStates({ sourceForm = false, channel = "website", selected = null } = {}) {
+  return [sourceForm, channel, "", "stage-1", "", "", null, false, "", null, "",
+    selected, false, "", "", false, "", "All integrations", ""];
+}
 class TestApiError extends Error {
   constructor(message, status) { super(message); this.status = status; }
 }
@@ -89,6 +93,7 @@ const crm = {
   ApiError: TestApiError,
   formatDateTime: (value) => value ? new Date(value).toLocaleString("en-IN") : "",
   apiRequest: async () => ({}), errorMessage: (error) => error.message,
+  prefetchApiRead: async () => ({}),
   getCachedApiRead: () => undefined,
   getPreparedApiRead: () => undefined,
   getApiReadSnapshot: () => undefined,
@@ -232,10 +237,10 @@ const cases = [
   ["integrations", "src\\app\\integrations\\page.tsx", { states: [true, "website", "", "stage-1", "", "", null, false, "", null, null], overrides: { "./operational-ui": opMock, "@/app/integrations/operational-ui": opMock } }],
   ["integrations-empty", "src\\app\\integrations\\page.tsx", { overrides: { "./operational-ui": emptyIntegrationMock, "@/app/integrations/operational-ui": emptyIntegrationMock } }],
   ["integrations-clean-source", "src\\app\\integrations\\page.tsx", { states: [true, "website", "", "stage-1", "", "", null, false, "", null, null], overrides: { "./operational-ui": emptyIntegrationMock, "@/app/integrations/operational-ui": emptyIntegrationMock } }],
-  ["integrations-setup", "src\\app\\integrations\\page.tsx", { states: [false, "website", "", "stage-1", "", "", null, false, "", null, null, "", "smtp"], overrides: { "./operational-ui": opMock, "@/app/integrations/operational-ui": opMock } }],
-  ["integrations-website-guide", "src\\app\\integrations\\page.tsx", { states: [false, "website", "", "stage-1", "", "", null, false, "", null, null, "", "intake"], overrides: { "./operational-ui": opMock, "@/app/integrations/operational-ui": opMock } }],
-  ["integrations-meta-guide", "src\\app\\integrations\\page.tsx", { states: [false, "website", "", "stage-1", "", "", null, false, "", null, null, "", "facebook"], overrides: { "./operational-ui": opMock, "@/app/integrations/operational-ui": opMock } }],
-  ["integrations-facebook", "src\\app\\integrations\\page.tsx", { states: [true, "facebook", "", "stage-1", "", "", null, false, "", null, null, "", null, false, "", "", false, "", "All integrations", ""], overrides: { "./operational-ui": opMock, "@/app/integrations/operational-ui": opMock } }],
+  ["integrations-setup", "src\\app\\integrations\\page.tsx", { states: integrationPageStates({ selected: "smtp" }), overrides: { "./operational-ui": opMock, "@/app/integrations/operational-ui": opMock } }],
+  ["integrations-website-guide", "src\\app\\integrations\\page.tsx", { states: integrationPageStates({ selected: "intake" }), overrides: { "./operational-ui": opMock, "@/app/integrations/operational-ui": opMock } }],
+  ["integrations-meta-guide", "src\\app\\integrations\\page.tsx", { states: integrationPageStates({ selected: "facebook" }), overrides: { "./operational-ui": opMock, "@/app/integrations/operational-ui": opMock } }],
+  ["integrations-facebook", "src\\app\\integrations\\page.tsx", { states: integrationPageStates({ sourceForm: true, channel: "facebook" }), overrides: { "./operational-ui": opMock, "@/app/integrations/operational-ui": opMock } }],
   ["login-activity", "src\\app\\admin\\login-activity\\page.tsx", { overrides: { "@/lib/server/auth": server } }],
   ["notifications", "src\\app\\notifications\\page.tsx", { overrides: { "@/lib/server/auth": server } }],
   ["help", "src\\app\\help\\page.tsx", {}],
@@ -439,7 +444,7 @@ test("desktop sidebar can close and reopen without changing the mobile drawer or
 test("shared sidebar preserves permitted navigation and profile for every role", () => {
   const { DEFAULT_ROLE_PERMISSIONS } = load("src\\lib\\permissions.ts");
   const { navigationItems } = load("src\\lib\\navigation.ts");
-  for (const role of ["counselor", "team_lead", "manager", "admin", "super_admin"]) {
+  for (const role of ["counselor", "team_lead", "manager", "accounts", "admin", "super_admin"]) {
     const roleUser = { ...user, profile: { ...profile, role }, permissions: DEFAULT_ROLE_PERMISSIONS[role] };
     const html = renderToStaticMarkup(React.createElement(shell, { user: roleUser }, "Workspace"));
     const sidebar = html.match(/<aside[\s\S]*?<\/aside>/)[0];
@@ -1523,7 +1528,7 @@ test("invoice staff can request discount approval using the real catalog respons
       const save = nodes.find(node => node.type === "button" && node.props.className === "button button-primary");
       assert.equal(save.props.children, "Save & request approval");
       assert.equal(save.props.disabled, false, `${role} must be able to request approval for ${company} ${currency}`);
-      assert.equal(nodes.find(node => node.props?.["aria-label"] === "Approver").props.value, "Super Admin");
+      assert.equal(nodes.find(node => node.props?.["aria-label"] === "Approver").props.value, "Accounts or Super Admin");
       assert.equal(nodes.find(node => node.props?.name === "discount_reason").props.required, true);
       await nodes.find(node => node.type === "form").props.onSubmit({ preventDefault() {}, currentTarget: {} });
       assert.equal(submitted.discount_percent, 10);
@@ -1640,7 +1645,7 @@ test("invoice form scopes to the lead, previews percentage discounts and submits
   assert.equal(nodes.find(node=>node.props?.["aria-label"]==="Due Date").props.onChange,undefined);
   assert.equal(nodes.find(node=>node.props?.name==="discount_percent").props.readOnly,false);
   assert.equal(nodes.find(node => node.props?.name === "tax_amount").props.value, "4410.00");
-  assert.equal(field("Approver"), "Super Admin");
+  assert.equal(field("Approver"), "Accounts or Super Admin");
   await nodes.find(node => node.type === "form").props.onSubmit({ preventDefault() {}, currentTarget: {} });
   assert.deepEqual(ui.requests, [["/api/invoices", "POST", {...payload,parent_invoice_id:"",discount_percent:2,tax_percent:18,save_billing_address:true,
     document_details: { student_id: "", billing_phone: "", place_of_supply: "", course_details: "", sac_code: "" },
@@ -1681,6 +1686,21 @@ test("invoice details always reflect current record status, provider locks and p
   nodes = elements(ui.render());
   assert.ok(!nodes.some(node => node.type === "button" && (JSON.stringify(node.props.children).includes("Email invoice") || JSON.stringify(node.props.children).includes("Verify external payment"))));
   assert.ok(nodes.some(node => node.type === "button" && node.props.children === "PDF"));
+});
+
+test("Accounts can add installments only for deal leads", () => {
+  const data = structuredClone(operations["/api/invoices"]);
+  const invoice = data.invoices[0];
+  invoice.payment_type = "installments";
+  data.installmentParents = [{ id: invoice.id, lead_id: invoice.lead_id, available_balance: 100 }];
+  data.restrictedInvoiceLeads = true;
+  const ui = invoiceHarness(data);
+  const hasAddButton = () => elements(ui.render()).some(node => node.type === "button" && JSON.stringify(node.props.children).includes("Add next installment"));
+  assert.equal(hasAddButton(), true);
+  data.leads = [];
+  assert.equal(hasAddButton(), false);
+  data.restrictedInvoiceLeads = false;
+  assert.equal(hasAddButton(), true, "existing administrator access remains unchanged");
 });
 
 test("invoice PDF downloads validate bytes and show failures without navigating away", async t => {
@@ -2846,13 +2866,13 @@ test("pipeline filters, sorts and moves records with permission and concurrent-s
   assert.equal(menu("Stage for Alex Morgan"), undefined);
 });
 
-test("integration setup exposes masked credentials, login warnings and separate SMTP test controls", async () => {
+test("integration setup exposes masked credentials, login warnings and separate SMTP test controls", async t => {
   const html = await renderPage("src\\app\\integrations\\page.tsx", {
-    states: [false, "website", "", "stage-1", "", "", null, false, "", null, null, "", "smtp"],
+    states: integrationPageStates({ selected: "smtp" }),
     overrides: { "./operational-ui": opMock, "@/app/integrations/operational-ui": opMock },
   });
 
-  test("empty integration sections show concise guidance rather than blank table headers", async () => {
+  await t.test("empty integration sections show concise guidance rather than blank table headers", async () => {
     const html = await renderPage("src\\app\\integrations\\page.tsx", {
       overrides: { "./operational-ui": emptyIntegrationMock, "@/app/integrations/operational-ui": emptyIntegrationMock },
     });
@@ -2862,7 +2882,7 @@ test("integration setup exposes masked credentials, login warnings and separate 
     assert.doesNotMatch(html, /class="operational-form integration-source-form"/);
   });
 
-  test("source creation keeps required fields aligned and secondary settings collapsed", async () => {
+  await t.test("source creation keeps required fields aligned and secondary settings collapsed", async () => {
     const html = await renderPage("src\\app\\integrations\\page.tsx", {
       states: [true, "website", "", "stage-1", "", "", null, false, "", null, null],
       overrides: { "./operational-ui": emptyIntegrationMock, "@/app/integrations/operational-ui": emptyIntegrationMock },
@@ -2878,7 +2898,7 @@ test("integration setup exposes masked credentials, login warnings and separate 
     assert.equal((form.match(/>Create source<\/button>/g) ?? []).length, 1);
   });
 
-  test("lead editors can sync their mailbox while integration viewers are not required", async () => {
+  await t.test("lead editors can sync their mailbox while integration viewers are not required", async () => {
     const mailbox = { ...operations["/api/integrations/gmail"], canConnect: false, canSync: true, connection: {
       email: "counselor@example.com", last_synced_at: null, last_error: null, initialSync: false, hasPendingPage: false, syncInProgress: false,
     } };
@@ -2888,7 +2908,7 @@ test("integration setup exposes masked credentials, login warnings and separate 
     assert.doesNotMatch(html, /Connect Gmail|Disconnect locally/);
   });
 
-  test("source form cancel preserves the existing channel and makes the header action available again", () => {
+  await t.test("source form cancel preserves the existing channel and makes the header action available again", () => {
     const states = [];
     let index = 0;
     const Component = load("src\\app\\integrations\\page.tsx", {
@@ -2906,7 +2926,7 @@ test("integration setup exposes masked credentials, login warnings and separate 
     assert.ok(elements(section()).some(node => node.type === "button"));
   });
 
-  test("source creation shows one-time credentials locally and preserves the form on failure", async t => {
+  await t.test("source creation shows one-time credentials locally and preserves the form on failure", async t => {
     const previous = global.confirm;
     t.after(() => { if (previous === undefined) delete global.confirm; else global.confirm = previous; });
     global.confirm = () => false;
@@ -2961,7 +2981,9 @@ test("integration setup exposes masked credentials, login warnings and separate 
   assert.match(html, /Automatic \(based on port\)/);
   assert.match(html, /aria-describedby="help-SMTP_PASSWORD"/);
   assert.match(html, /id="help-SMTP_PASSWORD"/);
-  assert.doesNotMatch(html, /<form[^>]*>[\s\S]*?integration-smtp-test[\s\S]*?<\/form>/);
+  const credentialsForm = html.match(/<form[^>]*class="integration-credential-form"[\s\S]*?<\/form>/)?.[0];
+  assert.ok(credentialsForm);
+  assert.doesNotMatch(credentialsForm, /integration-smtp-test/);
 });
 
 test("connected mailbox hides the general inbox and directs users to lead conversations", async () => {
@@ -2988,7 +3010,7 @@ test("integration credential actions preserve secrets, block draft testing and s
   });
   const render = () => { index = 0; return elements(IntegrationConnections({ integrations: operations["/api/integrations"].integrations, onChange: () => { changes++; } })); };
   const button = label => render().find(node => node.type === "button" && (node.props.children === label || node.props.children?.[0] === label));
-  button("Configure").props.onClick();
+  elements(render().find(node => node.props?.className?.includes("integration-provider-zoom"))).find(node => node.type === "button").props.onClick();
   assert.ok(render().some(node => node.props?.["aria-label"] === "Zoom configuration"));
   button("SMTP").props.onClick();
   let form = render().find(node => node.type === "form");
@@ -2999,7 +3021,7 @@ test("integration credential actions preserve secrets, block draft testing and s
   await form.props.onSubmit(event);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(requests[0][2].values.SMTP_PASSWORD, "");
-  assert.equal(requests[0][2].revision, integrationSettings[0].revision);
+  assert.equal(requests[0][2].revision, integrationSettings.find(setting => setting.provider === "smtp").revision);
   assert.equal(resets, 1);
   assert.equal(changes, 1);
   assert.equal(button("Test saved connection").props.disabled, false);
@@ -3075,11 +3097,17 @@ test("Meta Page checks display ten instant forms with explicit routing and deliv
 });
 
 test("Facebook form creation distinguishes Page fallback from exact form routing and masks Page tokens", async () => {
+  const facebookPages = load("src\\components\\facebook-page-connections.tsx", {
+    react: hookStates([""]),
+    "@/app/integrations/operational-ui": opMock,
+  });
   const html = await renderPage("src\\app\\integrations\\page.tsx", {
-    states: [true, "facebook", "", "stage-1", "", "", null, false, "", null, null, "", null, false, "", "", false, "", "", "All integrations", ""],
-    overrides: { "./operational-ui": opMock, "@/app/integrations/operational-ui": opMock },
+    states: integrationPageStates({ sourceForm: true, channel: "facebook" }),
+    overrides: { "./operational-ui": opMock, "@/app/integrations/operational-ui": opMock,
+      "@/components/facebook-page-connections": facebookPages },
   });
   for (const name of ["facebook_page_id", "facebook_form_id", "access_token", "owner_id"]) assert.ok(html.includes(`name="${name}"`), name);
+  assert.match(html, /<input(?=[^>]*name="access_token")(?=[^>]*type="password")[^>]*>/);
   for (const text of ["One Page-wide fallback is allowed", "Token saved securely", "Replace token", "Check forms &amp; subscription", "not your Meta App ID"]) assert.ok(html.includes(text), text);
 });
 
@@ -3551,6 +3579,749 @@ test("assignment automations use collapsed searchable selectors for single owner
   }
 });
 
+test("Deals page restricts roles and queries only the two converted stages", async () => {
+  let actor = { ...user, profile: { ...profile, role: "accounts" }, permissions: ["deals.view"] };
+  const calls = [];
+  const rows = Array.from({ length: 51 }, (_, index) => ({
+    id: `deal-${index}`, name: `Deal ${index}`, email: "deal@example.test", phone: "123",
+    course: "Course", stage_id: "won", created_at: "2026-01-01",
+  }));
+  let queryError = null;
+  const stageRows = [{ id: "won", name: "Closed Won" }, { id: "enrolled", name: "Already Enrolled" }, { id: "fresh", name: "Fresh" }];
+  const totals = { won: 1234, enrolled: 87 };
+  const scopedClient = { rpc() { assert.fail("Deals must not depend on an unapplied RPC"); } };
+  async function fetchDealPage(client, stages, page, dates) {
+    assert.equal(client, scopedClient);
+    if (!stages.length) return { leads: [], counts: [] };
+    const args = {
+      stage_ids: stages.map(stage => stage.id), converted_from: dates?.from ?? null, converted_to: dates?.to ?? null,
+      timezone_name: dates?.timezone ?? process.env.CRM_TIMEZONE ?? "Asia/Kolkata", page_size: 50, page_offset: (page - 1) * 50,
+    };
+    calls.push(args);
+    if (queryError) throw queryError;
+    return {
+      leads: rows.filter(row => args.stage_ids.includes(row.stage_id)),
+      counts: Object.entries(totals).filter(([id]) => args.stage_ids.includes(id)).map(([stage_id, total]) => ({
+        stage_id, total: args.converted_from ? 60 : total,
+      })),
+    };
+  }
+  const Page = load("src\\app\\deals\\page.tsx", {
+    "@/lib/server/auth": { HttpError: class extends Error { constructor(status, message) { super(message); this.status = status; } },
+      requirePageUser: async permission => { assert.equal(permission, "deals.view"); return { user: actor, supabase: scopedClient }; } },
+    "@/lib/server/deals": { fetchDealPage, fetchDealSnapshot: async () => null },
+    "@/lib/server/operational": { databaseError: error => { if (error) throw error; } },
+    "@/lib/supabase/server": { getSupabaseAdminClient: () => ({ from: () => ({
+      select: async () => ({ data: stageRows, error: null }),
+    }) }) },
+  }).default;
+  const html = renderToStaticMarkup(await Page({ searchParams: Promise.resolve({}) }));
+  assert.deepEqual(calls[0], {
+    stage_ids: ["won", "enrolled"], converted_from: null, converted_to: null,
+    timezone_name: process.env.CRM_TIMEZONE || "Asia/Kolkata", page_size: 50, page_offset: 0,
+  });
+  assert.match(html, /Deal 0/);
+  assert.doesNotMatch(html, /Deal 50/);
+  assert.match(html, /class="deal-name-link" href="\/leads\/deal-0"/);
+  assert.doesNotMatch(html, /Open lead|deal-open-link|on this page<\/span>/);
+  assert.match(html, /status-pill pill-green/);
+  assert.match(html, /<dt>Total deals<\/dt><dd>1,321<\/dd>/);
+  assert.match(html, /<dt>Closed Won<\/dt><dd>1,234<\/dd>/);
+  assert.match(html, /<dt>Already Enrolled<\/dt><dd>87<\/dd>/);
+  assert.match(html, /Next/);
+  const monthHtml = renderToStaticMarkup(await Page({ searchParams: Promise.resolve({
+    stage: "closed_won", period: "month", month: "02", year: "2024", page: "2",
+  }) }));
+  assert.deepEqual(calls.at(-1), {
+    stage_ids: ["won"], converted_from: "2024-02-01", converted_to: "2024-02-29",
+    timezone_name: process.env.CRM_TIMEZONE || "Asia/Kolkata", page_size: 50, page_offset: 50,
+  });
+  assert.match(monthHtml, /<button[^>]*>Next<\/button>/);
+  assert.match(monthHtml, /<dt>Total deals<\/dt><dd>60<\/dd>/);
+  const yearHtml = renderToStaticMarkup(await Page({ searchParams: Promise.resolve({ period: "year", year: "2025" }) }));
+  assert.equal(calls.at(-1).converted_from, "2025-01-01");
+  assert.equal(calls.at(-1).converted_to, "2025-12-31");
+  assert.match(yearHtml, /<button[^>]*>Next<\/button>/);
+  const css = readFileSync(path.join(root, "src", "app", "globals.css"), "utf8");
+  const browser = await require("playwright-core").chromium.launch({ channel: "msedge", headless: true });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1366, height: 900 } });
+    await page.setContent(`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css}</style></head><body><main class="page-content">${html}</main></body></html>`);
+    const firstLead = page.locator(".deal-name-link").first();
+    await firstLead.hover();
+    assert.equal(await firstLead.evaluate(node => getComputedStyle(node).textDecorationLine), "none");
+    assert.equal(await firstLead.locator("span").last().evaluate(node => getComputedStyle(node).textDecorationLine), "none");
+    await firstLead.focus();
+    assert.equal(await firstLead.evaluate(node => node === document.activeElement), true);
+    assert.equal(await firstLead.getAttribute("href"), "/leads/deal-0");
+    assert.equal(await page.locator("thead th").count(), 4);
+    assert.equal(await page.locator("tbody tr").first().getByRole("link").count(), 1);
+    assert.equal(await page.getByRole("definition").first().textContent(), "1,321");
+    assert.equal(await page.getByRole("combobox", { name: "Stage", exact: true }).inputValue(), "all");
+    assert.equal(await page.getByRole("combobox", { name: "Converted date", exact: true }).inputValue(), "all");
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    assert.equal(await page.locator(".table-wrap").evaluate(node => node.scrollWidth > node.clientWidth), true);
+    assert.equal(await page.locator(".deals-summary").evaluate(node => node.getBoundingClientRect().right <= innerWidth), true);
+    for (const [markup, period] of [[monthHtml, "month"], [yearHtml, "year"]]) {
+      await page.setContent(`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css}</style></head><body><main class="page-content">${markup}</main></body></html>`);
+      assert.equal(await page.getByRole("combobox", { name: "Converted date", exact: true }).inputValue(), period);
+      assert.equal(await page.getByRole("spinbutton", { name: "Year", exact: true }).inputValue(), period === "month" ? "2024" : "2025");
+      if (period === "month") {
+        assert.equal(await page.getByRole("combobox", { name: "Month", exact: true }).inputValue(), "02");
+        assert.equal(await page.getByRole("combobox", { name: "Month", exact: true }).locator("option").count(), 12);
+      }
+      for (const width of [1366, 390, 320]) {
+        await page.setViewportSize({ width, height: 900 });
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `${period} at ${width}px`);
+        assert.equal(await page.getByRole("button", { name: "Apply filters" }).evaluate(node => {
+          const box = node.getBoundingClientRect();
+          return box.left >= 0 && box.right <= innerWidth;
+        }), true);
+      }
+      await page.getByText("About conversion dates", { exact: true }).click();
+      assert.equal(await page.getByText(/Leads without a recorded conversion date appear only in All time/).isVisible(), true);
+    }
+  } finally { await browser.close(); }
+  if (process.env.UI_FIXTURE_DIR) {
+    mkdirSync(process.env.UI_FIXTURE_DIR, { recursive: true });
+    writeFileSync(path.join(process.env.UI_FIXTURE_DIR, "deals.html"), `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css}</style><title>Deals preview</title></head><body><main class="page-content">${html}</main></body></html>`);
+    writeFileSync(path.join(process.env.UI_FIXTURE_DIR, "deals-month.html"), `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css}</style><title>Deals month preview</title></head><body><main class="page-content">${monthHtml}</main></body></html>`);
+  }
+  const secondPage = renderToStaticMarkup(await Page({ searchParams: Promise.resolve({ page: "2" }) }));
+  assert.equal(calls.at(-1).page_offset, 50);
+  assert.match(secondPage, /<button[^>]*>Previous<\/button>/);
+  assert.match(secondPage, /<dt>Total deals<\/dt><dd>1,321<\/dd>/);
+  const filtered = renderToStaticMarkup(await Page({ searchParams: Promise.resolve({
+    stage: "closed_won", period: "custom", from: "2026-11-01", to: "2026-11-20", page: "2",
+  }) }));
+  assert.deepEqual(calls.at(-1), {
+    stage_ids: ["won"], converted_from: "2026-11-01", converted_to: "2026-11-20",
+    timezone_name: process.env.CRM_TIMEZONE || "Asia/Kolkata", page_size: 50, page_offset: 50,
+  });
+  assert.match(filtered, /<dt>Total deals<\/dt><dd>60<\/dd>/);
+  assert.match(filtered, /<dt>Already Enrolled<\/dt><dd>0<\/dd>/);
+  assert.match(filtered, /<button[^>]*>Next<\/button>/);
+  assert.match(filtered, /name="from"[^>]*value="2026-11-01"/);
+  assert.match(filtered, /name="to"[^>]*value="2026-11-20"/);
+  assert.match(filtered, /<button[^>]*type="button"[^>]*>Clear filters<\/button>/);
+  await Page({ searchParams: Promise.resolve({ stage: "already_enrolled", period: "today" }) });
+  const todayCall = calls.at(-1);
+  assert.deepEqual(todayCall.stage_ids, ["enrolled"]);
+  const today = new Intl.DateTimeFormat("en-CA", { timeZone: todayCall.timezone_name, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  assert.equal(todayCall.converted_from, today);
+  assert.equal(todayCall.converted_to, today);
+  for (const invalid of [
+    { stage: "fresh" }, { period: "unknown" }, { period: "custom", from: "2026-02-30", to: "2026-03-01" },
+    { period: "custom", from: "2026-11-20", to: "2026-11-01" }, { period: "custom", from: "2026-11-20" },
+    { period: "month", month: "02" }, { period: "month", month: "13", year: "2026" },
+    { period: "month", month: "00", year: "2026" }, { period: "year", year: "0000" },
+    { period: "year", year: "10000" }, { period: "year", year: "20e3" },
+  ]) {
+    const callsBefore = calls.length;
+    await assert.rejects(Page({ searchParams: Promise.resolve(invalid) }), error => error.status === 400);
+    assert.equal(calls.length, callsBefore);
+  }
+  rows.length = 0;
+  const empty = renderToStaticMarkup(await Page({ searchParams: Promise.resolve({}) }));
+  assert.match(empty, /No deals on this page/);
+  assert.doesNotMatch(empty, /class="deal-name-link"|>Next</);
+  assert.match(empty, /<dt>Total deals<\/dt><dd>1,321<\/dd>/, "an empty page does not erase the full totals");
+  queryError = new Error("Deal query unavailable");
+  await assert.rejects(Page({ searchParams: Promise.resolve({}) }), /Deal query unavailable/);
+  queryError = null;
+  stageRows.length = 0;
+  const readsBeforeEmptyStages = calls.length;
+  const noStages = renderToStaticMarkup(await Page({ searchParams: Promise.resolve({}) }));
+  assert.equal(calls.length, readsBeforeEmptyStages);
+  assert.match(noStages, /<dt>Total deals<\/dt><dd>0<\/dd>/);
+  assert.match(noStages, /<dt>Closed Won<\/dt><dd>0<\/dd>/);
+  assert.match(noStages, /<dt>Already Enrolled<\/dt><dd>0<\/dd>/);
+  actor = { ...actor, profile: { ...actor.profile, role: "manager" } };
+  await assert.rejects(Page({ searchParams: Promise.resolve({}) }), /permission to view deals/);
+});
+
+function dealQueryFixture() {
+  const stages = [
+    { id: "10000000-0000-4000-8000-000000000001", name: "Closed Won" },
+    { id: "10000000-0000-4000-8000-000000000002", name: "Already Enrolled" },
+    { id: "10000000-0000-4000-8000-000000000003", name: "Fresh" },
+  ];
+  const reads = [], rows = [];
+  const control = { error: false, malformed: false, noCount: false, emptyScan: false };
+  function add(name, stageIndex, events, extra = {}) {
+    const record = {
+      id: `20000000-0000-4000-8000-${String(rows.length + 1).padStart(12, "0")}`,
+      name, email: null, phone: null, course: null, stage_id: stages[stageIndex].id,
+      created_at: new Date(Date.UTC(2026, 0, 1, 0, rows.length)).toISOString(),
+      is_archived: false, merged_into_id: null, events, ...extra,
+    };
+    rows.push(record);
+    return record;
+  }
+  function event(stageIndex, created_at = "2026-11-20T12:00:00Z", previous = stages[2].id) {
+    return { type: "updated", created_at, meta: { stage_id: stages[stageIndex].id, previous_stage_id: previous } };
+  }
+  const supabase = require("@supabase/supabase-js").createClient("https://deals.example.test", "test-key", {
+    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+    global: { fetch: async (input, options) => {
+      const url = new URL(input);
+      assert.equal(url.pathname, "/rest/v1/leads", "only existing-table reads, never RPCs or writes");
+      assert.ok(["GET", "HEAD"].includes(options.method));
+      const search = url.searchParams;
+      const read = { search, method: options.method, projectedRows: 0 };
+      reads.push(read);
+      assert.equal(search.get("is_archived"), "eq.false");
+      assert.equal(search.get("merged_into_id"), "is.null");
+      if (control.error) return Response.json({ message: "Deals read unavailable" }, { status: 400 });
+      const filter = (value, rule) => rule.startsWith("eq.") ? value === rule.slice(3) : rule.slice(4, -1).split(",").includes(value);
+      let selected = rows.filter(row => !row.is_archived && !row.merged_into_id
+        && search.getAll("stage_id").every(rule => filter(row.stage_id, rule))
+        && (!search.has("id") || filter(row.id, search.get("id"))));
+      const snapshot = search.get("select").includes("conversion_0:");
+      const projection = snapshot || search.get("select").includes("conversion:");
+      const stageEntry = (stageId, item) => item.meta.stage_id === stageId
+        && (item.type === "created" || item.type === "updated" && Object.hasOwn(item.meta, "previous_stage_id") && item.meta.previous_stage_id !== stageId);
+      const isEntry = (row, item) => stageEntry(row.stage_id, item);
+      if (projection && !snapshot) {
+        selected = selected.filter(row => row.events.some(item => isEntry(row, item)
+          && search.getAll("candidate.created_at").every(rule => rule.startsWith("gte.")
+            ? Date.parse(item.created_at) >= Date.parse(rule.slice(4))
+            : Date.parse(item.created_at) < Date.parse(rule.slice(3)))));
+      }
+      selected.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || b.id.localeCompare(a.id));
+      const headers = control.noCount ? {} : { "content-range": `0-0/${selected.length}` };
+      if (options.method === "HEAD") return new Response(null, { headers });
+      const start = Number(search.get("offset") || 0);
+      selected = selected.slice(start, start + Math.min(Number(search.get("limit") || 200), 200));
+      const data = selected.map(row => {
+        if (!projection || snapshot) {
+          const { events, is_archived, merged_into_id, ...detail } = row;
+          if (snapshot) for (const [index, stage] of stages.slice(0, 2).entries()) {
+            const alias = `conversion_${index}`;
+            assert.equal(search.get(`${alias}.meta->>stage_id`), `eq.${stage.id}`);
+            assert.equal(search.get(`${alias}.limit`), "1");
+            assert.equal(search.get(`${alias}.order`), "created_at.desc,id.desc");
+            assert.equal(search.get(`${alias}.or`), `(type.eq.created,and(type.eq.updated,meta->previous_stage_id.not.is.null,or(meta->>previous_stage_id.is.null,meta->>previous_stage_id.neq.${stage.id})))`);
+            detail[alias] = events.filter(item => stageEntry(stage.id, item))
+              .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at)).slice(0, 1)
+              .map(({ created_at }) => ({ created_at }));
+          }
+          return detail;
+        }
+        const stageId = row.stage_id;
+        assert.equal(search.get("select"), "id,created_at,candidate:activities!inner(),conversion:activities(created_at)", "scan no contact data");
+        assert.equal(search.get("candidate.meta->>stage_id"), `eq.${stageId}`);
+        assert.equal(search.get("candidate.or"), search.get("conversion.or"));
+        assert.equal(search.get("conversion.meta->>stage_id"), `eq.${stageId}`);
+        assert.equal(search.get("conversion.or"), `(type.eq.created,and(type.eq.updated,meta->previous_stage_id.not.is.null,or(meta->>previous_stage_id.is.null,meta->>previous_stage_id.neq.${stageId})))`);
+        assert.equal(search.get("conversion.order"), "created_at.desc,id.desc");
+        assert.equal(search.get("conversion.limit"), "1");
+        assert.equal(search.has("conversion.created_at"), false, "date filtering must happen after choosing the latest entry");
+        const conversion = row.events.filter(item => isEntry(row, item))
+          .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at)).slice(0, 1)
+          .map(({ created_at }) => ({ created_at }));
+        return { id: row.id, created_at: row.created_at, conversion };
+      });
+      if (projection) read.projectedRows = data.length;
+      return Response.json(control.malformed ? null : projection && control.emptyScan ? [] : data, { headers });
+    } },
+  });
+  const { fetchDealPage, fetchDealSnapshot } = load("src\\lib\\server\\deals.ts", {
+    "@/lib/server/auth": { HttpError: class extends Error { constructor(status, message) { super(message); this.status = status; } } },
+  });
+  return {
+    stages, reads, rows, control, add, event,
+    snapshot: () => fetchDealSnapshot(supabase, stages),
+    read: (page = 1, dates = null, selected = stages) => fetchDealPage(supabase, selected, page, dates),
+  };
+}
+
+test("Deals snapshots are complete below 500 records, use the current stage's latest entry and fall back above the bound", async () => {
+  const { stages, reads, add, event, snapshot } = dealQueryFixture();
+  const won = add("Won with other-stage activity", 0, [event(0, "2026-11-19T18:30:00Z"), event(1, "2026-11-21T12:00:00Z")]);
+  const reentered = add("Reentered later", 0, [event(0), event(0, "2026-12-01T12:00:00Z")]);
+  const missing = add("Legacy date unknown", 1, [{ type: "created", created_at: "2026-11-20T12:00:00Z", meta: {} }]);
+  for (let index = 3; index < 334; index++) add(`Converted ${index}`, index % 2, [event(index % 2)]);
+  const rows = await snapshot();
+  assert.equal(rows.length, 334, "server response caps must not silently truncate the snapshot");
+  assert.equal(reads.length, 2, "the synthetic server caps each response at 200 rows");
+  assert.equal(rows.find(row => row.id === won.id).converted_at, "2026-11-19T18:30:00Z");
+  assert.equal(rows.find(row => row.id === reentered.id).converted_at, "2026-12-01T12:00:00Z");
+  assert.equal(rows.find(row => row.id === missing.id).converted_at, null);
+  const { filterDealSnapshot } = load("src\\lib\\deals.ts");
+  const { dealFilterSchema } = load("src\\lib\\deal-filters.ts");
+  const today = filterDealSnapshot(rows, stages, dealFilterSchema.parse({ period: "today" }), 1, "2026-11-20", "Asia/Kolkata");
+  assert.equal(today.counts.reduce((sum, stage) => sum + stage.total, 0), 332);
+  for (let index = 334; index < 500; index++) add(`Converted ${index}`, 0, [event(0)]);
+  assert.equal((await snapshot()).length, 500, "the exact snapshot bound must remain complete");
+  add("Converted 501", 0, [event(0)]);
+  const readsBefore = reads.length;
+  assert.equal(await snapshot(), null, "large lists retain authenticated server pagination rather than using a partial snapshot");
+  assert.equal(reads.length - readsBefore, 1, "do not download an unbounded large list");
+});
+
+test("Deals snapshots surface failed, malformed, missing-count and incomplete reads instead of using partial data", async () => {
+  const { control, add, event, snapshot } = dealQueryFixture();
+  add("Converted", 0, [event(0)]);
+  for (const failure of ["error", "malformed", "noCount", "emptyScan"]) {
+    control[failure] = true;
+    await assert.rejects(snapshot(), undefined, failure);
+    control[failure] = false;
+  }
+});
+
+test("Deals existing-schema queries count beyond row caps and use latest stage entries before filtering dates", async () => {
+  const fixture = dealQueryFixture();
+  const { stages, reads, add, event, read } = fixture;
+  for (let index = 0; index < 1107; index++) add(`Won ${index}`, 0, [event(0)]);
+  for (let index = 0; index < 87; index++) add(`Enrolled ${index}`, 1, [event(1)]);
+  const before = add("Before midnight, edited later", 0, [event(0, "2026-11-19T18:29:59Z"), event(0, "2026-11-20T12:00:00Z", stages[0].id)]);
+  const end = add("Next day", 0, [event(0, "2026-11-20T18:30:00Z")]);
+  const start = add("Midnight start", 0, [event(0, "2026-11-19T18:30:00Z")]);
+  const reentered = add("Later reentry", 0, [event(0), event(0, "2026-12-01T12:00:00Z")]);
+  const unknown = add("No reliable entry", 0, [
+    { type: "created", created_at: "2026-11-20T12:00:00Z", meta: {} },
+    { type: "updated", created_at: "2026-11-20T12:00:00Z", meta: { stage_id: stages[0].id } },
+  ]);
+  const created = add("Recorded initial stage", 0, [{ type: "created", created_at: "2026-11-20T12:00:00Z", meta: { stage_id: stages[0].id } }]);
+  const fromNull = add("Previously no stage", 0, [event(0, "2026-11-20T12:00:00Z", null)]);
+  add("Not converted", 2, [event(2)]);
+  add("Archived", 0, [event(0)], { is_archived: true });
+  add("Merged", 0, [event(0)], { merged_into_id: start.id });
+  for (let index = 0; index < 2000; index++) {
+    add(`Old conversion ${index}`, 0, [event(0, "2026-01-01T12:00:00Z")], { created_at: "2025-01-01T00:00:00Z" });
+  }
+  const counts = result => Object.fromEntries(result.counts.map(row => [row.stage_id, row.total]));
+  const all = await read();
+  assert.deepEqual(counts(all), { [stages[0].id]: 3114, [stages[1].id]: 87 });
+  assert.equal(all.leads.length, 51);
+  assert.equal(reads.some(row => row.search.has("conversion.limit")), false, "all-time queries need no conversion scan");
+  const dates = { from: "2026-11-20", to: "2026-11-20", timezone: "Asia/Kolkata" };
+  const readsBeforeDates = reads.length;
+  const filtered = await read(1, dates);
+  assert.deepEqual(counts(filtered), { [stages[0].id]: 1110, [stages[1].id]: 87 });
+  assert.equal(filtered.leads.length, 51);
+  assert.ok(reads.reduce((sum, read) => sum + read.projectedRows, 0) < 1500,
+    "date queries must not scan all 3,201 converted leads; 2,000 unrelated historical conversions are excluded in the database");
+  assert.ok(reads.length - readsBeforeDates <= 8, "filtering this fixture needs at most eight reads, rather than eighteen full-scan reads");
+  const ids = filtered.leads.map(row => row.id);
+  for (const included of [start, created, fromNull]) assert.ok(ids.includes(included.id));
+  for (const excluded of [before, end, reentered, unknown]) assert.equal(ids.includes(excluded.id), false);
+  assert.ok(reads.some(row => row.search.get("offset") === "1000"), "traverse beyond the server's 200-row cap and first 1,000 leads");
+  for (const detail of reads.filter(row => row.search.has("id"))) assert.ok(detail.search.get("id").split(",").length <= 51);
+  const next = await read(2, dates);
+  assert.deepEqual(counts(next), counts(filtered), "summary counts ignore pagination");
+  assert.notEqual(next.leads[0].id, filtered.leads[0].id);
+  assert.equal(next.leads[0].id, filtered.leads[50].id, "the lookahead record starts the next page");
+  const last = await read(24, dates);
+  assert.equal(last.leads.length, 47, "the final page remains reachable beyond default row caps");
+  const closed = await read(1, dates, [stages[0]]);
+  assert.deepEqual(counts(closed), { [stages[0].id]: 1110 });
+  assert.ok(closed.leads.every(row => row.stage_id === stages[0].id));
+  const bothDays = await read(1, { ...dates, to: "2026-11-21" });
+  assert.equal(counts(bothDays)[stages[0].id], 1111);
+  const none = await read(1, { ...dates, from: "2025-01-01", to: "2025-01-01" });
+  assert.equal(none.leads.length, 0);
+  assert.deepEqual(Object.values(counts(none)), [0, 0]);
+  const readsBefore = reads.length;
+  assert.deepEqual(await read(1, dates, [stages[2]]), { leads: [], counts: [] });
+  assert.equal(reads.length, readsBefore, "non-deal stages can never be queried");
+});
+
+test("Deals conversion filtering respects DST days and surfaces incomplete or failed reads", async () => {
+  const { add, event, read, control, stages } = dealQueryFixture();
+  add("Before", 0, [event(0, "2026-11-01T03:59:59Z")]);
+  const start = add("Start", 0, [event(0, "2026-11-01T04:00:00Z")]);
+  const late = add("Last second", 0, [event(0, "2026-11-02T04:59:59Z")]);
+  add("End", 0, [event(0, "2026-11-02T05:00:00Z")]);
+  const dates = { from: "2026-11-01", to: "2026-11-01", timezone: "America/New_York" };
+  const result = await read(1, dates);
+  assert.deepEqual(result.leads.map(row => row.id).sort(), [start.id, late.id].sort());
+  assert.equal(result.counts.find(row => row.stage_id === stages[0].id).total, 2, "fall-back day spans 25 hours");
+  for (const year of ["0001", "9999"]) {
+    const boundary = add(`Calendar boundary ${year}`, 0, [event(0, `${year}-12-31T12:00:00Z`)]);
+    const selected = await read(1, { from: `${year}-01-01`, to: `${year}-12-31`, timezone: "UTC" });
+    assert.deepEqual(selected.leads.map(row => row.id), [boundary.id], "UTC candidate bounds must support the full allowed calendar range");
+  }
+  control.error = true;
+  await assert.rejects(read(), /Deals read unavailable/);
+  control.error = false;
+  control.malformed = true;
+  await assert.rejects(read(1, dates), /Deal results could not be loaded/);
+  control.malformed = false;
+  control.noCount = true;
+  await assert.rejects(read(), /Deal totals could not be loaded/);
+  control.noCount = false;
+  control.emptyScan = true;
+  await assert.rejects(read(1, dates), /Conversion dates could not be fully loaded/);
+});
+
+test("Deals filter submissions validate conversion ranges and reset pagination", () => {
+  const destinations = [], errors = [];
+  let values = {};
+  const OriginalFormData = global.FormData;
+  global.FormData = class { get(key) { return values[key] ?? null; } };
+  try {
+    const { DealFiltersForm } = load("src\\components\\deal-filters.tsx", {
+      react: { ...React, useState: initial => [initial, next => errors.push(next)] },
+    });
+    const filters = { stage: "all", period: "custom", from: "", to: "" };
+    const tree = DealFiltersForm({ filters, timezone: "Asia/Kolkata", today: "2026-11-20",
+      onApply: next => destinations.push(load("src\\lib\\deal-filters.ts").dealPageHref(next)) });
+    const form = elements(tree).find(node => node.type === "form");
+    const submit = () => form.props.onSubmit({ preventDefault() {}, currentTarget: {} });
+    values = { stage: "closed_won", period: "today", page: "4" };
+    submit();
+    assert.equal(destinations.at(-1), "/deals?stage=closed_won&period=today");
+    values = { stage: "already_enrolled", period: "custom", from: "2026-11-01", to: "2026-11-20", page: "4" };
+    submit();
+    assert.equal(destinations.at(-1), "/deals?stage=already_enrolled&period=custom&from=2026-11-01&to=2026-11-20");
+    values = { stage: "closed_won", period: "month", month: "02", year: "2024", page: "4" };
+    submit();
+    assert.equal(destinations.at(-1), "/deals?stage=closed_won&period=month&month=02&year=2024");
+    values = { stage: "all", period: "year", year: "2025", month: "11", from: "2026-11-20", page: "4" };
+    submit();
+    assert.equal(destinations.at(-1), "/deals?period=year&year=2025", "irrelevant dates/month and pagination are cleared");
+    const validSubmissions = destinations.length;
+    for (const range of [
+      { from: "2026-11-20", to: "2026-11-01" }, { from: "2026-02-30", to: "2026-03-01" },
+      { from: "0000-01-01", to: "2026-11-20" }, { from: "2026-11-20" },
+    ]) {
+      values = { stage: "all", period: "custom", ...range };
+      submit();
+      assert.equal(destinations.length, validSubmissions);
+      assert.match(errors.at(-1), /date|dates/);
+    }
+    for (const invalid of [
+      { period: "month", month: "", year: "2026" }, { period: "month", month: "13", year: "2026" },
+      { period: "month", month: "11", year: "" }, { period: "year", year: "0000" },
+      { period: "year", year: "2026.5" },
+    ]) {
+      values = { stage: "all", ...invalid };
+      submit();
+      assert.equal(destinations.length, validSubmissions);
+      assert.match(errors.at(-1), /month|year/);
+    }
+    values = { stage: "all", period: "all", from: "2026-11-20", page: "4" };
+    submit();
+    assert.equal(destinations.at(-1), "/deals");
+    const clear = elements(tree).find(node => node.type === "button" && node.props.children === "Clear filters");
+    assert.equal(clear.props.type, "button", "Clear must not submit or bubble as a link to the app-shell section navigator");
+    clear.props.onClick();
+    assert.equal(destinations.at(-1), "/deals");
+  } finally {
+    global.FormData = OriginalFormData;
+  }
+});
+
+test("Deals calendar controls switch modes with CRM defaults and handle leap/non-leap years", () => {
+  const { dealFilterSchema, dealConversionRange } = load("src\\lib\\deal-filters.ts");
+  const states = [];
+  let stateIndex = 0;
+  const { DealFiltersForm } = load("src\\components\\deal-filters.tsx", {
+    react: { ...React, useState(initial) {
+      const key = stateIndex++;
+      if (!(key in states)) states[key] = initial;
+      return [states[key], value => { states[key] = value; }];
+    }, useTransition: () => [false, callback => callback()] },
+  });
+  const render = () => {
+    stateIndex = 0;
+    return elements(DealFiltersForm({ filters: dealFilterSchema.parse({}), timezone: "Asia/Kolkata", today: "2026-01-01", onApply() {} }));
+  };
+  let nodes = render();
+  assert.equal(nodes.some(node => node.props.name === "month"), false);
+  nodes.find(node => node.props.name === "period").props.onChange({ target: { value: "month" } });
+  nodes = render();
+  assert.equal(nodes.find(node => node.props.name === "month").props.defaultValue, "01");
+  assert.equal(nodes.find(node => node.props.name === "year").props.defaultValue, "2026");
+  nodes.find(node => node.props.name === "period").props.onChange({ target: { value: "year" } });
+  nodes = render();
+  assert.equal(nodes.some(node => node.props.name === "month"), false);
+  assert.equal(nodes.some(node => node.props.name === "year"), true);
+  nodes.find(node => node.props.name === "period").props.onChange({ target: { value: "custom" } });
+  nodes = render();
+  assert.equal(nodes.some(node => node.props.name === "year"), false);
+  assert.equal(nodes.some(node => node.props.name === "from"), true);
+  for (const [month, year, to] of [["02", "2024", "2024-02-29"], ["02", "2025", "2025-02-28"], ["02", "2100", "2100-02-28"], ["12", "9999", "9999-12-31"]]) {
+    assert.deepEqual(dealConversionRange(dealFilterSchema.parse({ period: "month", month, year }), "2026-01-01"),
+      { from: `${year}-${month}-01`, to });
+  }
+  assert.deepEqual(dealConversionRange(dealFilterSchema.parse({ period: "year", year: "0001" }), "2026-01-01"),
+    { from: "0001-01-01", to: "0001-12-31" });
+});
+
+function dealWorkspaceFixture(t, { stale = false, snapshot = true, request = async () => { throw new Error("Unexpected request"); } } = {}) {
+  const { dealFilterSchema } = load("src\\lib\\deal-filters.ts");
+  const { filterDealSnapshot } = load("src\\lib\\deals.ts");
+  const stages = [{ id: "won", name: "Closed Won" }, { id: "enrolled", name: "Already Enrolled" }];
+  const filters = dealFilterSchema.parse({});
+  const rows = Array.from({ length: 334 }, (_, index) => ({
+    id: `deal-${index}`, name: `Deal ${index}`, email: null, phone: null, course: null,
+    stage_id: index === 333 ? "enrolled" : "won",
+    created_at: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(),
+    converted_at: index === 0 ? "2026-11-20T12:00:00Z" : "2026-10-01T12:00:00Z",
+  }));
+  const data = {
+    snapshot: snapshot ? rows : null, stages, filters, page: 1, timezone: "Asia/Kolkata", today: "2026-11-20",
+    loadedAt: Date.now() - (stale ? 60000 : 0),
+    result: filterDealSnapshot(rows, stages, filters, 1, "2026-11-20", "Asia/Kolkata"),
+  };
+  const oldWindow = global.window, oldDocument = global.document;
+  const listeners = new Map(), history = [], requests = [];
+  global.window = {
+    location: new URL("http://localhost/deals"),
+    history: { pushState(_state, _title, href) { history.push(href); global.window.location = new URL(href, "http://localhost"); } },
+    addEventListener(name, callback) { listeners.set(name, callback); },
+    removeEventListener(name) { listeners.delete(name); },
+    scrollTo() { assert.fail("filtering must not reset scrolling"); },
+  };
+  global.document = { visibilityState: "visible", addEventListener() {}, removeEventListener() {} };
+  const states = [], refs = [], memos = [], effects = [];
+  const pendingEffects = [];
+  let stateIndex = 0, refIndex = 0, memoIndex = 0, effectIndex = 0;
+  const memo = (factory, dependencies) => {
+    const key = memoIndex++;
+    const previous = memos[key];
+    if (!previous || dependencies.some((value, index) => value !== previous.dependencies[index])) {
+      memos[key] = { value: factory(), dependencies };
+    }
+    return memos[key].value;
+  };
+  const { DealsWorkspace } = load("src\\components\\deals-workspace.tsx", {
+    react: { ...React,
+      useState(initial) {
+        const key = stateIndex++;
+        if (!(key in states)) states[key] = typeof initial === "function" ? initial() : initial;
+        return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }];
+      },
+      useRef(initial) { const key = refIndex++; return refs[key] ??= { current: initial }; },
+      useMemo: memo, useCallback: (callback, dependencies) => memo(() => callback, dependencies),
+      useEffect(effect, dependencies) {
+        const key = effectIndex++, previous = effects[key];
+        if (!previous || dependencies.some((value, index) => value !== previous.dependencies[index])) {
+          pendingEffects.push(() => {
+            previous?.cleanup?.();
+            effects[key] = { dependencies, cleanup: effect() };
+          });
+        }
+      },
+    },
+    "next/navigation": { useRouter() { assert.fail("Deals filtering must not navigate through the page router"); } },
+    "@/lib/crm-data": {
+      apiRequest: async (url, options) => { requests.push({ url, options }); return request(url, options); },
+      errorMessage: failure => failure.message,
+    },
+  });
+  let props = data;
+  const render = () => {
+    stateIndex = 0; refIndex = 0; memoIndex = 0; effectIndex = 0;
+    return elements(DealsWorkspace({ initialData: props }));
+  };
+  render();
+  while (pendingEffects.length) pendingEffects.shift()();
+  t.after(() => {
+    for (const effect of effects) effect?.cleanup?.();
+    if (oldWindow === undefined) delete global.window; else global.window = oldWindow;
+    if (oldDocument === undefined) delete global.document; else global.document = oldDocument;
+  });
+  return {
+    data, rows, requests, history, listeners, render, filters: dealFilterSchema.parse.bind(dealFilterSchema),
+    apply(filters) { render().find(node => node.props.onApply).props.onApply(dealFilterSchema.parse(filters)); },
+    total() { return render().find(node => node.type === "dd").props.children; },
+    replace(next) { props = next; render(); while (pendingEffects.length) pendingEffects.shift()(); },
+  };
+}
+
+test("Deals snapshot Apply, Clear, pagination and browser history update immediately without network or page navigation", t => {
+  const fixture = dealWorkspaceFixture(t);
+  assert.equal(fixture.total(), "334");
+  fixture.render().find(node => node.type === "button" && node.props.children === "Next").props.onClick();
+  assert.equal(window.location.search, "?page=2");
+  fixture.apply({ period: "today" });
+  assert.equal(fixture.total(), "1");
+  assert.equal(window.location.search, "?period=today", "applying filters resets pagination");
+  assert.equal(fixture.render().find(node => node.props.onApply).props.pending, false);
+  fixture.apply({});
+  assert.equal(fixture.total(), "334");
+  assert.equal(window.location.search, "");
+  const changes = fixture.history.length;
+  fixture.apply({});
+  assert.equal(fixture.history.length, changes, "unchanged filters do nothing");
+  window.location = new URL("http://localhost/deals?period=month&month=10&year=2026");
+  fixture.listeners.get("popstate")();
+  assert.equal(fixture.total(), "333");
+  assert.equal(fixture.history.length, changes, "Back/Forward must not push another history entry");
+  fixture.apply({ period: "year", year: "2026", stage: "already_enrolled" });
+  assert.equal(fixture.total(), "1");
+  assert.equal(fixture.requests.length, 0, "fresh snapshot changes must never wait for the server");
+  const { filterDealSnapshot } = load("src\\lib\\deals.ts");
+  const samples = Array.from({ length: 5 }, () => {
+    const start = performance.now();
+    filterDealSnapshot(fixture.rows, fixture.data.stages, fixture.filters({ period: "today" }), 1, fixture.data.today, fixture.data.timezone);
+    return performance.now() - start;
+  }).sort((a, b) => a - b);
+  assert.ok(samples[2] < 100, `334-lead filter median must stay below 100ms, got ${samples[2].toFixed(2)}ms`);
+  console.info(`334-lead local filter median: ${samples[2].toFixed(2)}ms; Apply/Clear network requests: 0`);
+});
+
+test("Deals stale snapshots stay interactive during refresh, ignore old responses and refresh from new server props", async t => {
+  const pending = [];
+  const fixture = dealWorkspaceFixture(t, { stale: true, request: () => new Promise((resolve, reject) => pending.push({ resolve, reject })) });
+  fixture.apply({ period: "today" });
+  assert.equal(fixture.total(), "1", "do not block current results behind a refresh");
+  assert.equal(fixture.render().find(node => node.props.onApply).props.pending, false);
+  fixture.apply({ period: "month", month: "10", year: "2026" });
+  assert.equal(fixture.total(), "333");
+  pending[0].resolve({ ...fixture.data, snapshot: [], loadedAt: Date.now() });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fixture.total(), "333", "an obsolete refresh must not replace the current filter");
+  pending[1].reject(new Error("Refresh unavailable"));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(fixture.render().some(node => node.props.role === "alert" && node.props.children.includes("Refresh unavailable")));
+  assert.equal(fixture.total(), "333", "failed refreshes retain existing records with an explicit error");
+  const next = { ...fixture.data, snapshot: fixture.rows.slice(0, 1), loadedAt: Date.now() };
+  fixture.replace(next);
+  assert.equal(fixture.total(), "1", "router.refresh after a CRM write replaces the old snapshot");
+  assert.equal(fixture.render().some(node => node.props.role === "alert"), false);
+});
+
+test("Deals large-list requests use JSON and retry the requested filter after failure", async t => {
+  const pending = [];
+  const fixture = dealWorkspaceFixture(t, { snapshot: false, request: () => new Promise((resolve, reject) => pending.push({ resolve, reject })) });
+  fixture.apply({ period: "today" });
+  assert.equal(fixture.requests[0].url, "/api/deals?period=today");
+  assert.equal(fixture.render().find(node => node.props.onApply).props.pending, true);
+  pending[0].reject(new Error("Query unavailable"));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fixture.render().find(node => node.props.onApply).props.pending, false);
+  fixture.render().find(node => node.type === "button" && node.props.children === "Retry update").props.onClick();
+  assert.equal(fixture.requests[1].url, "/api/deals?period=today", "retry the failed selection, not the previously displayed filter");
+  pending[1].resolve({ ...fixture.data, filters: fixture.filters({ period: "today" }), result: {
+    leads: [fixture.rows[0]], counts: [{ stage_id: "won", total: 1 }, { stage_id: "enrolled", total: 0 }],
+  }, loadedAt: Date.now() });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fixture.total(), "1");
+  assert.equal(window.location.search, "?period=today");
+});
+
+test("Deals refresh switches safely to server pagination when the dataset outgrows its snapshot", async t => {
+  let resolve;
+  const fixture = dealWorkspaceFixture(t, { stale: true, request: () => new Promise(done => { resolve = done; }) });
+  fixture.apply({ period: "today" });
+  assert.equal(fixture.total(), "1");
+  resolve({ ...fixture.data, snapshot: null, filters: fixture.filters({ period: "today" }), loadedAt: Date.now(),
+    result: { leads: [fixture.rows[0]], counts: [{ stage_id: "won", total: 501 }, { stage_id: "enrolled", total: 0 }] },
+  });
+  await new Promise(done => setImmediate(done));
+  assert.equal(fixture.total(), "501");
+  fixture.apply({});
+  assert.equal(fixture.requests.length, 2, "growth beyond the bound must use server results, not a truncated local snapshot");
+  resolve({ ...fixture.data, loadedAt: Date.now() });
+  await new Promise(done => setImmediate(done));
+});
+
+test("Deals JSON refresh checks permissions and eligible roles before metadata or customer reads", async () => {
+  class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
+  let role = "accounts", denied = false, snapshotFailure = false, metadataReads = 0;
+  const signedInClient = {};
+  const route = load("src\\app\\api\\deals\\route.ts", {
+    "next/server": { NextResponse: { json: (body, options) => Response.json(body, options) } },
+    "@/lib/server/auth": {
+      HttpError,
+      requireUser: async permission => {
+        assert.equal(permission, "deals.view");
+        if (denied) throw new HttpError(401, "Sign in");
+        return { supabase: signedInClient, user: { ...user, profile: { ...profile, role }, permissions: ["deals.view"] } };
+      },
+      jsonError: error => Response.json({ error: error.message }, { status: error.status ?? 500 }),
+    },
+    "@/lib/server/deals": {
+      fetchDealSnapshot: async client => {
+        assert.equal(client, signedInClient, "customer reads must use the authenticated RLS client");
+        if (snapshotFailure) throw new Error("Deals read unavailable");
+        return [];
+      },
+      fetchDealPage() { assert.fail("empty snapshot needs no extra lead reads"); },
+    },
+    "@/lib/supabase/server": { getSupabaseAdminClient: () => ({
+      from(table) {
+        assert.equal(table, "lead_stages", "admin access is restricted to public stage metadata, never customer records");
+        metadataReads++;
+        return { select: async () => ({ data: [{ id: "won", name: "Closed Won" }], error: null }) };
+      },
+    }) },
+  });
+  const read = query => route.GET(new Request(`http://localhost/api/deals${query ?? ""}`));
+  for (const allowed of ["accounts", "admin", "super_admin"]) {
+    role = allowed;
+    const response = await read("?period=today");
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("cache-control"), "private, no-store");
+    assert.match(response.headers.get("server-timing"), /auth;dur=.*data;dur=/);
+  }
+  const before = metadataReads;
+  role = "manager";
+  assert.equal((await read()).status, 403);
+  role = "accounts";
+  assert.equal((await read("?period=invalid")).status, 400);
+  denied = true;
+  assert.equal((await read()).status, 401);
+  assert.equal(metadataReads, before, "denied/invalid requests must not fetch metadata or leads");
+  denied = false; snapshotFailure = true;
+  assert.equal((await read()).status, 500, "read failures must not look like a successful empty Deals list");
+});
+
+test("Accounts deal details remain read-only and return to Deals without general lead navigation", async () => {
+  const actor = { ...user, profile: { ...profile, role: "accounts" }, permissions: ["deals.view", "invoices.view"] };
+  const html = await renderPage("src\\app\\leads\\[id]\\page.tsx", { overrides: {
+    "@/lib/live-leads-client": { ...liveMock, useLiveLeadData: () => ({
+      data: { ...live, user: actor, lead: { ...lead, stage: "Closed Won" }, notes: [], activities: [], emails: [] },
+      loading: false, error: "", reload() {}, setError() {},
+    }) },
+  } });
+  assert.match(html, /href="\/deals"[^>]*>[\s\S]*?Back to deals/);
+  assert.match(html, /Read only/);
+  assert.doesNotMatch(html, /aria-label="Next lead"|Click to call|Autosave enabled/);
+});
+
+test("stage automation creation selects an available stage and displays the saved rule", async () => {
+  const states = [{
+    canManage: true, users: [{ id: "owner", full_name: "Owner", active: true }],
+    rules: [{ rule_key: "stage:existing", enabled: true, strategy: "single", owner_ids: ["owner"], next_owner_index: 0 }],
+    stages: [{ id: "new", name: "Qualified", is_active: true }, { id: "existing", name: "Existing", is_active: true },
+      { id: "junk", name: "Junk", is_active: true }, { id: "retired", name: "Retired", is_active: false }],
+  }, "", "", false, null];
+  const requests = [];
+  let index = 0;
+  const { LeadAssignmentAutomations } = load("src\\components\\lead-assignment-automations.tsx", {
+    react: { ...React, useEffect() {}, useState(initial) {
+      const key = index++;
+      if (!(key in states)) states[key] = initial;
+      return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }];
+    } },
+    "@/components/searchable-dropdown": { SearchableDropdown: () => null },
+    "@/lib/crm-data": { ...crm, apiRequest: async (url, init) => { requests.push({ url, ...init }); return { rule: init.body }; } },
+  });
+  const render = () => { index = 0; return elements(LeadAssignmentAutomations()); };
+  render().find(node => node.type === "button" && node.props.children === "Create stage automation").props.onClick();
+  let nodes = render();
+  const form = nodes.find(node => node.type === "form");
+  const selects = elements(form).filter(node => node.type === "select");
+  const options = elements(selects[0]).filter(node => node.type === "option").map(node => node.props.value);
+  assert.deepEqual(options, ["", "new"]);
+  selects[0].props.onChange({ target: { value: "new" } });
+  selects[1].props.onChange({ target: { value: "owner" } });
+  render().find(node => node.type === "form").props.onSubmit({ preventDefault() {} });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(requests[0].body, { rule_key: "stage:new", enabled: true, strategy: "single", owner_ids: ["owner"] });
+  nodes = render();
+  assert.ok(nodes.some(node => node.type === "h3" && node.props.children === "Qualified stage"));
+  assert.ok(!nodes.some(node => node.type === "form"));
+});
+
 test("searchable dropdown portals into its dialog and supports filtering, scroll limits and selection", t => {
   const previousDocument = global.document;
   const dialog = {};
@@ -4001,7 +4772,7 @@ test("image-only notes render compact attachments without loading full timeline 
   assert.doesNotMatch(html, /<span class="lead-event-category">Record activity/);
 });
 
-test("lead overview loads before related preparation, then prepares tabs without another click", async () => {
+test("lead overview prepares its related records but defers invoice, course and email-context requests until intent", async () => {
   for (const ready of [false, true]) {
     const effects = [], reads = [], chunks = [];
     const data = ready ? { ...live, lead, notes: [], activities: [], emails: [] } : null;
@@ -4018,12 +4789,19 @@ test("lead overview loads before related preparation, then prepares tabs without
         useLiveLeadData: () => ({ data, loading: !ready, error: "", reload() {}, setError() {}, acceptData() {} }),
       },
     }).default;
-    Component();
+    const tree = Component();
     const cleanup = effects[2]();
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(reads.includes(`/api/leads/${lead.id}?section=workspace`), ready, "related reads must not compete with the initial lead request");
-    assert.deepEqual(reads.filter(path => path.includes("invoices") || path.includes("courses")).sort(), ready ? [`/api/invoices?leadId=${lead.id}`, "/api/courses"].sort() : []);
-    assert.deepEqual(chunks.sort(), ready ? ["courses", "invoices"] : [], "invoice permission gates financial data and chunks");
+    assert.deepEqual(reads.filter(path => path.includes("invoices") || path.includes("courses") || path.includes("email-context")), []);
+    assert.deepEqual(chunks, [], "unopened financial tabs must not compete with the selected lead");
+    if (ready) {
+      elements(tree).find(node => node.props.id === "lead-section-invoices").props.onMouseEnter();
+      await new Promise(resolve => setImmediate(resolve));
+      assert.ok(reads.includes(`/api/invoices?leadId=${lead.id}`));
+      assert.deepEqual(chunks, ["invoices"]);
+      assert.equal(reads.includes("/api/courses"), false);
+    }
     cleanup?.();
   }
 });

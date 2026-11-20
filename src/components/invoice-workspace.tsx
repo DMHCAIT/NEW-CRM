@@ -42,6 +42,7 @@ type Data = {
   canCreate: boolean;
   canApprove: boolean;
   canApproveDiscount: boolean;
+  restrictedInvoiceLeads?: boolean;
   razorpay: Configuration;
   smtp: Configuration;
 };
@@ -170,6 +171,8 @@ export function InvoiceWorkspace({ leadId, timelineOnly = false }: { leadId?: st
   };
   const canRecordPayment = (invoice: Invoice) => Boolean(data?.canCreate && (invoice.can_reconcile_payment
     ?? (invoice.created_by === data.userId || data.canApprove)));
+  const canAddInstallments = (parent: InstallmentParent) => !data?.restrictedInvoiceLeads
+    || data.leads.some(lead => lead.id === parent.lead_id);
   function addInstallments(parent: InstallmentParent) {
     setEnrollmentId(parent.id); setSelectedId(""); setShowForm(true);
   }
@@ -194,7 +197,7 @@ export function InvoiceWorkspace({ leadId, timelineOnly = false }: { leadId?: st
       {invoice.status === "paid" && <span role="status" style={{ background: "#167844", color: "#fff", borderRadius: 4, padding: "10px 16px", fontWeight: 700 }}>Paid {money(invoice.total, invoice.currency)}</span>}
       {invoice.payment_url && invoice.status === "sent" && enrollmentApproved(invoice) && <a className="button button-primary" href={invoice.payment_url} target="_blank" rel="noreferrer">Pay Now</a>}
       <button className="button button-secondary" disabled={Boolean(downloadingId)} onClick={() => void downloadInvoice(invoice)}><Download size={14} />{downloadingId === invoice.id ? "Downloading…" : "Download PDF"}</button>
-      {data?.canCreate && parent && Number(parent.available_balance) >= 1 && !parent.tax_review_required && <button className="button button-primary" disabled={state.busy} onClick={() => addInstallments(parent)}><Plus size={14} />Add next installment</button>}
+      {data?.canCreate && parent && canAddInstallments(parent) && Number(parent.available_balance) >= 1 && !parent.tax_review_required && <button className="button button-primary" disabled={state.busy} onClick={() => addInstallments(parent)}><Plus size={14} />Add next installment</button>}
       {invoice.status === "expired" && data?.canApprove && (invoice.approved_at || canDecide(invoice)) && <button className="button button-secondary" disabled={state.busy} onClick={() => {
         if (confirm("Reconcile and cancel the expired payment links, then close this unpaid invoice? Received funds must be verified first."))
           void state.mutate(`/api/invoices/${invoice.id}`, "PATCH", { action: "close_expired" });
@@ -208,7 +211,7 @@ export function InvoiceWorkspace({ leadId, timelineOnly = false }: { leadId?: st
         <button className="button button-secondary" disabled={state.busy} onClick={() => { const comment = prompt("Rejection reason"); if (comment !== null) void state.mutate(`/api/invoices/${invoice.id}`, "PATCH", { action: "reject", comment }); }}>Reject</button>
       </>}
       {invoice.status === "pending_approval" && Number(invoice.discount_percent) > 0 && !data?.canApproveDiscount
-        && <span className="invoice-action-note">Awaiting Super Admin discount approval</span>}
+        && <span className="invoice-action-note">Awaiting Accounts or Super Admin discount approval</span>}
       {invoice.status === "sent" && !invoice.tax_review_required && <>
         {["one_shot", "installments"].includes(invoice.payment_type) && canRecordPayment(invoice) && <>
           <button className="button button-secondary" disabled={state.busy} onClick={() => void state.mutate(`/api/invoices/${invoice.id}`, "PATCH", { action: "sync_payment" })}><RefreshCw size={14} />Check payment status</button>
@@ -250,7 +253,7 @@ export function InvoiceWorkspace({ leadId, timelineOnly = false }: { leadId?: st
       {selected.delivery_error && <p role="alert" className="zf-alert">Delivery needs attention: {selected.delivery_error}</p>}
       {selectedRoot && selected.payment_type === "installments" && <section className="zf-installment-plan" aria-label="Course installments">
         <div className="panel-heading"><div><h3>{courseName(selected)} - course installments</h3><p>One course enrollment: {selectedRoot.invoice_no}. All payments below reduce this course balance only.</p></div>
-          {data?.canCreate && selectedEnrollment && Number(selectedEnrollment.available_balance) >= 1 && !selectedEnrollment.tax_review_required && <button className="button button-primary" disabled={state.busy} onClick={() => addInstallments(selectedEnrollment)}><Plus size={14} />Add next installment</button>}</div>
+          {data?.canCreate && selectedEnrollment && canAddInstallments(selectedEnrollment) && Number(selectedEnrollment.available_balance) >= 1 && !selectedEnrollment.tax_review_required && <button className="button button-primary" disabled={state.busy} onClick={() => addInstallments(selectedEnrollment)}><Plus size={14} />Add next installment</button>}</div>
         <dl className="zf-payment-summary">{[["Course total", selectedCourseTotal], ["Paid", round(selectedCourseTotal - selectedBalance)], ["Outstanding", selectedBalance], ["Available for new installments", selectedUnallocated]].map(([label, amount]) => <div key={label}><dt>{label}</dt><dd>{money(Number(amount), selected.currency)}</dd></div>)}</dl>
         <div className="table-wrap"><table className="data-table"><thead><tr><th>Installment</th><th>Amount</th><th>Invoice date</th><th>Due date</th><th>Status</th><th /></tr></thead><tbody>{selectedInstallments.map((row, index) => <tr key={row.id} aria-current={row.id === selected.id ? "true" : undefined}><td>{installmentLabel(row.installment_number ?? index + 1)}<small>{row.invoice_no}</small></td><td>{money(row.total, row.currency)}</td><td>{dateLabel(row.invoice_date ?? row.created_at.slice(0, 10))}</td><td>{dateLabel(row.due_date)}</td><td><span className={`invoice-status is-${row.status}`}>{statusLabel(row.status)}</span></td><td><button className="button button-secondary" onClick={() => setSelectedId(row.id)}>Open installment</button></td></tr>)}</tbody></table></div>
       </section>}
@@ -296,7 +299,7 @@ export function InvoiceWorkspace({ leadId, timelineOnly = false }: { leadId?: st
         <td>{dateLabel(invoice.due_date)}</td><td><div className="invoice-table-actions">
           {invoice.payment_url && invoice.status === "sent" && enrollmentApproved(invoice) && <a className="button button-primary" href={invoice.payment_url} target="_blank" rel="noreferrer">Pay Now</a>}
           {approvalAction(invoice)}
-          {data?.canCreate && data.installmentParents?.some(parent => parent.id === (invoice.parent_invoice_id ?? invoice.id) && Number(parent.available_balance) >= 1 && !parent.tax_review_required) && <button className="button button-secondary" disabled={state.busy} onClick={() => { const parent = data.installmentParents?.find(row => row.id === (invoice.parent_invoice_id ?? invoice.id)); if (parent) addInstallments(parent); }}>Add next installment</button>}
+          {data?.canCreate && data.installmentParents?.some(parent => parent.id === (invoice.parent_invoice_id ?? invoice.id) && canAddInstallments(parent) && Number(parent.available_balance) >= 1 && !parent.tax_review_required) && <button className="button button-secondary" disabled={state.busy} onClick={() => { const parent = data.installmentParents?.find(row => row.id === (invoice.parent_invoice_id ?? invoice.id)); if (parent) addInstallments(parent); }}>Add next installment</button>}
           {["sent", "scheduled", "expired"].includes(invoice.status) && enrollmentApproved(invoice) && (canRecordPayment(invoice) || data?.canApprove) && <button className="button button-secondary" onClick={() => { setSelectedId(invoice.id); setShowForm(false); }}>Record payment</button>}
           {data?.canApprove && invoice.tax_review_required && ["pending_approval", "sent"].includes(invoice.status) && <button className="button button-secondary" disabled={state.busy} onClick={() => { setSelectedId(invoice.id); setShowForm(false); }}>Review tax before approval</button>}
           <button className="button button-secondary" onClick={() => { setSelectedId(invoice.id); setShowForm(false); }}>Details</button><button className="button button-secondary" disabled={Boolean(downloadingId)} onClick={() => void downloadInvoice(invoice)}>{downloadingId === invoice.id ? "Downloading…" : "PDF"}</button>

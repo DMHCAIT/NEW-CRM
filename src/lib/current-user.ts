@@ -7,17 +7,18 @@ export const PAGE_USER_HEADER = "x-crm-page-user";
 
 const permissions = new Set<string>(Object.values(DEFAULT_ROLE_PERMISSIONS).flat());
 const permission = z.custom<Permission>(value => typeof value === "string" && permissions.has(value));
-const currentUserSchema: z.ZodType<CurrentUser> = z.object({
+const currentUserSchema = z.object({
   id: z.string(),
   email: z.string(),
   profile: z.object({
     id: z.string(), fullName: z.string(), email: z.string(), phone: z.string(),
-    role: z.enum(["counselor", "team_lead", "manager", "admin", "super_admin"]),
+    role: z.enum(["counselor", "team_lead", "manager", "accounts", "admin", "super_admin"]),
     reportingTo: z.string().nullable(), status: z.enum(["active", "inactive"]),
     ivrExtension: z.string(), deletedAt: z.string().nullable(),
   }),
   permissions: z.array(permission),
-});
+}) satisfies z.ZodType<CurrentUser>;
+const requestContextSchema = currentUserSchema.extend({ permissions: z.array(z.string()) });
 
 export function encodePageUser(user: CurrentUser | null): string {
   return encodeURIComponent(JSON.stringify(user));
@@ -35,8 +36,14 @@ export async function loadCurrentUser(supabase: SupabaseClient, touchSession = f
   if (!user) return null;
   if (context.error) throw new Error(context.error.message);
   if (context.data === null) return null;
-  const actor = currentUserSchema.parse(context.data);
+  const actor = requestContextSchema.parse(context.data);
   if (actor.id !== user.id || actor.profile.id !== user.id) throw new Error("Session identity mismatch.");
   if (actor.profile.status !== "active" || actor.profile.deletedAt) return null;
-  return { ...actor, email: user.email ?? "", profile: { ...actor.profile, email: actor.profile.email || user.email || "" } };
+  const granted = actor.permissions.filter((value): value is Permission => permissions.has(value));
+  if (granted.length !== actor.permissions.length) {
+    console.warn("CRM request context contains unsupported permission keys; these grants were ignored.", {
+      count: actor.permissions.length - granted.length,
+    });
+  }
+  return { ...actor, permissions: granted, email: user.email ?? "", profile: { ...actor.profile, email: actor.profile.email || user.email || "" } };
 }

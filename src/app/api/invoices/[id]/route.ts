@@ -28,15 +28,15 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
     const input = parseInput(actionSchema, await readJson(request));
     const adminAction = ["approve", "reject", "external_payment", "review_tax", "close_expired"].includes(input.action);
     const { supabase, user } = await requireUser(adminAction ? "invoices.approve" : "invoices.create");
-    if (adminAction && !["admin", "super_admin"].includes(user.profile.role)) throw new HttpError(403, "Admin or Super Admin approval is required.");
+    if (adminAction && !["admin", "super_admin", "accounts"].includes(user.profile.role)) throw new HttpError(403, "Admin, Super Admin or Accounts approval is required.");
     const id = parseInput(uuid, (await context.params).id);
     const { data: invoice, error } = await supabase.from("invoices").select("*").eq("id", id).maybeSingle();
     databaseError(error);
     if (!invoice) throw new HttpError(404, "Invoice not found or inaccessible.");
-    if (Number(invoice.discount_percent) > 0 && user.profile.role !== "super_admin"
+    if (Number(invoice.discount_percent) > 0 && !["super_admin", "accounts"].includes(user.profile.role)
       && (input.action === "approve" || input.action === "reject"
         || (input.action === "close_expired" && invoice.status === "pending_approval" && !invoice.parent_invoice_id))) {
-      throw new HttpError(403, "Super Admin approval is required for discounts.");
+      throw new HttpError(403, "Super Admin or Accounts approval is required for discounts.");
     }
     const admin = getSupabaseAdminClient();
 
@@ -69,7 +69,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
     }
 
     if (input.action === "verify_payment_url" || input.action === "sync_payment") {
-      if (invoice.created_by !== user.id && !["admin", "super_admin"].includes(user.profile.role)) {
+      if (invoice.created_by !== user.id && !["admin", "super_admin", "accounts"].includes(user.profile.role)) {
         const lead = await accessibleLead(supabase, invoice.lead_id);
         if (lead.assignee_id !== user.id) throw new HttpError(403, "Only the lead owner, invoice creator or an administrator can reconcile payment.");
       }
@@ -155,7 +155,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
     }
 
     if (invoice.status !== "sent") throw new HttpError(409, "Only issued invoices can be emailed.");
-    if (invoice.created_by !== user.id && !["admin", "super_admin"].includes(user.profile.role)) {
+    if (invoice.created_by !== user.id && !["admin", "super_admin", "accounts"].includes(user.profile.role)) {
       const currentLead = await accessibleLead(supabase, invoice.lead_id);
       if (currentLead.assignee_id !== user.id) throw new HttpError(403, "Only the lead owner, invoice creator or an administrator can send it.");
     }

@@ -2,11 +2,14 @@ export type CrmRole =
   | "counselor"
   | "team_lead"
   | "manager"
+  | "accounts"
   | "admin"
   | "super_admin";
 
 export type Permission =
   | "dashboard.view"
+  | "deals.view"
+  | "courses.manage"
   | "leads.view"
   | "leads.create"
   | "leads.edit"

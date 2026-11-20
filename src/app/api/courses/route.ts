@@ -8,10 +8,12 @@ import { checkOrigin } from "@/lib/server/login";
 export async function GET() {
   try {
     const { supabase, user } = await requireUser();
-    const canManage = ["admin", "super_admin"].includes(user.profile.role);
+    const canManage = ["admin", "super_admin"].includes(user.profile.role)
+      || (user.profile.role === "accounts" && user.permissions.includes("courses.manage"));
+    const canReadCompanies = canManage || user.permissions.includes("invoices.create");
     const [courses, companies] = await Promise.all([
       supabase.from("courses").select("*").order("name").limit(1000),
-      supabase.from("invoice_companies").select("*").order("code"),
+      canReadCompanies ? supabase.from("invoice_companies").select("*").order("code") : { data: [], error: null },
     ]);
     databaseError(courses.error); databaseError(companies.error);
     return NextResponse.json({ courses: courses.data, companies: companies.data, canManage });
@@ -22,11 +24,15 @@ export async function POST(request: Request) {
   try {
     checkOrigin(request);
     const { supabase, user } = await requireUser();
-    if (!["admin", "super_admin"].includes(user.profile.role)) throw new HttpError(403, "Only administrators can manage course prices and billing companies.");
+    const administrator = ["admin", "super_admin"].includes(user.profile.role);
+    if (!administrator && !(user.profile.role === "accounts" && user.permissions.includes("courses.manage")))
+      throw new HttpError(403, "You do not have permission to manage courses.");
     const input = parseInput(z.discriminatedUnion("kind", [
       z.object({ kind: z.literal("course"), id: z.string().uuid().optional(), values: courseInput }),
       z.object({ kind: z.literal("company"), values: companyInput }),
     ]), await readJson(request));
+    if (!administrator && input.kind !== "course")
+      throw new HttpError(403, "You do not have permission to manage this catalog item.");
     if (input.kind === "company") {
       const { data, error } = await supabase.from("invoice_companies").update(input.values).eq("code", input.values.code).select("code").maybeSingle();
       databaseError(error);

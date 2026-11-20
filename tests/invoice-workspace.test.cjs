@@ -296,7 +296,7 @@ test("closing an expired unapproved enrollment rejects its single approval and c
   assert.equal(calls.find(call => call[0] === "rpc")[2].p_decision, "rejected");
 });
 
-test("discount decisions require Super Admin even when other roles hold invoices.approve", async () => {
+test("discount decisions require Super Admin or Accounts even when other roles hold invoices.approve", async () => {
   for (const role of ["counselor", "team_lead", "manager", "admin"]) {
     for (const action of ["approve", "reject", "close_expired"]) {
       const { detail, calls } = fixture({ role, singleInvoice: {
@@ -317,6 +317,21 @@ test("discount decisions require Super Admin even when other roles hold invoices
     method: "PATCH", body: JSON.stringify({ action: "approve" }),
   }), { params: Promise.resolve({ id: leadId }) });
   assert.equal(response.status, 200, "non-discount finance approvals retain admin access");
+});
+
+test("Accounts has full invoice approval and reconciliation access", async () => {
+  const { route, detail, calls } = fixture({ role: "accounts", singleInvoice: {
+    id: leadId, lead_id: leadId, status: "pending_approval", discount_percent: 10,
+  }, issuedInvoice: { id: leadId, lead_id: leadId, status: "sent" } });
+  const snapshot = await route.GET(new Request("https://crm.example/api/invoices"));
+  assert.equal(snapshot.data.canApprove, true);
+  assert.equal(snapshot.data.canApproveDiscount, true);
+  assert.equal(snapshot.data.restrictedInvoiceLeads, true);
+  const result = await detail.PATCH(new Request(`https://crm.example/api/invoices/${leadId}`, {
+    method: "PATCH", body: JSON.stringify({ action: "approve" }),
+  }), { params: Promise.resolve({ id: leadId }) });
+  assert.equal(result.status, 200);
+  assert.ok(calls.some(call => call[0] === "rpc" && call[1] === "operational_decide_invoice"));
 });
 
 test("counselors team leads and managers can create INR and USD invoices without discount decision access", async () => {

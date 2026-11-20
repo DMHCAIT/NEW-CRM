@@ -12,7 +12,7 @@ type AccessData = {
   overrides: { user_id: string; permission_key: string; allowed: boolean }[];
   profiles: Profile[];
 };
-const roles = ["counselor", "team_lead", "manager", "admin"];
+const roles = ["counselor", "team_lead", "manager", "accounts", "admin"];
 
 export function AccessEditor({ individual = false }: { individual?: boolean }) {
   const [data, setData] = useState<AccessData | null>(() => getPreparedApiRead<AccessData>("/api/access") ?? null);

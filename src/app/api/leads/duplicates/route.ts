@@ -9,7 +9,8 @@ export async function GET(request: Request) {
     const phone = (params.get("phone") ?? "").slice(0, 30);
     const email = (params.get("email") ?? "").trim().slice(0, 254);
     const countryCode = (params.get("countryCode") ?? "").slice(0, 160);
-    const checkPhone = phone.replace(/\D/g, "").length >= 7 ? normalizePhone(phone, countryCode) : "";
+    const normalizedPhone = normalizePhone(phone, countryCode);
+    const checkPhone = normalizedPhone.length >= 7 && normalizedPhone.length <= 15 ? normalizedPhone : "";
     const checkEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : "";
     if (!checkPhone && !checkEmail) return NextResponse.json({ matches: [] });
     const { data, error } = await supabase.rpc("find_live_lead_duplicates", { check_phone: checkPhone, check_email: checkEmail, check_country_code: countryCode });

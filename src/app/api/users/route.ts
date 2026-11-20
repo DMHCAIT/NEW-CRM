@@ -12,7 +12,7 @@ const passwordSchema = z.string().min(12).max(128);
 const profileSchema = z.object({
   fullName: z.string().trim().min(1).max(150),
   email: z.string().trim().email().max(254),
-  role: z.enum(["counselor", "team_lead", "manager", "admin", "super_admin"]),
+  role: z.enum(["counselor", "team_lead", "manager", "accounts", "admin", "super_admin"]),
   reportingTo: z.string().uuid().nullable(),
   status: z.enum(["active", "inactive"]),
   phone: z.string().max(50).default(""),

@@ -21,10 +21,21 @@ export async function accessibleLead(supabase: SupabaseClient, id: string) {
   return data;
 }
 
-export async function leadOptions(supabase: SupabaseClient) {
-  const { data, error } = await supabase.from("leads").select("id,name").eq("is_archived", false).is("merged_into_id", null).order("name").limit(500);
-  databaseError(error);
-  return data ?? [];
+export async function leadOptions(supabase: SupabaseClient, all = false) {
+  if (!all) {
+    const { data, error } = await supabase.from("leads").select("id,name").eq("is_archived", false).is("merged_into_id", null).order("name").limit(500);
+    databaseError(error);
+    return data ?? [];
+  }
+  const leads: { id: string; name: string }[] = [];
+  do {
+    const { data, error } = await supabase.from("leads").select("id,name").eq("is_archived", false).is("merged_into_id", null)
+      .order("name").order("id").range(leads.length, leads.length + 499);
+    databaseError(error);
+    leads.push(...(data ?? []));
+    if ((data?.length ?? 0) < 500) break;
+  } while (true);
+  return leads;
 }
 
 export const integrationRequirements = {

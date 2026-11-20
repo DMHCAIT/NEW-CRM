@@ -14,6 +14,7 @@ function load(path, dependencies = {}) {
     exports, require: (name) => name in dependencies ? dependencies[name] :
       name === "@/lib/server/login" ? { checkOrigin: () => {} } :
       name === "@/lib/server/operational-gmail" ? { currentGmailMailbox: async () => null } :
+      name === "@/lib/server/telecmi" ? { initiateTelecmiCall: async () => assert.fail("Unexpected TeleCMI call in an unrelated action test") } :
       name === "@/lib/email-signature-policy" ? load("src\\lib\\email-signature-policy.ts", dependencies) :
       name === "@/lib/note-images" ? load("src\\lib\\note-images.ts") :
       name === "@/lib/server/note-images" ? load("src\\lib\\server\\note-images.ts", { "@/lib/server/auth": auth }) :
@@ -80,6 +81,14 @@ test("lead storage combines calling code and phone without duplicating explicit 
     assert.equal(parsed.phone, expected);
     assert.equal(parsed.normalized_phone, expected.slice(1));
   }
+});
+
+test("lead storage rejects phones whose normalized country-code number is outside 7-15 digits", () => {
+  assert.throws(() => validation.parseLead({
+    ...validLead,
+    phone: "1234567890123456",
+    countryCode: "India (+91)",
+  }), /Phone number must contain 7 to 15 digits/);
 });
 
 function callScheduleRoute({ denied = false, invisible = false, archived = false, dbFailure = false, badOrigin = false } = {}) {
@@ -159,8 +168,8 @@ test("lead detail reload returns persisted scheduled calls through the authentic
   const calls = [{ id: "call-id", user_id: "current-user", scheduled_at: "2099-12-01T10:00:00Z", status: "scheduled" }];
   const route = load("src\\app\\api\\leads\\[id]\\route.ts", {
     "@/lib/server/auth": { ...auth, requireUser: async permission => {
-      assert.equal(permission, "leads.view");
-      return { user: { id: "current-user" }, supabase: { rpc: async (name, args) => {
+      assert.equal(permission, undefined);
+      return { user: { id: "current-user", profile: { role: "admin" }, permissions: ["leads.view"] }, supabase: { rpc: async (name, args) => {
         assert.equal(name, "lead_duplicate_owners"); assert.equal(args.lead_id, "accessible-lead");
         return { data: [{ assignee: "Other counselor", merge_target_id: null }], error: null };
       }, from(table) {
@@ -353,7 +362,7 @@ test("stage PATCH reads final automation ownership and handles loss of scope wit
 });
 
 test("detail stage PATCH defers assignment while returning the saved lead and departure token", async () => {
-  for (const name of ["Cold", "Junk", "Not Interested"]) {
+  for (const name of ["Cold", "Junk", "Not Interested", "Custom stage"]) {
     const stageId = "30000000-0000-4000-8000-000000000001";
     const initial = { ...validLead, id: "lead", stageId: null, source: "Website", closureFee: 0 };
     const token = "40000000-0000-4000-8000-000000000001";
@@ -361,7 +370,12 @@ test("detail stage PATCH defers assignment while returning the saved lead and de
     const saved = { id: "lead", stage_id: stageId, assignee_id: null, custom_fields: {}, call_schedule_revision: 1 };
     const route = load("src\\app\\api\\leads\\[id]\\route.ts", {
       "@/lib/server/auth": { ...auth, requireUser: async () => ({ user: { id: "editor", permissions: ["leads.edit"] }, supabase: {
-        from: () => ({ select: () => ({ eq: () => ({ single: async () => ({ data: { custom_fields: {}, call_schedule_revision: 0 }, error: null }) }) }) }),
+        from: () => {
+          const query = { select: () => query, eq: () => query,
+            single: async () => ({ data: { custom_fields: {}, call_schedule_revision: 0 }, error: null }),
+            maybeSingle: async () => ({ data: saved, error: null }) };
+          return query;
+        },
         rpc: (fn, input) => {
           calls.push({ fn, input });
           return { single: async () => ({ data: { lead: saved, assignment_pending_id: token }, error: null }) };
@@ -457,6 +471,54 @@ test("Cold assignment API saves a single active assignee and rejects invalid sta
   assert.match((await inactive.json()).error, /active CRM users/);
   assert.equal(writes.length, 1, "invalid Cold rules must not be persisted");
   assert.ok(permissions.every(permission => permission === "automations.manage"));
+});
+
+test("custom stage assignment creation validates the stage and avoids overwriting existing rules", async () => {
+  const stageId = "30000000-0000-4000-8000-000000000001";
+  const ownerId = "20000000-0000-4000-8000-000000000001";
+  let stage = { id: stageId, name: "Qualified", is_active: true };
+  let duplicate = false;
+  const writes = [];
+  const route = load("src\\app\\api\\automations\\assignments\\route.ts", {
+    "@/lib/server/auth": { ...auth, requireUser: async permission => {
+      assert.equal(permission, "automations.manage");
+      return { supabase: { from: table => {
+        const query = { select: () => query, eq: () => query, in: () => query,
+          maybeSingle: async () => ({ data: stage, error: null }),
+          is: async () => ({ data: [{ id: ownerId }], error: null }) };
+        assert.ok(["profiles", "lead_stages"].includes(table));
+        return query;
+      } } };
+    } },
+    "@/lib/server/operational": { databaseError: validation.dbError, parseInput: (schema, input) => {
+      const parsed = schema.safeParse(input);
+      if (!parsed.success) throw new HttpError(400, parsed.error.message);
+      return parsed.data;
+    } },
+    "@/lib/supabase/server": { getSupabaseAdminClient: () => ({ from: table => {
+      if (table === "lead_stages") {
+        const query = { select: () => query, eq: () => query, maybeSingle: async () => ({ data: stage, error: null }) };
+        return query;
+      }
+      return { insert: row => { writes.push(row); return { select: () => ({ single: async () => ({
+        data: duplicate ? null : row, error: duplicate ? { code: "23505", message: "duplicate" } : null,
+      }) }) }; } };
+    } }) },
+  });
+  const post = input => route.POST(new Request("https://crm.example/api/automations/assignments", {
+    method: "POST", body: JSON.stringify(input),
+  }));
+  const input = { rule_key: `stage:${stageId}`, enabled: true, strategy: "single", owner_ids: [ownerId] };
+  assert.equal((await post(input)).status, 201);
+  assert.equal(writes[0].rule_key, input.rule_key);
+  duplicate = true;
+  assert.equal((await post(input)).status, 409);
+  stage = { ...stage, name: "Junk" };
+  assert.equal((await post(input)).status, 400);
+  stage = { ...stage, name: "Qualified", is_active: false };
+  assert.equal((await post(input)).status, 400);
+  assert.equal((await post({ ...input, rule_key: "junk" })).status, 400);
+  assert.equal(writes.length, 2);
 });
 
 test("bulk lead transfer updates selected leads in one scoped database operation", async () => {

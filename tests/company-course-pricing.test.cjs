@@ -61,7 +61,34 @@ test("course API persists the independent IBMP USD fee and supports explicitly c
   }
 });
 
-test("course catalog is readable by signed-in users while only admins can manage courses", async () => {
+test("Accounts can manage courses but not billing companies", async () => {
+  class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
+  const writes = [];
+  let permissions = ["courses.manage"];
+  const route = load("src\\app\\api\\courses\\route.ts", {
+    "next/server": { NextResponse: { json: data => data } },
+    "@/lib/server/login": { checkOrigin() {} },
+    "@/lib/server/auth": { HttpError, requireUser: async () => ({
+      user: { profile: { role: "accounts" }, permissions },
+      supabase: { from: table => ({ insert: values => {
+        writes.push({ table, values });
+        return { select: () => ({ single: async () => ({ data: { id: "course" }, error: null }) }) };
+      } }) },
+    }), readJson: request => request.json(), jsonError: error => ({ status: error.status ?? 500, error: error.message }) },
+    "@/lib/server/operational": { parseInput: (schema, input) => schema.parse(input), databaseError: error => { if (error) throw error; } },
+  });
+  const send = body => route.POST(new Request("https://crm.example/api/courses", { method: "POST", body: JSON.stringify(body) }));
+  const course = { kind: "course", values: { name: "Course", price_inr: 100, price_usd: 10, is_active: true } };
+  assert.match((await send(course)).message, /Course saved/);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].table, "courses");
+  assert.equal((await send({ kind: "company", values: { code: "DMHCA", legal_name: "Test", address: "Address", tax_id: "", primary_color: "#000000", accent_color: "#ffffff" } })).status, 403);
+  permissions = [];
+  assert.equal((await send(course)).status, 403);
+  assert.equal(writes.length, 1);
+});
+
+test("course-only viewers can read courses without loading billing companies or gaining management access", async () => {
   class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
   let queriedCompanies = false;
   const route = load("src\\app\\api\\courses\\route.ts", {
@@ -88,7 +115,7 @@ test("course catalog is readable by signed-in users while only admins can manage
   assert.deepEqual(catalog.courses, [{ id: "course-1" }]);
   assert.deepEqual(catalog.companies, []);
   assert.equal(catalog.canManage, false);
-  assert.equal(queriedCompanies, false, "billing company details are not loaded for non-admin users");
+  assert.equal(queriedCompanies, false, "billing companies require course management or invoice creation access");
   const denied = await route.POST(new Request("https://crm.example/api/courses", {
     method: "POST",
     body: JSON.stringify({ kind: "course", values: {} }),

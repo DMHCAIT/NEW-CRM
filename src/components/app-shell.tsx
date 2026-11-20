@@ -13,13 +13,13 @@ import { navigationItems } from "@/lib/navigation";
 import { RolePreviewContext } from "@/components/role-preview-context";
 import { LeadFilterStateProvider } from "@/components/lead-filter-state";
 import type { CurrentUser } from "@/lib/types";
-import { apiRequest, clearApiReadCache, errorMessage, getApiReadSnapshot, getPendingApiRead, prefetchApiRead, subscribeApiWrites } from "@/lib/crm-data";
+import { apiRequest, clearApiReadCache, errorMessage, prefetchApiRead, subscribeApiWrites } from "@/lib/crm-data";
 import { SectionLoading } from "@/components/section-loading";
 import { GlobalLeadSearch } from "@/components/global-lead-search";
 import { NotificationBell } from "@/components/notification-bell";
 import { CallReminderProvider } from "@/components/call-reminder-popups";
 import { loadLeadDetailData } from "@/lib/live-leads-client";
-import { prepareSidebarSections, sectionReadPaths } from "@/lib/section-preparation";
+import { sectionReadPaths } from "@/lib/section-preparation";
 import { finishLeavingLeadAssignments, finishStageAssignmentsOnUnload, hasLeavingLeadWork, initializeStageAssignments, subscribeStageAssignments } from "@/lib/lead-stage-assignment";
 
 export function AppShell({ children, user }: { children: React.ReactNode; user: CurrentUser | null }) {
@@ -34,11 +34,10 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const preparedDetails = useRef(new Map<string, number>());
   const preparedSections = useRef(new Map<string, number>());
-  const sectionPreparation = useRef<ReturnType<typeof prepareSidebarSections> | undefined>(undefined);
   const failedAssignmentNavigation = useRef<URL | null>(null);
-  function prefetchSection(href: string, prepareRoute = true, background = false) {
+  function prefetchSection(href: string, prepareRoute = true) {
     const preparedAt = preparedSections.current.get(href);
-    if (prepareRoute && (!background || href === "/") && href !== "/admin/login-activity"
+    if (prepareRoute && href !== "/admin/login-activity"
       && (preparedAt === undefined || Date.now() - preparedAt >= 25000)) {
       router.prefetch(href, { kind: PrefetchKind.FULL });
       preparedSections.current.set(href, Date.now());
@@ -50,9 +49,9 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
         setAccountError(errorMessage(error, "Could not prepare lead details. Open the lead to retry."));
       });
     }
-    const dataPaths = user ? sectionReadPaths(href, user) : [];
+    // Leads already arrives with server-seeded records; a parallel API read duplicates that work.
+    const dataPaths = user && href !== "/leads" ? sectionReadPaths(href, user) : [];
     return Promise.all(dataPaths.map(dataPath => {
-      if (background && getApiReadSnapshot(dataPath) !== undefined) return Promise.resolve();
       const read = leadSection || href === "/notifications"
         ? apiRequest(dataPath, { maxAgeMs: href === "/notifications" ? 15000 : 30000 })
         : prefetchApiRead(dataPath);
@@ -94,7 +93,6 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
     }
     failedAssignmentNavigation.current = null;
     setAssignmentError("");
-    sectionPreparation.current?.cancel();
     setMobileOpen(false);
     setAccountError("");
     setDestination(url.pathname);
@@ -102,8 +100,6 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
     if (!url.search) prefetchSection(url.pathname, false);
     startNavigation(() => router.push(`${url.pathname}${url.search}${url.hash}`));
   }
-  const latestPreparation = useRef({ user, pathname, prepare: prefetchSection, router });
-  latestPreparation.current = { user, pathname, prepare: prefetchSection, router };
   const permissionKey = user?.permissions.join(",");
   // Clear identity-bound data before child effects start their initial reads.
   useLayoutEffect(() => {
@@ -111,7 +107,6 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
   }, [user?.id, permissionKey]);
   useEffect(() => {
     const unsubscribeStarted = subscribeApiWrites(() => {
-      sectionPreparation.current?.cancel();
       preparedSections.current.clear(); preparedDetails.current.clear();
     });
     const unsubscribeCompleted = subscribeApiWrites(() => {
@@ -119,27 +114,6 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
     }, "completed");
     return () => { unsubscribeStarted(); unsubscribeCompleted(); };
   }, [router]);
-  useEffect(() => {
-    // Compiling unused API routes competes with the clicked page in development.
-    if (process.env.NODE_ENV === "development") return;
-    let task: ReturnType<typeof prepareSidebarSections> | undefined;
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      const current = latestPreparation.current;
-      const actor = current.user;
-      if (!actor) return;
-      const currentReads = sectionReadPaths(current.pathname, actor).map(path => getPendingApiRead(path));
-      void Promise.allSettled(currentReads).then(() => {
-        if (cancelled || document.visibilityState !== "visible") return;
-        task = prepareSidebarSections(actor, current.pathname, href => latestPreparation.current.prepare(href, true, true), {
-          isVisible: () => document.visibilityState === "visible",
-          onError: error => setAccountError(errorMessage(error, "Could not prepare section data. Open the section to retry.")),
-        });
-        sectionPreparation.current = task;
-      });
-    }, 0);
-    return () => { cancelled = true; window.clearTimeout(timer); task?.cancel(); };
-  }, [user?.id, permissionKey, pathname]);
   useEffect(() => {
     if (!user) return;
     const record = () => {
@@ -187,6 +161,7 @@ export function AppShell({ children, user }: { children: React.ReactNode; user: 
   const previewRole = user.profile.role;
   const initials = user.profile.fullName.split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase();
   const visibleItems = navigationItems.filter((item) => (!item.permission || user.permissions.includes(item.permission))
+    && (item.href !== "/deals" || ["accounts", "admin", "super_admin"].includes(previewRole))
     && (item.href !== "/admin/login-activity" || previewRole === "admin" || previewRole === "super_admin"));
   const workspaceItems = visibleItems.filter((item) => item.group === "workspace");
   const manageItems = visibleItems.filter((item) => item.group === "manage");

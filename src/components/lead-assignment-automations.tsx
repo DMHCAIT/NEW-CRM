@@ -5,13 +5,14 @@ import { apiRequest, errorMessage } from "@/lib/crm-data";
 import { Check, LoaderCircle, RotateCw, Save } from "lucide-react";
 import { SearchableDropdown } from "@/components/searchable-dropdown";
 
-type RuleKey = "facebook" | "website" | "junk" | "not_interested" | "closed_won" | "cold";
+type RuleKey = string;
 type Strategy = "single" | "round_robin";
 type AssignmentRule = { rule_key: RuleKey; enabled: boolean; strategy: Strategy; owner_ids: string[]; next_owner_index: number };
 type AssignmentUser = { id: string; full_name: string; active: boolean };
-type AssignmentData = { canManage: boolean; users: AssignmentUser[]; rules: AssignmentRule[] };
+type AssignmentStage = { id: string; name: string; is_active: boolean };
+type AssignmentData = { canManage: boolean; users: AssignmentUser[]; rules: AssignmentRule[]; stages: AssignmentStage[] };
 
-const definitions: { key: RuleKey; title: string; description: string; rotating: boolean }[] = [
+const builtInDefinitions: { key: RuleKey; title: string; description: string; rotating: boolean }[] = [
   { key: "facebook", title: "Facebook leads", description: "Assign leads received through Facebook integration sources.", rotating: true },
   { key: "website", title: "Website leads", description: "Assign website and chatbot leads, then notify the assigned user in CRM notifications.", rotating: true },
   { key: "junk", title: "Junk stage", description: "Reassign a lead whenever it enters the Junk stage.", rotating: false },
@@ -26,6 +27,17 @@ export function LeadAssignmentAutomations() {
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<RuleKey | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [stageId, setStageId] = useState("");
+  const [ownerId, setOwnerId] = useState("");
+  const definitions = [
+    ...builtInDefinitions,
+    ...(data?.stages ?? []).filter(stage => data?.rules.some(rule => rule.rule_key === `stage:${stage.id}`))
+      .map(stage => ({ key: `stage:${stage.id}`, title: `${stage.name} stage${stage.is_active ? "" : " (inactive)"}`, description: `Reassign a lead whenever it enters the ${stage.name} stage.`, rotating: false })),
+  ];
+  const availableStages = (data?.stages ?? []).filter(stage => stage.is_active
+    && !["junk", "not interested", "closed won", "cold"].includes(stage.name.toLowerCase())
+    && !data?.rules.some(rule => rule.rule_key === `stage:${stage.id}`));
 
   async function load() {
     setError("");
@@ -62,16 +74,51 @@ export function LeadAssignmentAutomations() {
     finally { setSaving(null); }
   }
 
+  async function create() {
+    setSaving("create");
+    setError("");
+    setMessage("");
+    try {
+      const result = await apiRequest<{ rule: AssignmentRule }>("/api/automations/assignments", {
+        method: "POST",
+        body: { rule_key: `stage:${stageId}`, enabled: true, strategy: "single", owner_ids: [ownerId] },
+      });
+      setData(current => current ? { ...current, rules: [...current.rules, result.rule] } : current);
+      setMessage(`${data?.stages.find(stage => stage.id === stageId)?.name} stage automation created.`);
+      setStageId("");
+      setOwnerId("");
+      setCreating(false);
+    } catch (failure) { setError(errorMessage(failure, "Could not create this assignment automation.")); }
+    finally { setSaving(null); }
+  }
+
   if (loading) return <section className="panel" aria-label="Assignment automations"><p role="status"><LoaderCircle size={16} /> Loading assignment automations…</p></section>;
   return <section className="panel assignment-automations" aria-labelledby="assignment-automations-title">
     <div className="panel-heading">
       <div><h2 id="assignment-automations-title">Automatic lead assignment</h2><p>Choose who receives integration and stage-based leads. Changes apply to new leads and future stage changes.</p></div>
-      <button className="button button-secondary" type="button" disabled={saving !== null} onClick={() => { setLoading(true); void load(); }}><RotateCw size={14} />Refresh</button>
+      <div className="heading-actions">
+        {data?.canManage && <button className="button button-primary" type="button" disabled={saving !== null} onClick={() => setCreating(!creating)}>{creating ? "Cancel" : "Create stage automation"}</button>}
+        <button className="button button-secondary" type="button" disabled={saving !== null} onClick={() => { setLoading(true); void load(); }}><RotateCw size={14} />Refresh</button>
+      </div>
     </div>
     {error && <p className="form-error" role="alert">{error}</p>}
     {message && <p className="form-success" role="status"><Check size={15} />{message}</p>}
     {!data?.canManage && <p>You can view automation rules, but need automation management permission to edit assignments.</p>}
     {data?.canManage && !data.users.some(user => user.active) && <p className="form-error" role="alert">No active users are available to assign. Activate at least one CRM user first.</p>}
+    {creating && data?.canManage && <form className="operational-form" onSubmit={event => { event.preventDefault(); void create(); }}>
+      <h2>Create stage assignment automation</h2>
+      <p>When a lead enters the selected stage, assign it to the selected user. Existing leads are not moved.</p>
+      <label>Lead stage<select className="form-input" value={stageId} required disabled={saving !== null} onChange={event => setStageId(event.target.value)}>
+        <option value="">Choose a stage</option>
+        {availableStages.map(stage => <option key={stage.id} value={stage.id}>{stage.name}</option>)}
+      </select></label>
+      <label>Assign to<select className="form-input" value={ownerId} required disabled={saving !== null} onChange={event => setOwnerId(event.target.value)}>
+        <option value="">Choose an active user</option>
+        {data.users.filter(user => user.active).map(user => <option key={user.id} value={user.id}>{user.full_name}</option>)}
+      </select></label>
+      <button className="button button-primary" disabled={saving !== null || !stageId || !ownerId}>Create and enable</button>
+      {!availableStages.length && <p>All active stages already have assignment rules.</p>}
+    </form>}
     <div className="assignment-automation-list">
       {definitions.map(definition => {
         const rule = data?.rules.find(item => item.rule_key === definition.key)

@@ -8,10 +8,12 @@ const id = "10000000-0000-4000-8000-000000000001";
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
-function fixture({ missingLead = false, denied = false, errorTable, mailboxError = false } = {}) {
+function fixture({ missingLead = false, denied = false, errorTable, mailboxError = false,
+  role = "admin", permissions = ["leads.view"], stage = "Closed Won", archived = false, merged = false } = {}) {
   const reads = [];
   const metadataReads = [];
   let mailboxReads = 0;
+  let duplicateReads = 0;
   const rows = {
     notes: [{ id: "note", content: "Private note" }],
     emails: [{ id: "email", body: "Private message" }],
@@ -38,21 +40,21 @@ function fixture({ missingLead = false, denied = false, errorTable, mailboxError
       };
       return query;
     },
-    rpc: async () => ({ data: [], error: null }),
+    rpc: async () => { duplicateReads++; return { data: [], error: null }; },
   };
   const mocks = {
     "next/server": { NextResponse: { json: (body, options) => Response.json(body, options) } },
     "@/lib/crm-data": {
-      fetchLead: async () => missingLead ? null : { id, isArchived: false },
+      fetchLead: async () => missingLead ? null : { id, stage, isArchived: archived, mergedIntoId: merged ? "merged-record" : undefined },
       fetchProfiles: async () => { metadataReads.push("profiles"); return []; },
       fetchStages: async () => { metadataReads.push("stages"); return []; },
     },
     "@/lib/server/auth": {
       HttpError,
       requireUser: async permission => {
-        assert.equal(permission, "leads.view");
+        assert.equal(permission, undefined);
         if (denied) throw new HttpError(403, "Permission denied.");
-        return { supabase, user: { id: "actor", email: "actor@example.test" } };
+        return { supabase, user: { id: "actor", email: "actor@example.test", profile: { role }, permissions } };
       },
       jsonError: error => Response.json({ error: error.message }, { status: error.status ?? 500 }),
     },
@@ -75,7 +77,7 @@ function fixture({ missingLead = false, denied = false, errorTable, mailboxError
   const api = {};
   new Function("exports", "require", source)(api, name => mocks[name] ?? require(name));
   return {
-    reads, metadataReads, mailboxReads: () => mailboxReads,
+    reads, metadataReads, mailboxReads: () => mailboxReads, duplicateReads: () => duplicateReads,
     get: suffix => api.GET(new Request(`https://crm.example/api/leads/${id}${suffix}`), { params: Promise.resolve({ id }) }),
   };
 }
@@ -202,5 +204,34 @@ test("count, history and mailbox failures remain visible errors rather than empt
     const response = await f.get(`?section=${section}`);
     assert.equal(response.status, 500);
     assert.ok((await response.json()).error);
+  }
+});
+
+test("Accounts can open converted lead details without mailbox or duplicate-owner access", async () => {
+  for (const stage of ["Closed Won", "Already Enrolled"]) {
+    const f = fixture({ role: "accounts", permissions: ["deals.view"], stage });
+    const response = await f.get("?section=workspace");
+    assert.equal(response.status, 200);
+    const data = await response.json();
+    assert.equal(data.lead.id, id);
+    assert.equal(data.lead.stage, stage);
+    assert.deepEqual(data.duplicates, []);
+    assert.equal(data.mailbox, null);
+    assert.equal(f.mailboxReads(), 0);
+    assert.equal(f.duplicateReads(), 0);
+    assert.ok(!data.user.permissions.includes("leads.edit"));
+  }
+});
+
+test("deal-only detail access denies non-deals, archived, merged, invisible and unauthorized records", async () => {
+  for (const [options, status] of [
+    [{ stage: "Fresh" }, 404], [{ archived: true }, 404], [{ merged: true }, 404],
+    [{ missingLead: true }, 404], [{ permissions: [] }, 403], [{ role: "manager" }, 403],
+  ]) {
+    const f = fixture({ role: "accounts", permissions: ["deals.view"], ...options });
+    assert.equal((await f.get("?section=overview")).status, status);
+    assert.deepEqual(f.reads, []);
+    assert.equal(f.mailboxReads(), 0);
+    assert.equal(f.duplicateReads(), 0);
   }
 });

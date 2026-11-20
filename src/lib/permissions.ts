@@ -4,6 +4,7 @@ export function isCrmRole(value: string): value is CrmRole {
   return value === "counselor"
     || value === "team_lead"
     || value === "manager"
+    || value === "accounts"
     || value === "admin"
     || value === "super_admin";
 }
@@ -31,16 +32,17 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<CrmRole, Permission[]> = {
     "pipeline.view", "automations.view", "automations.manage", "meetings.view", "meetings.manage",
     "invoices.view", "invoices.create", "reports.view", "reports.export",
   ],
+  accounts: ["deals.view", "invoices.view", "invoices.create", "invoices.approve", "courses.manage"],
   admin: [
     "dashboard.view", "leads.view", "leads.create", "leads.edit", "leads.assign", "leads.delete", "leads.merge",
     "pipeline.view", "automations.view", "automations.manage", "integrations.view", "integrations.manage",
     "meetings.view", "meetings.manage", "invoices.view", "invoices.create", "invoices.approve",
-    "reports.view", "reports.export", "users.view", "access.manage", "settings.manage", "leads.import",
+    "reports.view", "reports.export", "users.view", "access.manage", "settings.manage", "leads.import", "deals.view", "courses.manage",
   ],
   super_admin: [
     "dashboard.view", "leads.view", "leads.create", "leads.edit", "leads.assign", "leads.delete", "leads.merge",
     "pipeline.view", "automations.view", "automations.manage", "integrations.view", "integrations.manage",
     "meetings.view", "meetings.manage", "invoices.view", "invoices.create", "invoices.approve",
-    "reports.view", "reports.export", "users.view", "users.manage", "access.manage", "settings.manage", "leads.import",
+    "reports.view", "reports.export", "users.view", "users.manage", "access.manage", "settings.manage", "leads.import", "deals.view", "courses.manage",
   ],
 };

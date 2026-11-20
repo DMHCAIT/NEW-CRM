@@ -7,6 +7,7 @@ import type { CurrentUser, Permission } from "@/lib/types";
 const permissionRoutes: [string, Permission][] = [
   ["/settings/access", "access.manage"], ["/settings", "settings.manage"], ["/users", "users.view"],
   ["/leads/import", "leads.import"], ["/leads", "leads.view"], ["/pipeline", "pipeline.view"],
+  ["/deals", "deals.view"],
   ["/meetings", "meetings.view"], ["/invoices", "invoices.view"], ["/reports", "reports.view"],
   ["/courses", "invoices.view"],
   ["/automations", "automations.view"], ["/integrations", "integrations.view"], ["/", "dashboard.view"],
@@ -67,13 +68,27 @@ export async function middleware(request: NextRequest) {
   }
   if (user && pathname === "/login") {
     const target = request.nextUrl.clone();
-    target.pathname = "/";
+    target.pathname = user.profile.role === "accounts" ? (user.permissions.includes("deals.view") ? "/deals" : "/invoices") : "/";
     target.search = "";
     const redirect = NextResponse.redirect(target);
     response.cookies.getAll().forEach((cookie) => redirect.cookies.set(cookie));
     return redirect;
   }
-  if (user && permission && !user.permissions.includes(permission)) {
+  if (user && pathname === "/" && user.profile.role === "accounts") {
+    const target = request.nextUrl.clone();
+    target.pathname = user.permissions.includes("deals.view") ? "/deals" : "/invoices";
+    target.search = "";
+    const redirect = NextResponse.redirect(target);
+    response.cookies.getAll().forEach(cookie => redirect.cookies.set(cookie));
+    return redirect;
+  }
+  if (user && (pathname === "/deals" || pathname.startsWith("/deals/"))
+    && !["accounts", "admin", "super_admin"].includes(user.profile.role)) {
+    return new NextResponse("You do not have permission to view this page.", { status: 403 });
+  }
+  const accountsLeadDetail = user?.profile.role === "accounts" && user.permissions.includes("deals.view")
+    && /^\/leads\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(pathname);
+  if (user && permission && !user.permissions.includes(permission) && !accountsLeadDetail) {
     return new NextResponse("You do not have permission to view this page.", { status: 403 });
   }
   requestHeaders.set(PAGE_USER_HEADER, encodePageUser(user));

@@ -274,8 +274,8 @@ Use `npm run build` followed by `npm start` for production-speed serving.
 `npm run dev` uses Turbopack and compiles routes on demand; the first visit to a
 section or lead can still take seconds and is not representative of production
 loading times. Next.js disables router prefetch in development. Speculative
-sidebar API preparation is therefore disabled in development so unused sections
-do not compete with the clicked page's compilation; hover/focus/touch and clicks
+sidebar and leading-lead preparation is disabled in all modes so unused sections
+do not compete with the clicked page's compilation or database reads; hover/focus/touch and clicks
 still prepare their destination data. For webpack-based development, inactive
 entries are retained for 15 minutes with an eight-page buffer instead of quickly
 evicting sections during normal CRM navigation.
@@ -358,19 +358,12 @@ the entire lead table into the browser; they cannot eliminate network latency.
 
 Lead screens reuse browser-memory responses for up to 30 seconds when revisiting
 a page; valid cached data renders immediately instead of flashing a loading screen.
-In production, after the current section's pending read settles, the sidebar
-prepares permitted section API reads without a fixed startup delay in a bounded
-queue (at most two sections at a time). Full client-section routes are prepared
-on hover/focus/touch instead of launching additional RSC requests outside that
-API queue. The already-open route is not redundantly prefetched. The queue stops
-launching work on navigation, writes, hidden tabs, unmount or identity/permission
-changes. Login
-activity is excluded from this preparation queue. Dashboard is fully route-prefetched,
-including its authenticated summary, rather than waiting for a click to start it.
-Preparation runs again after navigation so expired destinations can be warmed again.
-Hover, keyboard focus and touch prioritize the selected route immediately.
+The sidebar does not load unopened sections automatically. Hover, keyboard focus,
+touch and clicks prepare only the intended destination, avoiding competing
+authentication, database and development-compilation requests. Leads and Pipeline
+do not automatically open the first four lead records in the background.
 Explicit full route preparation is deduplicated for 25 seconds; automatic Link
-viewport prefetch is disabled so it cannot compete with the bounded queue.
+viewport prefetch is disabled so it cannot compete with the intended destination.
 Intended client-rendered sections use Next Link's full prefetch rather than the
 automatic mode that can stop at a dynamic route's loading boundary. Login activity
 is not fully prefetched in the background.
@@ -379,9 +372,11 @@ and shows a destination-specific skeleton, keeping the previous page hidden and 
 until the route is ready. Existing route layouts remain mounted during the transition.
 Modified clicks, downloads, external links and same-page anchors retain native behavior.
 A click starts data preparation and one navigation, not a second route prefetch
-competing with navigation. Leads
-and Pipeline also start their existing 30-second cached data request on intent,
-overlapping route loading rather than waiting for the destination to mount.
+competing with navigation. Pipeline also starts its existing 30-second cached
+data request on intent, overlapping route loading rather than waiting for the
+destination to mount. Leads already includes server-seeded records and therefore
+does not launch a duplicate list API request; hydration seeds the browser's
+short-lived metadata cache for subsequent lead visits and filtering.
 Operational sections start fresh data reads on hover, focus, touch or click.
 The destination consumes that preparation once, even if it finishes before the
 route mounts; a completed preparation expires after five seconds. This bounded,
@@ -443,20 +438,24 @@ writes, identity changes and authorization failures invalidate browser snapshots
 Cache invalidation for identity changes runs before page-loading effects, so the
 initial page request is not discarded by shell startup. Filtered lead-list revisits
 also reconstruct their first render from fresh cached records and metadata.
-Once Leads or Pipeline has rendered its current results, up to four leading lead
-links prepare their full routes and overviews in the background, two at a time.
-This work yields to rendering, stops launching reads in hidden tabs or on cleanup,
-and does not prepare lead records for users without lead-view permission.
 After the lead overview and authenticated identity have loaded, opening a lead
 starts one authorized workspace preparation for Notes, Emails
 and both activity timelines without waiting for a related-list click. The first
 overview is not blocked by this work. Successful sections share that bounded
 30-second response; failed sections show an explicit preparation error and retry
-their own endpoint rather than appearing empty. Course and invoice components
-and their APIs are also prepared for users with invoice-view permission.
+their own endpoint rather than appearing empty. Course/invoice components,
+their APIs and email-template context are prepared only on intent for that
+specific tab, with the existing permission checks.
 Calls, Courses and Invoices reuse the current overview instead of making another
 lead-detail request. Initial detail metadata can also seed subsequent related
 reads when entering a lead directly, without first visiting the lead list.
+Previously loaded lead tabs may display an in-memory snapshot for up to five
+minutes while an expired 30-second response is revalidated. A visible
+"Checking the latest lead details" status distinguishes this display-only reuse
+from fresh data; failures show a Retry action without discarding the visible
+record. Snapshots never satisfy a fresh API read, cross lead/identity boundaries,
+or survive writes, identity changes or authorization failures. Unloaded tabs
+still wait for their first authorized response rather than displaying empty data.
 Inline field saves return the database's updated record, including trigger
 changes, and update the displayed lead after server confirmation instead of
 waiting for PATCH followed by a full detail GET. Writes still invalidate prepared
@@ -859,15 +858,67 @@ Apply your organization's retention/privacy policy to stored login and lead data
   persist with audit history; they do not replace hierarchy scoping.
 - Meetings can be internal or Zoom-hosted. Invoices persist discount approvals,
   installment/course balances, Payment Link and email state, and verified payments.
+- **Deals** is available to Accounts, Admin and Super Admin and lists only
+  non-archived, unmerged leads in Closed Won or Already Enrolled. Accounts can
+  see all such leads regardless of assignment, but cannot access other leads.
+  Accounts can view all invoices, approve discounts, record payments and manage
+  courses; new invoices and installments can be created only for deal leads.
+  Billing-company settings remain restricted to administrators. Apply
+  `202611190002_accounts_deals.sql` before deploying this application version.
+  Deploy the matching application code as well: older session validators reject
+  the new permission keys and may return **Session validation is unavailable**
+  (503). Session loading now logs and discards unsupported permission keys,
+  retaining known grants and all identity, role and session checks. Unknown
+  grants never authorize access; malformed session data still fails validation.
+  The Deals register groups contact details, displays stage badges and links
+  lead names directly to the existing lead record. Its header shows exact
+  totals for Closed Won, Already Enrolled and their combined total across all
+  accessible, non-archived, unmerged deals, not only the current page. Accounts
+  can open these converted records read-only and return to Deals, without
+  gaining access to the general Leads workspace, non-deal records, mailbox
+  connections or duplicate-owner lookups. Lead reads continue to use RLS.
+  **Deals > Filters** supports Stage, Today, By month (month and year), By year
+  (the full calendar year) and a custom inclusive From/To date range. Month and
+  year inputs initially use the current CRM month/year and support past years.
+  Dates use `CRM_TIMEZONE` (default `Asia/Kolkata`) and the latest recorded
+  entry into the lead's current converted stage, not its creation or last-edit
+  date. Summary counts follow the same filters across all pages; pagination
+  preserves the selected filters. Clear filters restores all accessible deals.
+  Up to 500 accessible converted leads are loaded as a bounded, RLS-authorized
+  snapshot. Apply, Clear and pagination then filter locally, updating browser
+  history without a page navigation, full-section loading screen or scroll reset.
+  Back/Forward restores the selected filters. Snapshots stay fresh for 30 seconds;
+  later interactions or returning to the tab refresh them in the background,
+  showing a refresh status while filters remain usable. Refresh failures are
+  visible with a Retry action; existing records remain available. Completed CRM
+  writes also replace the snapshot when the workspace refreshes.
+  Larger lists retain server pagination through the authenticated `/api/deals`
+  JSON endpoint, keeping existing results visible while loading rather than
+  navigating the whole page. Unchanged filters on the current first page make
+  no request while fresh. Initial loading and background refresh still depend
+  on the database/network.
+  No additional database migration or `crm_deal_page` RPC is required for these
+  filters. They use read-only queries through the signed-in user's existing RLS
+  policies. Above the snapshot limit, All time uses database counts and pagination.
+  Date filters narrow candidates using conversion activities near the selected
+  dates before reading paginated lightweight projections and their latest matching conversion entry.
+  Later re-entries are still checked even when outside the selected dates.
+  In this paginated fallback, contact details are fetched only for the requested page. Historical
+  records without a reliable conversion event remain visible in All time but
+  are excluded from date filters. Merely editing contact information does not
+  reset the conversion date. Do not run database migrations against a hosted/live
+  database as part of local-only testing; localhost may share that database.
 - Automations execute supported manual or overdue-follow-up batches with
   notification/follow-up actions and transactional logs. They are **not** an
   unattended scheduler; use the Run action. Notifications shows real recorded
   notifications.
 - Automatic assignment rules in **Automations** also run transactionally when
-  leads enter Junk, Not Interested, Closed Won or Cold (not Cold Not Answered). Apply
+  leads enter a configured stage. Use **Create stage automation** to select any
+  other active stage and an active assignee; each stage has one assignment rule. Apply
   `202611160002_stage_assignment_permissions.sql`,
   `202611160003_cold_stage_assignment.sql` and
-  `202611160004_deferred_stage_assignment.sql` with `npm run db:migrate`.
+  `202611160004_deferred_stage_assignment.sql`, followed by
+  `202611190001_custom_stage_assignment.sql` with `npm run db:migrate`.
   Enabled rules transfer the lead to the selected active assignee for changes by
   any role with lead-edit permission; counselors do not need manual-assignment
   permission to trigger a configured rule. Manual assignment remains restricted.
@@ -875,7 +926,7 @@ Apply your organization's retention/privacy policy to stored login and lead data
   existing leads. If a stage change transfers a lead outside the editor's scope,
   lead details return to the lead list with a saved/reassigned notice rather
   than offering Retry for an operation that already succeeded.
-  Detail-page changes to Cold, Junk and Not Interested save immediately but defer
+  Detail-page changes to Cold, Junk, Not Interested and custom configured stages save immediately but defer
   enabled assignment until the editor leaves the lead. Back to leads, Next and
   sidebar links wait for saves and complete reassignment before navigating;
   other route changes also complete pending assignments. A later stage or manual
@@ -1166,7 +1217,8 @@ function requires catalog inputs that older application builds do not send.
 Do not rerun or edit an already-applied migration. This migration adds tables and
 columns without deleting existing invoices, leads, payments or approvals.
 
-Open **Courses** as an Admin/Super Admin with `settings.manage`:
+Open **Courses** as an Admin/Super Admin with `settings.manage`, or as Accounts
+with `courses.manage`:
 
 Migration `202611110011_course_fee_catalog.sql` loads the supplied 144 unique
 courses: 30 PG Diplomas, 70 Fellowships, 24 Certificates (including the Advanced
@@ -1187,7 +1239,8 @@ This is a one-time merge; later catalogue edits and lead dropdown edits remain s
 
 1. Add each course's **DMHCA INR**, **DMHCA USD** and **IBMP USD** prices separately. There is no
    automatic currency conversion. Staff with `invoices.view` can read prices;
-   only administrators can change them or deactivate courses. The new
+   administrators and Accounts with course management access can change them or
+   deactivate courses. The new
    `price_ibmp_usd` field starts unset; no DMHCA price is copied into it.
    Missing IBMP fees block new IBMP invoices. IBMP permits USD only in the UI,
    API validation and database creation functions. DMHCA permits INR and USD.
@@ -1322,14 +1375,16 @@ searchable status filters, billing form, itemized preview and PDF, approval,
 email and payment actions. The lead section requires `invoices.view`;
 its API checks access to the lead before loading records in 200-record batches.
 The register loads all accessible invoices, not just the latest 200. Admin and
-Super Admin can see every invoice, including archived-lead invoices; other staff
+Super Admin and Accounts can see every invoice, including archived-lead invoices; other staff
 remain scoped by database row-level security.
 Creation requires `invoices.create`, enabled by default for Counselors, Team Leads
-and Managers, for leads they can already access. INR and USD use the existing
-Razorpay flow. Discount approval or rejection requires both the Super Admin role
-and `invoices.approve`; granting that permission to another role does not allow
+and Managers, for leads they can already access. Accounts can create invoices
+only for Closed Won and Already Enrolled leads. INR and USD use the existing
+Razorpay flow. Discount approval or rejection requires the Super Admin or Accounts
+role and `invoices.approve`; granting that permission to another role does not allow
 discount decisions. API and database policies enforce this restriction.
-External-financing verification retains `invoices.approve` for Admin/Super Admin.
+External-financing verification retains `invoices.approve` for Admin/Super Admin
+and Accounts.
 Apply `202611160001_super_admin_invoice_discounts.sql` with `npm run db:migrate`
 before running this workflow. Invoices
 support one-shot, installment, EMI and loan modes. Discounts use a percentage and
@@ -1339,8 +1394,8 @@ INR and USD (full payment/installments). The lead is the
 recipient; the invoice creator, current assigned lead owner and `sales@dmhca.in` are copied,
 deduplicated case-insensitively. A valid lead email, billing address and active
 assigned owner with an email are required. Discounted invoices are delivered
-only after Super Admin approval. **Save & request approval** saves the pending
-request in the Super Admin's **Invoices > Awaiting approval** register. Approval
+only after Super Admin or Accounts approval. **Save & request approval** saves the pending
+request in the approvers' **Invoices > Awaiting approval** register. Approval
 requests are checked every 15 seconds while that register is visible, even when
 its invoice list was previously empty. Approval
 sends eligible invoices automatically; future installments keep their scheduled
@@ -1393,7 +1448,7 @@ terms. PDFs, emails, public invoice pages and the register use the selected date
 Plans are persisted atomically with a retry-safe request ID. Scheduled/unpaid
 amounts reserve the course balance without being counted as received money.
 Later invoices retain the enrollment price, tax and discount; only the first
-discount request needs a Super Admin decision. Pending approval blocks scheduled
+discount request needs an Accounts or Super Admin decision. Pending approval blocks scheduled
 delivery. Rejection cancels the scheduled children. Once approved, each due
 installment is sent independently of earlier payments. Approval never extends
 an expired payment window; reconcile expired invoices rather than backdating or
@@ -1448,7 +1503,7 @@ currency, exact amount and captured/paid provider state before changing status.
 Payments cannot be reused across invoices. Approved scheduled or expired invoices
 can be settled without waiting for the email scheduler; pending discount/tax
 approval and cancelled/rejected invoices cannot bypass approval this way.
-Other bank/UPI payments require Admin/Super Admin finance confirmation with a
+Other bank/UPI payments require Accounts or Admin/Super Admin finance confirmation with a
 unique reference and receipt link or verification evidence. A pasted URL alone
 is never proof of payment. Paid records update the course balance on refresh and
 are excluded from scheduled invoice delivery.
@@ -1497,7 +1552,7 @@ discounted course price. Tax and due date are read-only; the database ignores
 browser-supplied rates/amounts and sets the deadline to **creation + 96 hours**
 for immediate invoices, or **scheduled issue time + 96 hours** for dated installments.
 Discount percentage remains editable for new agreements, with a mandatory reason;
-Admin/Super Admin approval is required before any invoice/payment email is sent.
+Accounts or Super Admin approval is required for discounts before invoice/payment email is sent.
 Existing installment discount agreements remain locked to the original approval.
 Approval does not restart or extend the payment window.
 
@@ -1508,7 +1563,7 @@ invoice**, even with no discount. Paid invoices and agreements with confirmed
 installments are not rewritten. Their historic tax agreement is identified in
 the form. The old payment token is invalidated on revision and new provider
 references/idempotency keys distinguish revised invoices.
-Admin and Super Admin with invoice approval permission can use **Approve & send
+Accounts, Admin and Super Admin with invoice approval permission can use **Approve & send
 invoice** directly in the register's Actions column or in invoice details.
 Invoices needing tax correction show **Review tax before approval** instead,
 which opens the details for review; expired and already-decided invoices cannot
@@ -1542,7 +1597,7 @@ Invoice and receipt emails use the existing configured **finance SMTP** sender;
 this is separate from personal Gmail in the lead Emails section. SMTP acceptance
 does not guarantee inbox delivery. EMI/loan installments are tracked externally;
 only a verified Razorpay/Stripe webhook, authenticated provider verification, or
-an Admin/Super Admin confirmation with a reference and evidence can mark an invoice
+an Accounts or Admin/Super Admin confirmation with a reference and evidence can mark an invoice
 paid. The CRM register refreshes every 15 seconds while invoices await payment or
 approval. **Check payment status** reconciles the saved provider payment if a webhook
 was missed. **Verify payment URL** verifies a pasted Razorpay link (INR or USD),

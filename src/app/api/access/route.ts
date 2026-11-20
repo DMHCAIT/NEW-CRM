@@ -3,6 +3,7 @@ import { z } from "zod";
 import { HttpError, jsonError, readJson, requireUser } from "@/lib/server/auth";
 import { checkOrigin } from "@/lib/server/login";
 import { fetchProfiles } from "@/lib/crm-data";
+import { DEFAULT_ROLE_PERMISSIONS } from "@/lib/permissions";
 
 export async function GET() {
   try {
@@ -14,7 +15,11 @@ export async function GET() {
     ]);
     if (roles.error) throw roles.error;
     if (overrides.error) throw overrides.error;
-    return NextResponse.json({ roles: roles.data, overrides: overrides.data, profiles });
+    const roleRows = roles.data ?? [];
+    if (!roleRows.some(row => row.role === "accounts")) {
+      roleRows.push(...DEFAULT_ROLE_PERMISSIONS.accounts.map(permission_key => ({ role: "accounts", permission_key, allowed: true })));
+    }
+    return NextResponse.json({ roles: roleRows, overrides: overrides.data, profiles });
   } catch (error) { return jsonError(error); }
 }
 
@@ -23,7 +28,7 @@ export async function PUT(request: Request) {
     checkOrigin(request);
     const { supabase } = await requireUser("access.manage");
     const result = z.object({
-      role: z.enum(["counselor", "team_lead", "manager", "admin"]).optional(),
+      role: z.enum(["counselor", "team_lead", "manager", "accounts", "admin"]).optional(),
       userId: z.string().uuid().optional(), grants: z.record(z.boolean()),
     }).safeParse(await readJson(request));
     if (!result.success || Boolean(result.data.role) === Boolean(result.data.userId)) throw new HttpError(400, "Choose a role or user and valid permission grants.");

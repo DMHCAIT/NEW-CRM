@@ -55,6 +55,9 @@ export function parseLead(value: unknown) {
   if (!result.success) throw new HttpError(400, result.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; "));
   const v = result.data;
   const normalizedPhone = normalizePhone(v.phone, v.countryCode);
+  if (normalizedPhone.length < 7 || normalizedPhone.length > 15) {
+    throw new HttpError(400, "Phone number must contain 7 to 15 digits after applying the country code.");
+  }
   return {
     name: v.name, phone: `+${normalizedPhone}`,
     country_code: v.countryCode || null, normalized_phone: normalizedPhone,

@@ -13,7 +13,11 @@ const leadExtras = "custom_fields,call_schedule_revision,pending_assignment:pend
 export async function GET(request: Request, context: Context) {
   const started = Date.now();
   try {
-    const { supabase, user } = await requireUser("leads.view");
+    const { supabase, user } = await requireUser();
+    const accountsReader = user.profile.role === "accounts";
+    if (accountsReader ? !user.permissions.includes("deals.view") : !user.permissions.includes("leads.view")) {
+      throw new HttpError(403, "You do not have permission to view this lead.");
+    }
     const authenticated = Date.now();
     const id = uuid((await context.params).id);
     const params = new URL(request.url).searchParams;
@@ -25,7 +29,8 @@ export async function GET(request: Request, context: Context) {
     const includeMetadata = params.get("metadata") !== "0";
     const withActivities = all || (params.get("history") === "1" && ["overview", "calls"].includes(section ?? ""));
     const lead = await fetchLead(supabase, id);
-    if (!lead || lead.isArchived) throw new HttpError(404, "Lead not found.");
+    if (!lead || lead.isArchived || (accountsReader && (lead.mergedIntoId
+      || !["closed won", "already enrolled"].includes(lead.stage.toLowerCase())))) throw new HttpError(404, "Lead not found.");
     const leadLoaded = Date.now();
     const [stages, profiles, notes, activities, emails, configuration, extras, mailbox, scheduledCalls, duplicates, noteCount, emailCount] = await Promise.all([
       includeMetadata ? fetchStages(supabase) : undefined, includeMetadata ? fetchProfiles(supabase) : undefined,
@@ -34,14 +39,14 @@ export async function GET(request: Request, context: Context) {
       all || section === "email" ? supabase.from("emails").select("id,subject,body,status,from_email,to_email,direction,created_at,user_id").eq("lead_id", id).order("created_at", { ascending: false }) : { data: [], error: null },
       includeMetadata ? fetchLeadConfiguration(supabase) : undefined,
       supabase.from("leads").select(leadExtras).eq("id", id).single<LeadExtras>(),
-      all || section === "email" ? currentGmailMailbox(getSupabaseAdminClient(), user.id, user.email).catch(error => {
+      !accountsReader && (all || section === "email") ? currentGmailMailbox(getSupabaseAdminClient(), user.id, user.email).catch(error => {
         if (!workspace) throw error;
         console.error("Could not prepare lead mailbox", error);
         sectionErrors.email = "Mailbox details could not be loaded. Open Emails to retry.";
         return null;
       }) : null,
       supabase.from("scheduled_calls").select("id,user_id,scheduled_at,status,created_at,schedule_revision").eq("lead_id", id).order("scheduled_at", { ascending: true }),
-      supabase.rpc("lead_duplicate_owners", { lead_id: id }),
+      accountsReader ? { data: [], error: null } : supabase.rpc("lead_duplicate_owners", { lead_id: id }),
       all || section === "note" ? null : supabase.from("notes").select("id", { count: "exact", head: true }).eq("lead_id", id),
       all || section === "email" ? null : supabase.from("emails").select("id", { count: "exact", head: true }).eq("lead_id", id),
     ]);
@@ -103,8 +108,8 @@ export async function PATCH(request: Request, context: Context) {
       columnInputs[column as keyof typeof input].some(key => Object.hasOwn(body, key))));
     if (!Object.keys(changes).length) throw new HttpError(400, "No lead fields were supplied.");
     const stageChanged = input.stage_id !== (current.stageId ?? null);
-    const deferred = assignmentTiming === "on-exit" && stageChanged
-      && ["cold", "junk", "not interested"].includes(stages?.find(stage => stage.id === input.stage_id)?.name.toLowerCase() ?? "");
+    const deferred = assignmentTiming === "on-exit" && stageChanged && !!input.stage_id
+      && stages?.find(stage => stage.id === input.stage_id)?.name.toLowerCase() !== "closed won";
     let data: SavedLead | null;
     let assignmentPendingId: string | null = extras.data?.pending_assignment?.token ?? null;
     if (deferred) {
@@ -123,8 +128,8 @@ export async function PATCH(request: Request, context: Context) {
     }
     if (!data) throw new HttpError(403, "Lead update was not permitted.");
     let saved = data;
-    if (stageChanged && !deferred) {
-      // AFTER-stage automation can transfer the lead after UPDATE RETURNING captures its row.
+    if (stageChanged) {
+      // Re-read joined details and any ownership changes made by the stage trigger.
       const { data: final, error: finalError } = await supabase.from("leads")
         .select(`${LEAD_SELECT},custom_fields,call_schedule_revision`).eq("id", id)
         .maybeSingle<SavedLead>();

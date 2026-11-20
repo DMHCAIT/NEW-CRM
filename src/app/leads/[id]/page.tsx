@@ -10,7 +10,7 @@ import { NextLeadButton } from "@/components/next-lead-button";
 import { StageBadge, initials } from "@/components/lead-helpers";
 import { apiRequest, formatDateTime, prefetchApiRead, type StageRow } from "@/lib/crm-data";
 import type { CurrentUser, Lead, Profile } from "@/lib/types";
-import { getCachedLeadDetail, loadLeadDetailData, useLiveLeadData, type LeadDraft } from "@/lib/live-leads-client";
+import { getCachedLeadDetail, getLeadDetailSnapshot, loadLeadDetailData, useLiveLeadData, type LeadDraft } from "@/lib/live-leads-client";
 import type { LeadConfiguration } from "@/lib/live-leads";
 import { leadCallNumber } from "@/lib/lead-phone";
 import { DEFAULT_LEAD_PICKLISTS } from "@/lib/lead-picklists";
@@ -64,7 +64,7 @@ export default function LeadDetailPage() {
   const [callNow, setCallNow] = useState(() => Date.now());
   const [rescheduleId, setRescheduleId] = useState("");
   const [overviewTab, setOverviewTab] = useState<"overview" | "timeline">("overview");
-  const { data, error, loading, reload: reloadData, setError, acceptData } = useLiveLeadData<DetailData>(`/api/leads/${id}?section=${tab}${overviewTab === "timeline" && ["overview", "calls"].includes(tab) ? "&history=1" : ""}`, loadLeadDetailData, getCachedLeadDetail);
+  const { data, error, loading, refreshing, reload: reloadData, setError, acceptData } = useLiveLeadData<DetailData>(`/api/leads/${id}?section=${tab}${overviewTab === "timeline" && ["overview", "calls"].includes(tab) ? "&history=1" : ""}`, loadLeadDetailData, getCachedLeadDetail, undefined, getLeadDetailSnapshot);
   const scheduleRef = useRef<HTMLDialogElement>(null);
   const schedulingRef = useRef(false);
   const acceptLatestData = useRef(acceptData);
@@ -99,18 +99,13 @@ export default function LeadDetailPage() {
         if (failures.length) throw new Error(failures.join(" "));
       }),
     ];
-    if (canViewInvoices) preparations.push(
-      loadInvoiceWorkspace(), loadCourseCatalog(),
-      prefetchApiRead(`/api/invoices?leadId=${encodeURIComponent(id)}`), prefetchApiRead("/api/courses"),
-    );
-    if (canEditLead) preparations.push(prefetchApiRead(`/api/leads/${id}/email-context`));
     void Promise.allSettled(preparations).then(results => {
       if (!active) return;
       const failures = results.flatMap(result => result.status === "rejected" ? [result.reason instanceof Error ? result.reason.message : "A related list could not be prepared."] : []);
       setPreparationError(failures.join(" "));
     });
     return () => { active = false; };
-  }, [id, modifiedAt, userId, canViewInvoices, canEditLead, preparationAttempt]);
+  }, [id, modifiedAt, userId, preparationAttempt]);
   useEffect(() => { setNoteContent(""); setNoteImages([]); setEmailContent(""); setSubject(""); }, [id]);
   useEffect(() => registerLeadSaveQueue({
     leadId: id, wait: () => saves.current, isSaving: () => pendingSaves.current > 0,
@@ -181,7 +176,16 @@ export default function LeadDetailPage() {
     } catch (reason) { setCallError(reason instanceof Error ? reason.message : "Could not schedule the call."); }
     finally { schedulingRef.current = false; setScheduling(false); }
   }
-  if (!data) return <section className="panel live-panel"><Link className="button lead-navigation-button" href="/leads"><ArrowLeft size={13} />Back to leads</Link>{loading ? <SectionLoading title="Lead details" /> : <><p role="alert">{error}</p><button className="button button-secondary" onClick={() => void reload().catch(() => {})}>Retry</button></>}</section>;
+  function prepareTab(value: string) {
+    const requests: Promise<unknown>[] = [];
+    if (canViewInvoices && value === "invoices") requests.push(loadInvoiceWorkspace(), prefetchApiRead(`/api/invoices?leadId=${encodeURIComponent(id)}`));
+    if (canViewInvoices && value === "courses") requests.push(loadCourseCatalog(), prefetchApiRead("/api/courses"));
+    if (canEditLead && value === "email") requests.push(prefetchApiRead(`/api/leads/${id}/email-context`));
+    void Promise.all(requests).catch(failure => {
+      if (activeLeadId.current === id) setPreparationError(failure instanceof Error ? failure.message : "The related list could not be prepared. Open it to retry.");
+    });
+  }
+  if (!data || data.lead.id !== id) return <section className="panel live-panel"><Link className="button lead-navigation-button" href="/leads"><ArrowLeft size={13} />Back to leads</Link>{loading ? <SectionLoading title="Lead details" /> : <><p role="alert">{error}</p><button className="button button-secondary" onClick={() => void reload().catch(() => {})}>Retry</button></>}</section>;
   const lead = data.lead;
   const callNumber = leadCallNumber(lead.phone, lead.countryCode);
   const scheduledCalls = (data.scheduledCalls ?? []).filter(call => call.status === "scheduled").sort((a, b) => new Date(a.scheduled_at).getTime() - new Date(b.scheduled_at).getTime());
@@ -257,7 +261,7 @@ export default function LeadDetailPage() {
     return typeof value === "object" ? JSON.stringify(value) : String(value);
   }
   return <>
-    <div className="detail-back lead-detail-navigation"><Link className="button lead-navigation-button" href="/leads"><ArrowLeft size={13} />Back to leads</Link><NextLeadButton key={id} lead={lead} disabled={busy || saving || scheduling || loading || lead.id !== id} isSaving={() => pendingSaves.current > 0} /></div>
+    <div className="detail-back lead-detail-navigation"><Link className="button lead-navigation-button" href={data.user.profile.role === "accounts" ? "/deals" : "/leads"}><ArrowLeft size={13} />{data.user.profile.role === "accounts" ? "Back to deals" : "Back to leads"}</Link>{can("leads.view") && <NextLeadButton key={id} lead={lead} disabled={busy || saving || scheduling || loading || lead.id !== id} isSaving={() => pendingSaves.current > 0} />}</div>
     {data.assignmentPendingId && <p className="helper-banner" role="status">Stage saved. Assignment will run when you leave this lead.</p>}
     <section className="panel lead-header-panel lead-record-header"><div className="lead-header-main"><span className="lead-large-avatar">{initials(lead.name)}</span><div className="lead-main-copy"><div className="lead-record-eyebrow">LEAD DETAILS</div><h1>{lead.name}</h1><span>{lead.course || "No course"} · {lead.assignee || "Unassigned"}</span></div><StageBadge stage={lead.stage || "No stage"} /><div className="heading-actions lead-header-actions">
       {duplicates.length > 0 && <>
@@ -270,7 +274,8 @@ export default function LeadDetailPage() {
         <button className="button lead-schedule-button" disabled={busy || saving || scheduling || scheduleLocked} title={scheduleLocked ? scheduleLockMessage : undefined} onClick={openSchedule}><CalendarClock size={16} />Schedule a call</button>
       </>}
     </div><span className="lead-call-caption" id="telecmi-call-status">TeleCMI rings your mapped agent first. Answer to connect the lead.{scheduleLocked && ` ${scheduleLockMessage}`}</span></div><div className="lead-contact-row"><span><Phone size={13} /><strong>Phone</strong> {callNumber || lead.phone}</span><span><Mail size={13} /><strong>Email</strong> {lead.email || "Not provided"}</span><span><strong>Source</strong> {lead.source}</span></div></section>
-    {error && <p className="helper-banner" role="alert">{error}</p>}{notice && <div className="helper-banner lead-record-notice"><span role="status">{notice}</span><button type="button" aria-label="Dismiss notification" onClick={() => setNotice("")}><X size={15} /></button></div>}
+    {refreshing && <p className="loading-state" role="status">Checking the latest lead details. Previously loaded information remains visible.</p>}
+    {error && <p className="helper-banner" role="alert">{error} <button type="button" className="text-link" onClick={() => void reload().catch(() => {})}>Retry</button></p>}{notice && <div className="helper-banner lead-record-notice"><span role="status">{notice}</span><button type="button" aria-label="Dismiss notification" onClick={() => setNotice("")}><X size={15} /></button></div>}
     {scheduledCalls.length > 0 && <section className="panel lead-call-summary" aria-label="Call summary"><span className="lead-call-card-icon"><CalendarClock size={18} /></span><div className="lead-next-call"><span>Next scheduled call</span>{nextCall ? <><time dateTime={nextCall.scheduled_at}>{formatDateTime(nextCall.scheduled_at)}</time><span>{data.profiles.find(profile => profile.id === nextCall.user_id)?.fullName ?? "CRM user"}</span></> : <strong>No upcoming calls</strong>}</div><div className="lead-call-summary-counts"><span>{upcomingCalls.length} upcoming</span>{pastDueCalls.length > 0 && <span className="is-overdue">{pastDueCalls.length} past due</span>}</div><button type="button" className="button button-secondary" onClick={() => selectTab("calls")}>View all calls ({scheduledCalls.length})</button></section>}
     {viewDuplicates && duplicates.length > 0 && <section id="lead-duplicate-owners" className="panel live-panel lead-duplicates-panel" aria-label="Duplicate assignees"><div className="detail-section-heading"><div><h2>Duplicate leads</h2><p>A phone number or email matches. Only the existing assignee names are shown.</p></div><button className="button button-secondary" aria-label="Close duplicates" onClick={() => { setViewDuplicates(false); setMergeOpen(false); }}><X size={16} /></button></div>
       <div className="live-toolbar"><input type="search" aria-label="Search duplicate assignees" placeholder="Search assignee" value={mergeSearch} onChange={event => setMergeSearch(event.target.value)} /></div>
@@ -287,7 +292,7 @@ export default function LeadDetailPage() {
       </>}
     </section>}
     {preparationError && <div className="helper-banner" role="alert">Some related lists could not be prepared: {preparationError} <button type="button" className="text-link" onClick={() => setPreparationAttempt(value => value + 1)}>Retry preparation</button></div>}
-    <div className="lead-detail-layout lead-refined-workspace lead-crm-workspace"><nav className="panel detail-sidebar" aria-label="Lead sections"><div className="detail-sidebar-title">RELATED LISTS</div>{tabs.map(item => <button key={item.id} id={`lead-section-${item.id}`} aria-controls={`lead-panel-${item.id}`} className={`detail-nav-item${tab === item.id ? " selected" : ""}`} aria-current={tab === item.id ? "page" : undefined} onClick={() => selectTab(item.id)}><item.icon size={15} />{item.label}{item.count !== null && <span>{item.count}</span>}</button>)}<p className="detail-sidebar-hint">Lead details and history reflect your authorized access.</p></nav>
+    <div className="lead-detail-layout lead-refined-workspace lead-crm-workspace"><nav className="panel detail-sidebar" aria-label="Lead sections"><div className="detail-sidebar-title">RELATED LISTS</div>{tabs.map(item => <button key={item.id} id={`lead-section-${item.id}`} aria-controls={`lead-panel-${item.id}`} className={`detail-nav-item${tab === item.id ? " selected" : ""}`} aria-current={tab === item.id ? "page" : undefined} onMouseEnter={() => prepareTab(item.id)} onFocus={() => prepareTab(item.id)} onClick={() => { prepareTab(item.id); selectTab(item.id); }}><item.icon size={15} />{item.label}{item.count !== null && <span>{item.count}</span>}</button>)}<p className="detail-sidebar-hint">Lead details and history reflect your authorized access.</p></nav>
     <section className="panel detail-content">
     <div id={`lead-panel-${tab}`} role="region" aria-labelledby={`lead-section-${tab}`} className="detail-tab-content">
       <div className="detail-tabs lead-overview-tabs" role="tablist" aria-label={`${sectionLabel} views`} onKeyDown={event => {
@@ -301,7 +306,7 @@ export default function LeadDetailPage() {
         {(tab === "courses" ? ["overview"] as const : ["overview", "timeline"] as const).map(view => <button key={view} id={`lead-${tab}-tab-${view}`} type="button" role="tab" aria-selected={overviewTab === view} aria-controls={`lead-${tab}-panel-${view}`} tabIndex={overviewTab === view ? 0 : -1} className={overviewTab === view ? "selected" : ""} onClick={() => setOverviewTab(view)}>{view === "overview" ? sectionLabel : "Timeline"}</button>)}
       </div>
       <div id={`lead-${tab}-panel-${overviewTab}`} role="tabpanel" aria-labelledby={`lead-${tab}-tab-${overviewTab}`}>
-    {loading ? <SectionLoading title={sectionLabel} /> : error ? <div className="detail-overview"><p role="alert">{error}</p><button className="button button-secondary" onClick={() => void reload().catch(() => {})}>Retry {sectionLabel.toLowerCase()}</button></div> : <>
+    {loading ? <SectionLoading title={sectionLabel} /> : <>
     {tab === "overview" && <>
       {overviewTab === "overview" ?
       <section className="detail-overview"><div className="detail-section-heading">{sectionIntro("Lead information", can("leads.edit") ? "Edit any field below. Text saves when you leave the field; selections save immediately." : "Contact information and admissions details", UserRound)}<span className="lead-autosave-badge" role="status">{saving ? "Saving changes..." : can("leads.edit") ? "Autosave enabled" : "Read only"}</span></div>

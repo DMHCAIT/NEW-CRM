@@ -7,6 +7,7 @@ import {
   ChartNoAxesCombined,
   FileText,
   FileUp,
+  Handshake,
   LayoutDashboard,
   ListChecks,
   Settings2,
@@ -28,6 +29,7 @@ export interface NavigationItem {
 export const navigationItems: NavigationItem[] = [
   { label: "Dashboard", href: "/", icon: LayoutDashboard, permission: "dashboard.view", group: "workspace" },
   { label: "Leads", href: "/leads", icon: UsersRound, permission: "leads.view", group: "workspace" },
+  { label: "Deals", href: "/deals", icon: Handshake, permission: "deals.view", group: "workspace" },
   { label: "Pipeline", href: "/pipeline", icon: Blocks, permission: "pipeline.view", group: "workspace" },
   { label: "Meetings", href: "/meetings", icon: CalendarDays, permission: "meetings.view", group: "workspace" },
   { label: "Invoices", href: "/invoices", icon: FileText, permission: "invoices.view", group: "workspace" },

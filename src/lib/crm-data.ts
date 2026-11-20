@@ -224,10 +224,21 @@ export function getPreparedApiRead<T>(path: string): T | undefined {
   return entry && Date.now() < entry.expiresAt ? entry.value as T | undefined : undefined;
 }
 
-export function getApiReadSnapshot<T>(path: string): T | undefined {
+export function getApiReadSnapshot<T>(path: string, maxAgeMs = 30000): T | undefined {
   if (typeof window === "undefined") return undefined;
   const saved = browserSnapshots.get(path);
-  return saved && Date.now() - saved.savedAt < 30000 ? saved.value as T : undefined;
+  return saved && Date.now() - saved.savedAt < Math.min(Math.max(maxAgeMs, 0), 300000) ? saved.value as T : undefined;
+}
+
+export function seedApiRead(path: string, value: unknown, savedAt: number) {
+  if (typeof window === "undefined" || !path.startsWith("/api/") || path.startsWith("/api/auth/")
+    || !Number.isFinite(savedAt) || Date.now() - savedAt >= 30000) return;
+  const existing = browserSnapshots.get(path);
+  if (existing && existing.savedAt > savedAt) return;
+  if (browserReads.size >= 30) browserReads.delete(browserReads.keys().next().value!);
+  if (browserSnapshots.size >= 50) browserSnapshots.delete(browserSnapshots.keys().next().value!);
+  browserReads.set(path, { value, savedAt });
+  browserSnapshots.set(path, { value, savedAt });
 }
 
 export function getPendingApiRead<T>(path: string): Promise<T> | undefined {

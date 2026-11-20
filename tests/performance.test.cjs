@@ -11,7 +11,7 @@ function client(fetch, { browser = true, now = () => Date.now(), intl = Intl } =
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021 },
   }).outputText;
   vm.runInNewContext(source, {
-    exports,
+    exports, Error,
     require: name => name === "@/lib/permissions" ? { isCrmRole: () => true } : require(name),
     fetch,
     Date: class extends Date { static now() { return now(); } },
@@ -308,7 +308,7 @@ test("lead links prepare route and data once on hover/focus/touch and click star
     "@/lib/crm-data": { clearApiReadCache() {}, errorMessage: error => error.message },
     "@/lib/live-leads-client": { loadLeadDetailData: async path => { reads.push(path); order.push(`data:${path}`); } },
   }, { Element: Anchor, window: { location: new URL("https://crm.test/leads") } });
-  const root = AppShell({ children: null, user: { id: "actor", profile: { role: "counselor", fullName: "Employee" }, permissions: ["leads.view"] } }).props.children;
+  const root = shellRoot(AppShell({ children: null, user: { id: "actor", profile: { role: "counselor", fullName: "Employee" }, permissions: ["leads.view"] } }));
   const path = "/leads/10000000-0000-4000-8000-000000000001";
   const event = { target: new Anchor(`https://crm.test${path}`) };
   root.props.onMouseOverCapture(event);
@@ -353,6 +353,78 @@ test("an open lead prepares one shared workspace for all tabs, but refresh and m
   assert.equal(reads.length, 4, "manual refresh still contacts the server");
   await api.apiRequest(base, { method: "PATCH", body: { name: "Changed" } });
   assert.equal(helpers.getCachedLeadDetail(`${base}?section=email`), undefined);
+});
+
+test("server-seeded Leads metadata is reused by the first lead visit without another list read", async () => {
+  const reads = [], effects = [];
+  const api = client(async path => {
+    reads.push(path);
+    return ok({ lead: { id: "record" }, user: { id: "actor" } });
+  });
+  const helpers = loadModule("src\\lib\\live-leads-client.tsx", {
+    react: {
+      useState: initial => [typeof initial === "function" ? initial() : initial, () => {}],
+      useRef: initial => ({ current: initial }), useCallback: callback => callback,
+      useEffect: effect => effects.push(effect),
+    }, "@/lib/crm-data": api, "lucide-react": {},
+    "@/components/searchable-dropdown": {}, "@/lib/lead-filters": {}, "@/lib/lead-picklists": {},
+  }, { window: {}, Intl });
+  const path = helpers.leadQueryPath(helpers.emptyFilter(), { pageSize: 100 });
+  const metadata = { leads: [], stages: ["New"], profiles: ["Owner"], configuration: {}, user: { id: "actor" } };
+  helpers.useLiveLeadData(path, helpers.loadLeadListData, helpers.getCachedLeadListData, { data: metadata, updatedAt: Date.now() });
+  effects[0]();
+  assert.equal(reads.length, 0, "hydrating the server seed must not repeat its API query");
+  const detail = await helpers.loadLeadDetailData("/api/leads/record?section=overview", { maxAgeMs: 30000 });
+  assert.equal(reads.length, 1);
+  assert.equal(new URL(reads[0], "http://crm.test").searchParams.get("metadata"), "0");
+  assert.deepEqual(detail.stages, ["New"]);
+  api.clearApiReadCache();
+  assert.equal(api.getCachedApiRead(path), undefined);
+  api.seedApiRead(path, metadata, Date.now() - 30001);
+  assert.equal(api.getCachedApiRead(path), undefined, "old server seeds must not become fresh cached data");
+});
+
+test("expired prepared tabs display immediately but still revalidate, expire after five minutes and clear on denial", async () => {
+  let time = 1000, release;
+  const reads = [], effects = [], states = [], refs = [];
+  let stateIndex = 0, refIndex = 0;
+  const base = "/api/leads/record";
+  const detail = { lead: { id: "record" }, stages: [], profiles: [], configuration: {}, notes: ["Previously loaded"], sectionErrors: {} };
+  const api = client(async path => {
+    reads.push(path);
+    return reads.length === 1 ? ok(detail) : new Promise(resolve => { release = resolve; });
+  }, { now: () => time });
+  const helpers = loadModule("src\\lib\\live-leads-client.tsx", {
+    react: {
+      useRef(initial) { const key = refIndex++; return refs[key] ?? (refs[key] = { current: initial }); },
+      useState(initial) { const key = stateIndex++; if (!(key in states)) states[key] = typeof initial === "function" ? initial() : initial; return [states[key], value => { states[key] = value; }]; },
+      useCallback: callback => callback, useEffect: effect => effects.push(effect),
+    }, "@/lib/crm-data": api, "lucide-react": {},
+    "@/components/searchable-dropdown": {}, "@/lib/lead-filters": {}, "@/lib/lead-picklists": {},
+  }, { window: {}, Intl });
+  await helpers.loadLeadDetailData(`${base}?section=workspace`, { maxAgeMs: 30000 });
+  time += 31000;
+  const path = `${base}?section=note`;
+  assert.equal(helpers.getCachedLeadDetail(path), undefined, "display snapshots must not satisfy fresh reads");
+  assert.deepEqual(helpers.getLeadDetailSnapshot(path).notes, ["Previously loaded"]);
+  assert.equal(helpers.getLeadDetailSnapshot("/api/leads/another?section=note"), undefined);
+  const render = () => {
+    stateIndex = 0; refIndex = 0;
+    return helpers.useLiveLeadData(path, helpers.loadLeadDetailData, helpers.getCachedLeadDetail, undefined, helpers.getLeadDetailSnapshot);
+  };
+  assert.equal(render().loading, false);
+  assert.deepEqual(render().data.notes, ["Previously loaded"]);
+  effects[0]();
+  assert.equal(reads.length, 2, "stale display must still start an authenticated fresh request");
+  assert.equal(render().refreshing, true);
+  time = 301000;
+  assert.equal(helpers.getLeadDetailSnapshot(path), undefined, "display snapshots have a finite age bound");
+  release(Response.json({ error: "Access revoked" }, { status: 403 }));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(render().data, null);
+  assert.equal(render().refreshing, false);
+  assert.equal(render().error, "Access revoked");
+  assert.equal(helpers.getLeadDetailSnapshot(path), undefined);
 });
 
 test("a failed prepared section is retried rather than displayed as an empty successful list", async () => {
@@ -740,11 +812,12 @@ function middlewareHarness({ authenticated = true, verified = true, allowed = tr
   const { NextRequest, NextResponse } = require("next/server");
   const events = [];
   const errors = [];
+  const warnings = [];
   const permissions = loadModule("src\\lib\\permissions.ts", {});
   const crm = loadModule("src\\lib\\crm-data.ts", { "@/lib/permissions": permissions });
   const currentUser = loadModule("src\\lib\\current-user.ts", {
     "@/lib/crm-data": crm, "@/lib/permissions": permissions,
-  });
+  }, { console: { error: (...args) => errors.push(args), warn: (...args) => warnings.push(args) } });
   const routing = {};
   vm.runInNewContext(ts.transpileModule(readFileSync(join(__dirname, "..", "src", "lib", "auth-routing.ts"), "utf8"), {
     compilerOptions: { module: ts.ModuleKind.CommonJS },
@@ -757,7 +830,7 @@ function middlewareHarness({ authenticated = true, verified = true, allowed = tr
     exports,
     Headers,
     process: { env: { NEXT_PUBLIC_SUPABASE_URL: "https://project.example", NEXT_PUBLIC_SUPABASE_ANON_KEY: "test-public-key" } },
-    console: { error: (...args) => errors.push(args) },
+    console: { error: (...args) => errors.push(args), warn: (...args) => warnings.push(args) },
     require: name => ({
       "next/server": { NextResponse },
       "@/lib/auth-routing": routing,
@@ -786,7 +859,7 @@ function middlewareHarness({ authenticated = true, verified = true, allowed = tr
       } },
     })[name] ?? require(name),
   });
-  return { events, errors, currentUser, run: (path, headers) => exports.middleware(new NextRequest(`https://crm.example${path}`, { headers })) };
+  return { events, errors, warnings, currentUser, run: (path, headers) => exports.middleware(new NextRequest(`https://crm.example${path}`, { headers })) };
 }
 
 test("public handlers perform no middleware auth requests; login redirects are preserved", async () => {
@@ -844,7 +917,7 @@ test("request context cannot replace the verified Auth identity or invent permis
   for (const context of [
     requestActor("other", ["leads.view"]),
     { ...requestActor("user", ["leads.view"]), profile: requestActor("other", []).profile },
-    requestActor("user", ["unknown.permission"]),
+    requestActor("user", [null]),
   ]) {
     const harness = middlewareHarness({ rpc: async () => ({ data: context, error: null }) });
     assert.equal((await harness.run("/leads")).status, 503);
@@ -852,6 +925,50 @@ test("request context cannot replace the verified Auth identity or invent permis
   }
   const harness = middlewareHarness({ getUser: async () => ({ data: { user: null }, error: { message: "Auth rejected" } }) });
   assert.equal((await harness.run("/leads")).status, 307, "a live database context cannot replace Auth verification");
+});
+
+test("new database permission keys do not break sessions or become application grants", async () => {
+  for (const [granted, status] of [
+    [["leads.view", "future.permission"], 200],
+    [["future.permission"], 403],
+  ]) {
+    const harness = middlewareHarness({ rpc: async () => ({
+      data: requestActor("user", granted), error: null,
+    }) });
+    const response = await harness.run("/leads");
+    assert.equal(response.status, status);
+    assert.equal(harness.errors.length, 0);
+    assert.equal(harness.warnings.length, 1);
+    if (status === 200) {
+      const actor = harness.currentUser.decodePageUser(response.headers.get("x-middleware-request-x-crm-page-user"));
+      assert.deepEqual(Array.from(actor.permissions), ["leads.view"]);
+    }
+  }
+});
+
+test("Deals sessions accept Accounts and administrator grants", async () => {
+  for (const role of ["accounts", "admin", "super_admin"]) {
+    const harness = middlewareHarness({ rpc: async () => ({
+      data: requestActor("user", ["deals.view", "courses.manage"], { role }), error: null,
+    }) });
+    assert.equal((await harness.run("/deals")).status, 200, role);
+    assert.equal(harness.errors.length, 0);
+    assert.equal(harness.warnings.length, 0);
+  }
+});
+
+test("Accounts deal access allows individual lead pages but not the general Leads workspace", async () => {
+  const harness = middlewareHarness({ rpc: async () => ({
+    data: requestActor("user", ["deals.view"], { role: "accounts" }), error: null,
+  }) });
+  assert.equal((await harness.run("/leads/10000000-0000-4000-8000-000000000001")).status, 200);
+  for (const path of ["/leads", "/leads/new", "/leads/import", "/leads/not-an-id", "/leads/10000000-0000-4000-8000-000000000001/edit"]) {
+    assert.equal((await harness.run(path)).status, 403, path);
+  }
+  const denied = middlewareHarness({ rpc: async () => ({
+    data: requestActor("user", [], { role: "accounts" }), error: null,
+  }) });
+  assert.equal((await denied.run("/leads/10000000-0000-4000-8000-000000000001")).status, 403);
 });
 
 test("notification page reuses the bell's fresh snapshot immediately, expires it and invalidates on writes", async () => {
@@ -888,15 +1005,26 @@ test("private API requests reach their handler without a duplicate middleware au
   assert.deepEqual(harness.events, []);
 });
 
+function shellRoot(tree) {
+  while (tree && !tree.props?.onClickCapture) tree = tree.props?.children;
+  return tree;
+}
+
 function loadModule(relative, dependencies, globals = {}) {
   const exports = {};
   const source = ts.transpileModule(readFileSync(join(__dirname, "..", relative), "utf8"), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021, jsx: ts.JsxEmit.ReactJSX },
   }).outputText;
   vm.runInNewContext(source, {
-    exports, console, URL, URLSearchParams, process, ...globals,
+    exports, console, URL, URLSearchParams, process, Error, ...globals,
     require: name => name in dependencies ? dependencies[name]
       : name === "@/components/notification-bell" ? { NotificationBell: () => null }
+      : name === "@/components/lead-filter-state" ? { LeadFilterStateProvider: ({ children }) => children }
+      : name === "@/components/call-reminder-popups" ? { CallReminderProvider: ({ children }) => children }
+      : name === "@/lib/lead-stage-assignment" ? {
+        hasLeavingLeadWork: () => false, finishLeavingLeadAssignments: async () => {},
+        finishStageAssignmentsOnUnload() {}, initializeStageAssignments() {}, subscribeStageAssignments: () => () => {},
+      }
       : name === "@/lib/server/lead-list" ? loadModule("src\\lib\\server\\lead-list.ts", dependencies, globals)
       : name === "@/lib/section-preparation" ? loadModule("src\\lib\\section-preparation.ts", { "@/lib/navigation": dependencies["@/lib/navigation"] ?? { navigationItems: [] } }, globals)
       : require(name),
@@ -944,7 +1072,7 @@ test("API handlers still reject missing, revoked, inactive and unauthorized sess
   }
 });
 
-test("every private API handler explicitly invokes requireUser", () => {
+test("every private API handler awaits requireUser directly or returns a guarded local handler", () => {
   const { readdirSync } = require("node:fs");
   const { relative } = require("node:path");
   const root = join(__dirname, "..", "src", "app", "api");
@@ -957,15 +1085,26 @@ test("every private API handler explicitly invokes requireUser", () => {
       const route = relative(root, file).replaceAll("\\", "/");
       if (/^(auth|webhooks|invoice-status)\//.test(route) || ["cron/invoices/route.ts", "cron/notifications/route.ts"].includes(route)) continue;
       const source = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
-      for (const node of source.statements) {
-        if (!ts.isFunctionDeclaration(node) || !/^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$/.test(node.name?.text ?? "")) continue;
-        let guarded = false;
+      const localFunctions = new Map(source.statements.filter(ts.isFunctionDeclaration).filter(node => node.name).map(node => [node.name.text, node]));
+      function guarded(node, visited = new Set()) {
+        if (visited.has(node)) return false;
+        visited.add(node);
+        let found = false;
         function visit(child) {
-          if (ts.isAwaitExpression(child) && ts.isCallExpression(child.expression) && child.expression.expression.getText(source) === "requireUser") guarded = true;
+          if (ts.isAwaitExpression(child) && ts.isCallExpression(child.expression) && child.expression.expression.getText(source) === "requireUser") found = true;
+          if (ts.isReturnStatement(child) && child.expression) {
+            const value = ts.isAwaitExpression(child.expression) ? child.expression.expression : child.expression;
+            const delegated = ts.isCallExpression(value) && localFunctions.get(value.expression.getText(source));
+            if (delegated && guarded(delegated, visited)) found = true;
+          }
           ts.forEachChild(child, visit);
         }
         visit(node);
-        assert.ok(guarded, `${route} ${node.name.text} must await its authentication guard`);
+        return found;
+      }
+      for (const node of source.statements) {
+        if (!ts.isFunctionDeclaration(node) || !/^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$/.test(node.name?.text ?? "")) continue;
+        assert.ok(guarded(node), `${route} ${node.name.text} must await its authentication guard`);
         handlers++;
       }
     }
@@ -1030,7 +1169,7 @@ test("server-preloaded leads survive hydration replay, refresh from the server a
       useRef(initial) { const key = refIndex++; return refs[key] ?? (refs[key] = { current: initial }); },
       useCallback: callback => callback, useEffect: effect => effects.push(effect),
     },
-    "@/lib/crm-data": {}, "lucide-react": {},
+    "@/lib/crm-data": { seedApiRead() {} }, "lucide-react": {},
     "@/components/searchable-dropdown": {}, "@/lib/lead-filters": {}, "@/lib/lead-picklists": {},
   }, { Date: class extends Date { static now() { return now; } } });
   const request = async (path, options) => {
@@ -1172,15 +1311,14 @@ test("sidebar intent explicitly prepares full routes once and keeps payment read
   assert.deepEqual(requests, []);
   links.get("/leads").onFocus();
   links.get("/leads").onMouseEnter();
-  assert.deepEqual(requests, [leadsPath]);
+  assert.deepEqual(requests, [], "server-seeded Leads must not also fetch the same list through the API");
   await new Promise(resolve => setImmediate(resolve));
-  await api.apiRequest(leadsPath, { maxAgeMs: 30000 });
-  assert.equal(requests.length, 1, "destination reuses intent data");
+  assert.equal(requests.length, 0);
   links.get("/pipeline").onTouchStart();
   links.get("/invoices").onMouseEnter();
   links.get("/meetings").onFocus();
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(requests, [leadsPath, pipelinePath, "/api/invoices", "/api/meetings"]);
+  assert.deepEqual(requests, [pipelinePath, "/api/invoices", "/api/meetings"]);
   assert.equal(api.getCachedApiRead("/api/invoices"), undefined);
   assert.equal(api.getCachedApiRead("/api/meetings"), undefined);
   await api.apiRequest("/api/invoices", { usePrefetched: true });
@@ -1419,7 +1557,6 @@ test("development opens only intended sections and shell refresh waits for persi
     window: { setTimeout: () => assert.fail("development must not compile speculative sections") } });
   AppShell({ children: null, user: { id: "actor", permissions: ["dashboard.view"], profile: { role: "admin", fullName: "Actor" } } });
   const unsubscribe = effects[0]();
-  assert.equal(effects[1](), undefined);
   assert.deepEqual(routes, []);
   const save = api.apiRequest("/api/leads/record", { method: "PATCH", body: { name: "Saved" } });
   assert.equal(refreshes, 0, "route refresh must not race the database write");
@@ -1436,7 +1573,7 @@ test("development opens only intended sections and shell refresh waits for persi
   assert.equal(refreshes, 2);
 });
 
-test("production background reads do not also launch unbounded route preparations", async () => {
+test("production mounting does not fetch unrelated sections or compile unused routes", async () => {
   const React = require("react");
   const effects = [], timers = [], routes = [], reads = [];
   const items = [
@@ -1458,13 +1595,10 @@ test("production background reads do not also launch unbounded route preparation
     document: { visibilityState: "visible" },
     window: { setTimeout: callback => { timers.push(callback); return 1; }, clearTimeout() {} } });
   AppShell({ children: null, user: { id: "actor", permissions: items.map(item => item.permission), profile: { role: "admin", fullName: "Actor" } } });
-  const cleanup = effects[1]();
-  timers[0]();
-  await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(routes, ["/"], "only the server-rendered Dashboard needs a speculative RSC request");
-  assert.equal(reads.length, 2);
-  assert.ok(reads.some(path => path.includes("view=pipeline")));
-  assert.ok(reads.includes("/api/meetings"));
+  const cleanup = effects[0]();
+  assert.deepEqual(timers, []);
+  assert.deepEqual(routes, []);
+  assert.deepEqual(reads, []);
   cleanup();
 });
 
@@ -1495,7 +1629,7 @@ test("a section click immediately replaces the old page with its destination, wh
   }, { Element: Anchor, window: { location: new URL("http://localhost/") } });
   const user = { id: "actor", profile: { role: "admin", fullName: "CRM Admin" }, permissions: ["dashboard.view", "invoices.view"] };
   const render = children => { index = 0; return AppShell({ user, children }); };
-  const root = tree => tree.props.children;
+  const root = shellRoot;
   const click = (href, options = {}) => {
     let prevented = false;
     root(render("OLD DASHBOARD")).props.onClickCapture({

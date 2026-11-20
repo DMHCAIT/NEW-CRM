@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Plus, RotateCcw, SlidersHorizontal, X } from "lucide-react";
 import { SearchableDropdown } from "@/components/searchable-dropdown";
-import { ApiError, apiRequest, getCachedApiRead, getPendingApiRead, type StageRow } from "@/lib/crm-data";
+import { ApiError, apiRequest, getApiReadSnapshot, getCachedApiRead, getPendingApiRead, seedApiRead, type StageRow } from "@/lib/crm-data";
 import type { CurrentUser, Lead, Profile } from "@/lib/types";
 import { FILTER_FIELDS, RECENT_VISIT_SOURCES, criterionError, criterionIsActive, defaultOperator, operatorNeedsValue, operatorsForField, type FilterField, type SavedLeadFilter } from "@/lib/lead-filters";
 import type { LeadConfiguration } from "@/lib/live-leads";
@@ -25,10 +25,10 @@ export type LiveLeadSnapshot<T = LiveLeadData> = { data: T; updatedAt: number };
 
 let leadMetadataPath = "";
 
-function getLeadListMetadata(maxAgeMs = 30000) {
-  return getCachedApiRead<LiveLeadData>(leadQueryPath(emptyFilter(), { pageSize: 100 }), maxAgeMs)
-    ?? getCachedApiRead<LiveLeadData>(leadQueryPath(emptyFilter()), maxAgeMs)
-    ?? (leadMetadataPath ? getCachedApiRead<LiveLeadData>(leadMetadataPath, maxAgeMs) : undefined);
+function getLeadListMetadata(maxAgeMs = 30000, read: typeof getCachedApiRead = getCachedApiRead) {
+  return read<LiveLeadData>(leadQueryPath(emptyFilter(), { pageSize: 100 }), maxAgeMs)
+    ?? read<LiveLeadData>(leadQueryPath(emptyFilter()), maxAgeMs)
+    ?? (leadMetadataPath ? read<LiveLeadData>(leadMetadataPath, maxAgeMs) : undefined);
 }
 
 export async function loadLeadListData(path: string, options: { maxAgeMs: number }): Promise<LiveLeadData> {
@@ -92,32 +92,40 @@ function leadDetailRecordsPath(path: string) {
   return `${url.pathname}${url.search}`;
 }
 
-function getLeadDetailMetadata(path: string, maxAgeMs: number) {
+function getLeadDetailMetadata(path: string, maxAgeMs: number, read: typeof getCachedApiRead = getCachedApiRead) {
   const overviewPath = `${path.split("?")[0]}?section=overview`;
-  return getLeadListMetadata(maxAgeMs)
-    ?? getCachedApiRead<Pick<LiveLeadData, "stages" | "profiles" | "configuration">>(overviewPath, maxAgeMs);
+  return getLeadListMetadata(maxAgeMs, read)
+    ?? read<Pick<LiveLeadData, "stages" | "profiles" | "configuration">>(overviewPath, maxAgeMs);
 }
 
-export function getCachedLeadDetail<T>(path: string, maxAgeMs = 30000): T | undefined {
-  const cached = getCachedApiRead<T>(path, maxAgeMs);
+function readLeadDetail<T>(path: string, maxAgeMs: number, read: typeof getCachedApiRead): T | undefined {
+  const cached = read<T>(path, maxAgeMs);
   if (cached !== undefined) return cached;
   const url = new URL(path, "http://crm.local");
   if (url.searchParams.get("section") !== "workspace") {
     const workspacePath = `${url.pathname}?section=workspace`;
-    const workspace = getCachedLeadDetail<T & { sectionErrors?: Record<string, string> }>(workspacePath, maxAgeMs);
+    const workspace = readLeadDetail<T & { sectionErrors?: Record<string, string> }>(workspacePath, maxAgeMs, read);
     const section = url.searchParams.get("section") ?? "overview";
     const errorKey = url.searchParams.get("history") === "1" ? "history" : section;
     if (workspace && !workspace.sectionErrors?.[errorKey]) return workspace;
     if (["invoices", "courses", "calls"].includes(section) && url.searchParams.get("history") !== "1") {
-      const overview = getCachedLeadDetail<T>(`${url.pathname}?section=overview`, maxAgeMs);
+      const overview = readLeadDetail<T>(`${url.pathname}?section=overview`, maxAgeMs, read);
       if (overview !== undefined) return overview;
     }
   }
-  const metadata = getLeadDetailMetadata(path, maxAgeMs);
-  const detail = metadata ? getCachedApiRead<T>(leadDetailRecordsPath(path), maxAgeMs) : undefined;
+  const metadata = getLeadDetailMetadata(path, maxAgeMs, read);
+  const detail = metadata ? read<T>(leadDetailRecordsPath(path), maxAgeMs) : undefined;
   return metadata && detail !== undefined
     ? { stages: metadata.stages, profiles: metadata.profiles, configuration: metadata.configuration, ...detail }
     : undefined;
+}
+
+export function getCachedLeadDetail<T>(path: string, maxAgeMs = 30000): T | undefined {
+  return readLeadDetail<T>(path, maxAgeMs, getCachedApiRead);
+}
+
+export function getLeadDetailSnapshot<T>(path: string): T | undefined {
+  return readLeadDetail<T>(path, 300000, getApiReadSnapshot);
 }
 
 export async function loadLeadDetailData<T>(path: string, options: { maxAgeMs: number; forceFresh?: boolean }): Promise<T> {
@@ -147,11 +155,13 @@ export async function loadLeadDetailData<T>(path: string, options: { maxAgeMs: n
 }
 
 export function useLiveLeadData<T = LiveLeadData>(path = "/api/leads", request: (path: string, options: { maxAgeMs: number }) => Promise<T> = apiRequest,
-  snapshot: (path: string) => T | undefined = getCachedApiRead, initialData?: LiveLeadSnapshot<T>) {
-  const [data, setData] = useState<T | null>(() => initialData?.data ?? snapshot(path) ?? null);
+  snapshot: (path: string) => T | undefined = getCachedApiRead, initialData?: LiveLeadSnapshot<T>,
+  displaySnapshot: (path: string) => T | undefined = snapshot) {
+  const [data, setData] = useState<T | null>(() => initialData?.data ?? snapshot(path) ?? displaySnapshot(path) ?? null);
   const [error, setError] = useState("");
-  const [loading, setLoading] = useState(() => initialData === undefined && snapshot(path) === undefined);
+  const [loading, setLoading] = useState(() => initialData === undefined && snapshot(path) === undefined && displaySnapshot(path) === undefined);
   const [loadedPath, setLoadedPath] = useState(path);
+  const [refreshing, setRefreshing] = useState(false);
   const requestId = useRef(0);
   const initialRead = useRef(initialData === undefined ? null : { path, updatedAt: initialData.updatedAt });
   const load = useCallback(async (maxAgeMs: number) => {
@@ -170,32 +180,35 @@ export function useLiveLeadData<T = LiveLeadData>(path = "/api/leads", request: 
       }
       throw e;
     }
-    finally { if (current === requestId.current) setLoading(false); }
+    finally { if (current === requestId.current) { setLoading(false); setRefreshing(false); } }
   }, [path, request]);
   const latestLoad = useRef(load);
   latestLoad.current = load;
-  const reload = useCallback(() => latestLoad.current(0), []);
+  const reload = useCallback(() => { setRefreshing(true); return latestLoad.current(0); }, []);
   useEffect(() => {
     const sequence = requestId;
     if (initialRead.current?.path === path && Date.now() - initialRead.current.updatedAt < 30000) {
+      if (initialData) seedApiRead(path, initialData.data, initialRead.current.updatedAt);
       setLoading(false);
       return () => { sequence.current++; };
     }
     initialRead.current = null;
-    const saved = snapshot(path);
+    const cached = snapshot(path);
+    const saved = cached ?? displaySnapshot(path);
     if (saved !== undefined) { setData(saved); setLoadedPath(path); }
     setLoading(saved === undefined);
+    setRefreshing(saved !== undefined && cached === undefined);
     void load(30000).catch(() => {});
     return () => { sequence.current++; };
-  }, [load, path, snapshot]);
-  const prepared = loadedPath !== path ? snapshot(path) : undefined;
+  }, [load, path, snapshot, displaySnapshot, initialData]);
+  const prepared = loadedPath !== path ? snapshot(path) ?? displaySnapshot(path) : undefined;
   const acceptData = useCallback((update: (previous: T | null) => T | null) => {
     requestId.current++;
     setData(update); setError("");
-    if (loadedPath === path) setLoading(false);
+    if (loadedPath === path) { setLoading(false); setRefreshing(false); }
     else void latestLoad.current(0).catch(() => {});
   }, [path, loadedPath]);
-  return { data: prepared ?? data, error: prepared === undefined ? error : "", loading: prepared !== undefined ? false : loading || loadedPath !== path, reload, setError, acceptData };
+  return { data: prepared ?? data, error: prepared === undefined ? error : "", loading: prepared !== undefined ? false : loading || loadedPath !== path, refreshing, reload, setError, acceptData };
 }
 
 export function useDebouncedValue<T>(value: T, delay = 120, enabled = true) {
@@ -336,9 +349,12 @@ export function LeadForm({ initial, stages, profiles, canAssign, onSave, busy, s
   const renderDuplicates = (field: "phone" | "email") => {
     const matches = duplicates.filter((match) => match.match_field === field);
     if (!matches.length) return null;
-    return <div className="helper-banner lead-duplicate-hint" role="alert">{matches.map((match, index) => match.in_bucket && match.lead_id
-      ? <p key={index}>Duplicate: this {field} already exists in your bucket{match.lead_name ? ` (${match.lead_name})` : ""}. <Link href={`/leads/${match.lead_id}`} prefetch={false} className="text-link">View lead</Link></p>
-      : <p key={index}>Duplicate: this {field} already exists and is assigned to <strong>{match.assignee}</strong>.</p>)}</div>;
+    return <div className="helper-banner lead-duplicate-hint" role="alert">{matches.map((match, index) => {
+      const assignee = match.assignee?.trim() || "Unassigned";
+      return match.in_bucket && match.lead_id
+        ? <p key={index}>Duplicate: this {field} already exists in your bucket{match.lead_name ? ` (${match.lead_name})` : ""} and is assigned to <strong>{assignee}</strong>. <Link href={`/leads/${match.lead_id}`} prefetch={false} className="text-link">View lead</Link></p>
+        : <p key={index}>Duplicate: this {field} already exists and is assigned to <strong>{assignee}</strong>.</p>;
+    })}</div>;
   };
   const createRequired = ["name", "email", "countryCode", "phone", "country", "qualification", "category", "course", "source", "stage"] as const;
   const labels: Record<string, string> = {

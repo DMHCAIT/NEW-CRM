@@ -6,7 +6,6 @@ import { createPortal } from "react-dom";
 import { ArrowRightLeft, CheckCircle2, Columns3, Download, ListFilter, Plus, Save, Search, Trash2, Users, X } from "lucide-react";
 import { SearchableDropdown } from "@/components/searchable-dropdown";
 import { StageBadge } from "@/components/lead-helpers";
-import { LeadNavigationPreparation } from "@/components/lead-navigation-preparation";
 import { useLeadFilterState, useLeadNavigation } from "@/components/lead-filter-state";
 import { apiRequest, formatDateTime, subscribeApiWrites } from "@/lib/crm-data";
 import { criterionError, criterionIsActive, type SavedLeadFilter } from "@/lib/lead-filters";
@@ -268,7 +267,6 @@ export default function LeadsWorkspace({ initialFilter, dashboard = false, initi
       {can("leads.create") && <Link className="button button-primary" href="/leads/new"><Plus size={16} aria-hidden="true" />New lead</Link>}
     </div></header>
     {error && <p className="helper-banner" role="alert">{error} <button className="text-link" onClick={() => void reload().catch(() => {})}>Retry</button></p>}{notice && <p className="helper-banner" role="status">{notice}</p>}
-    <LeadNavigationPreparation leads={rows} enabled={!staleResults} />
     {resultsLoading && <span className="visually-hidden" role="status">{pageSize === "all" ? "Loading all matching leads..." : "Updating lead results..."}</span>}
     {dashboardView && <p className="helper-banner"><Link href="/">Dashboard</Link><span> / {filter.name || "Dashboard leads"} · Role-scoped results</span></p>}
     <div className="leads-layout">

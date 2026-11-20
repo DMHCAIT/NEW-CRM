@@ -18,12 +18,13 @@ export async function GET(request: Request) {
     const { supabase, user } = await requireUser("invoices.view");
     const leadId = new URL(request.url).searchParams.get("leadId");
     const lead = leadId !== null ? await accessibleLead(supabase, parseInput(uuid, leadId)) : null;
+    const profileClient = user.profile.role === "accounts" ? getSupabaseAdminClient() : supabase;
     let query = supabase.from("invoices").select("*,invoice_items(*),invoice_approvals(*),lead:leads(assignee_id)");
     if (lead) query = query.eq("lead_id", lead.id);
     const [{ data, error }, { data: profiles, error: profilesError }, leads, razorpay, smtp] = await Promise.all([
       query.order("created_at", { ascending: false }).order("id").limit(200),
-      supabase.from("profiles").select("id,full_name"),
-      lead ? Promise.resolve([{ id: lead.id, name: lead.name }]) : leadOptions(supabase),
+      profileClient.from("profiles").select("id,full_name"),
+      lead ? Promise.resolve([{ id: lead.id, name: lead.name }]) : leadOptions(supabase, user.profile.role === "accounts"),
       integrationStatus("razorpay", integrationRequirements.razorpay),
       integrationStatus("smtp", integrationRequirements.smtp),
     ]);
@@ -89,11 +90,12 @@ export async function GET(request: Request) {
       ...invoice,
       payment_url: invoicePaymentUrl(invoice),
       can_reconcile_payment: user.permissions.includes("invoices.create") && (invoice.created_by === user.id
-        || invoice.lead?.assignee_id === user.id || ["admin", "super_admin"].includes(user.profile.role)),
+        || invoice.lead?.assignee_id === user.id || ["admin", "super_admin", "accounts"].includes(user.profile.role)),
       status: ["sent", "pending_approval"].includes(invoice.status) && invoiceWindowExpired(invoice) ? "expired" : invoice.status,
     })), courseBalances, installmentParents, leads, profiles: profiles ?? [], userId: user.id,
-      canCreate: user.permissions.includes("invoices.create"), canApprove: ["admin", "super_admin"].includes(user.profile.role) && user.permissions.includes("invoices.approve"),
-      canApproveDiscount: user.profile.role === "super_admin" && user.permissions.includes("invoices.approve"),
+      restrictedInvoiceLeads: user.profile.role === "accounts",
+      canCreate: user.permissions.includes("invoices.create"), canApprove: ["admin", "super_admin", "accounts"].includes(user.profile.role) && user.permissions.includes("invoices.approve"),
+      canApproveDiscount: ["super_admin", "accounts"].includes(user.profile.role) && user.permissions.includes("invoices.approve"),
       razorpay, smtp }, { headers: { "Cache-Control": "private, no-store" } });
   } catch (error) { return jsonError(error); }
 }
@@ -139,7 +141,7 @@ export async function POST(request: Request) {
       } else delivery = { sent: false, error: "The invoice lead is unavailable." };
     }
     const message = invoice.status === "pending_approval"
-      ? "Discount request submitted for Super Admin approval."
+      ? "Discount request submitted for Accounts or Super Admin approval."
       : delivery.sent
         ? "Invoice saved in CRM; email accepted by SMTP for the lead, with the current lead owner, creator and sales@dmhca.in copied."
         : `Invoice issued, but automatic delivery failed: ${delivery.error ?? "check configuration and reconcile."}`;

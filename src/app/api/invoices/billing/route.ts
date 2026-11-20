@@ -1,15 +1,17 @@
 import { NextResponse } from "next/server";
 import { jsonError, requireUser } from "@/lib/server/auth";
 import { accessibleLead, databaseError, parseInput, uuid } from "@/lib/server/operational";
+import { getSupabaseAdminClient } from "@/lib/supabase/server";
 
 export async function GET(request: Request) {
   try {
     const { supabase, user } = await requireUser("invoices.create");
     const id = parseInput(uuid, new URL(request.url).searchParams.get("leadId"));
     const lead = await accessibleLead(supabase, id);
+    const profileClient = user.profile.role === "accounts" ? getSupabaseAdminClient() : supabase;
     const [contact, owner] = await Promise.all([
       supabase.from("leads").select("phone,country_code").eq("id", id).maybeSingle(),
-      lead.assignee_id ? supabase.from("profiles").select("full_name,email").eq("id", lead.assignee_id).maybeSingle() : Promise.resolve({ data: null, error: null }),
+      lead.assignee_id ? profileClient.from("profiles").select("full_name,email").eq("id", lead.assignee_id).maybeSingle() : Promise.resolve({ data: null, error: null }),
     ]);
     databaseError(contact.error); databaseError(owner.error);
     const rawPhone = contact.data?.phone ?? "";
