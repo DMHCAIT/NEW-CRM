@@ -259,7 +259,7 @@ test("email log failure after provider acceptance warns against duplicate sends"
 test("single-field lead PATCH preserves unrelated columns and merges custom fields", async () => {
   let updated, leadReads = 0, configurationReads = 0;
   const crmData = load("src\\lib\\crm-data.ts", { "@/lib/permissions": { isCrmRole: () => true } });
-  const returnedRow = { id: "lead", name: "Server normalized", modified_at: "2099-01-01T10:00:00Z", closure_fee: "1250", custom_fields: { Existing: "kept" }, call_schedule_revision: 4, modifier: { full_name: "Server editor" } };
+  const returnedRow = { id: "lead", name: "Server normalized", modified_at: "2099-01-01T10:00:00Z", next_followup_at: "2020-01-01T10:00:00Z", closure_fee: "1250", custom_fields: { Existing: "kept" }, call_schedule_revision: 4, modifier: { full_name: "Server editor" } };
   const selects = [];
   const route = load("src\\app\\api\\leads\\[id]\\route.ts", {
     "@/lib/server/auth": { ...auth, requireUser: async () => ({
@@ -270,7 +270,7 @@ test("single-field lead PATCH preserves unrelated columns and merges custom fiel
         return chain;
       } },
     }) },
-    "@/lib/crm-data": { ...crmData, fetchLead: async () => { leadReads++; return { ...validLead, country: "", course: "", qualification: "", source: "Website", closureFee: 0 }; } },
+    "@/lib/crm-data": { ...crmData, fetchLead: async () => { leadReads++; return { ...validLead, country: "", course: "", qualification: "", source: "Website", followUpAt: returnedRow.next_followup_at, closureFee: 0 }; } },
     "@/lib/live-leads": { ...validation, uuid: value => value, fetchLeadConfiguration: async () => {
       configurationReads++;
       return { fields: [{ name: "New field", active: true, type: "text" }] };
@@ -287,12 +287,17 @@ test("single-field lead PATCH preserves unrelated columns and merges custom fiel
   assert.equal(saved.lead.name, "Server normalized");
   assert.equal(saved.lead.modifiedAt, returnedRow.modified_at);
   assert.equal(saved.lead.modifiedBy, "Server editor");
+  assert.equal(saved.lead.followUpAt, returnedRow.next_followup_at);
   assert.equal(saved.lead.closureFee, 1250);
   assert.deepEqual(saved.lead.customFields, { Existing: "kept" });
   assert.equal(saved.scheduleUnlocked, true);
   assert.equal(leadReads, 1, "the update returns its own selected row without a second detail lookup");
   assert.match(selects.at(-1), /custom_fields,call_schedule_revision/);
   assert.deepEqual(Object.keys(updated).sort(), ["modified_by", "name"]);
+  assert.equal((await patch({ followUpAt: "2099-12-01T10:00:00Z" })).status, 200);
+  assert.equal(updated.next_followup_at, "2099-12-01T10:00:00Z");
+  assert.equal((await patch({ followUpAt: null })).status, 200);
+  assert.equal(updated.next_followup_at, null);
   assert.equal((await patch({ email: "new@example.com" })).status, 200);
   assert.deepEqual(Object.keys(updated).sort(), ["email", "modified_by", "normalized_email"]);
   assert.equal((await patch({ expectedClosureDate: "2026-12-01" })).status, 200);

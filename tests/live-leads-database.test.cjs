@@ -901,7 +901,7 @@ test("call scheduling locks until a real lead or call change and records actor, 
   assert.ok(log.some(row => row.description === "Call cancelled"));
 });
 
-test("real lead edits handle overdue follow-ups across dashboard data and lead filters without changing calls", async () => {
+test("lead edits preserve overdue follow-ups unless explicitly changed or cleared", async () => {
   const record = "31000000-0000-4000-8000-000000000098";
   const past = "2020-01-01T10:00:00.000Z";
   await db.query("insert into public.leads(id,name,phone,normalized_phone,created_by,assignee_id,next_followup_at) values($1,'Overdue lead','5656565656','5656565656',$2,$2,$3)", [record,owner,past]);
@@ -912,21 +912,28 @@ test("real lead edits handle overdue follow-ups across dashboard data and lead f
   await asUser(owner,tx => tx.query("insert into public.notes(lead_id,user_id,content) values($1,$2,'Note only')",[record,owner]));
   assert.ok(await followup(),"Notes do not count as lead field edits");
   await asUser(owner,tx => tx.query("update public.leads set course='Updated course' where id=$1",[record]));
-  assert.equal(await followup(),null);
-  const activity = (await db.query("select user_id,meta from public.activities where lead_id=$1 and meta->'changes' ? 'next_followup_at' order by created_at desc limit 1",[record])).rows[0];
+  assert.equal(new Date(await followup()).toISOString(),past);
+  const activity = (await db.query("select user_id,meta from public.activities where lead_id=$1 and meta->'changes' ? 'course' order by created_at desc limit 1",[record])).rows[0];
   assert.equal(activity.user_id,owner);
-  assert.equal(new Date(activity.meta.changes.next_followup_at.before).toISOString(),past);
-  assert.equal(activity.meta.changes.next_followup_at.after,null);
+  assert.equal(activity.meta.changes.next_followup_at,undefined);
   assert.deepEqual(activity.meta.changes.course,{before:null,after:"Updated course"});
   assert.equal((await db.query("select status from public.scheduled_calls where lead_id=$1",[record])).rows[0].status,"scheduled");
-  assert.equal((await db.query("select id from public.leads where id=$1 and next_followup_at::date <= (now() at time zone 'UTC')::date",[record])).rows.length,0);
+  assert.equal((await db.query("select id from public.leads where id=$1 and next_followup_at::date <= (now() at time zone 'UTC')::date",[record])).rows.length,1);
   const filter = { criteria:[{id:"overdue",field:"followUpAt",operator:"overdue",value:""}],matchMode:"all",query:"",quickView:"All accessible leads" };
-  assert.equal(filterExports.filterLeads([{id:record,followUpAt:null}],filter).length,0);
+  assert.equal(filterExports.filterLeads([{id:record,followUpAt:past}],filter).length,1);
+  const stage = (await db.query("select id from public.lead_stages where name='Fresh'")).rows[0].id;
+  const deferred = await asUser(owner,tx => tx.query("select lead from public.save_lead_with_deferred_assignment($1,$2::jsonb,$3)", [
+    record, JSON.stringify({ stage_id: stage }), "21000000-0000-4000-8000-000000000098",
+  ]));
+  assert.equal(new Date(deferred.rows[0].lead.next_followup_at).toISOString(),past);
+  assert.equal(new Date(await followup()).toISOString(),past,"Deferred stage saves preserve the date too");
   await asUser(owner,tx => tx.query("update public.leads set next_followup_at='2099-12-01T10:00:00Z' where id=$1",[record]));
   await asUser(owner,tx => tx.query("update public.leads set qualification='Graduate' where id=$1",[record]));
   assert.equal(new Date(await followup()).toISOString(),"2099-12-01T10:00:00.000Z");
   await asUser(owner,tx => tx.query("update public.leads set course='Changed again',next_followup_at='2020-02-01T10:00:00Z' where id=$1",[record]));
   assert.equal(new Date(await followup()).toISOString(),"2020-02-01T10:00:00.000Z","An explicitly chosen follow-up date must be preserved");
+  await asUser(owner,tx => tx.query("update public.leads set next_followup_at=null where id=$1",[record]));
+  assert.equal(await followup(),null,"An explicit clear must still remove the follow-up");
 });
 
 test("overdue repair clears only proven handled follow-ups and preserves legacy and deliberate dates", async () => {

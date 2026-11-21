@@ -1787,19 +1787,14 @@ upcoming calls sort earliest first, past-due calls newest first, in a bounded
 scrollable list with a light scrollbar. Due indicators refresh every 30 seconds
 while the page is open. A past-due appointment is not assumed completed.
 
-An overdue **lead follow-up** is handled automatically when a lead field actually
-changes: if the old follow-up timestamp has passed and is left unchanged by the
-edit, it is cleared. A newly chosen follow-up timestamp is preserved, including
-an explicitly chosen past date. Future follow-ups, no-op saves, notes, emails and
-call-status-only changes are unaffected. The old date and the clearing edit are
-retained in the Overview timeline. Dashboard counts, lead filters and overdue
-automation batches all use the persisted date, so handled leads stop matching
-those overdue queues on reload. Scheduled call appointments are separate.
+Lead edits preserve the existing **next follow-up**, including overdue dates.
+The date can be explicitly changed or cleared, or rescheduled by an automation.
+Dashboard counts, lead filters and overdue automation batches continue to use the
+persisted date. Scheduled call appointments are separate.
 
-Apply `202610230004_handle_overdue_followup_on_edit.sql`. It also repairs existing
-overdue follow-ups only where the latest detailed lead-edit log proves that a
-field was changed after the follow-up fell due without deliberately replacing
-the follow-up date. Legacy records without that evidence are not guessed.
+Apply `202611210002_preserve_lead_followups.sql` to stop the earlier automatic
+clearing behavior. The migration does not restore previously cleared dates or
+modify lead data.
 
 After scheduling, another appointment is blocked until an actual lead field
 change or an existing call is rescheduled, marked completed or cancelled. Time
