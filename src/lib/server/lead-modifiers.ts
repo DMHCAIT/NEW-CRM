@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { matchesTextCriterion, type FilterCriterion, type MatchMode } from "@/lib/lead-filters";
 import { dbError } from "@/lib/live-leads";
 import { getSupabaseAdminClient } from "@/lib/supabase/server";
 
@@ -23,9 +24,11 @@ export async function fetchLeadModifiers(client: SupabaseClient, leadIds?: strin
     if (!next || next <= after) throw new Error("Lead modifier pagination did not advance.");
     after = next;
   }
+  return resolveLeadModifiers([...modifierIds]);
+}
 
+async function resolveLeadModifiers(ids: string[]) {
   const modifiers: LeadModifier[] = [];
-  const ids = [...modifierIds];
   for (let offset = 0; offset < ids.length; offset += 100) {
     const batch = ids.slice(offset, offset + 100);
     const { data, error } = await getSupabaseAdminClient().from("profiles").select("id,full_name,status,deleted_at")
@@ -39,4 +42,27 @@ export async function fetchLeadModifiers(client: SupabaseClient, leadIds?: strin
     modifiers.push(...data.map(row => ({ modifier_id: row.id, full_name: row.full_name, active: row.status === "active" && row.deleted_at === null })));
   }
   return modifiers;
+}
+
+export async function findMatchingModifierIds(criteria: FilterCriterion[], matchMode: MatchMode) {
+  const matches = (name: string) => matchMode === "all"
+    ? criteria.every(criterion => matchesTextCriterion(name, criterion))
+    : criteria.some(criterion => matchesTextCriterion(name, criterion));
+  const ids: string[] = [];
+  let after = "";
+  for (;;) {
+    let query = getSupabaseAdminClient().from("profiles").select("id,full_name").order("id").limit(1000);
+    if (after) query = query.gt("id", after);
+    const { data, error } = await query.returns<Pick<ModifierProfile, "id" | "full_name">[]>();
+    dbError(error);
+    if (!Array.isArray(data) || !data.every(row => typeof row.id === "string" && typeof row.full_name === "string")) {
+      throw new Error("Invalid editor lookup response.");
+    }
+    for (const profile of data) if (matches(profile.full_name)) ids.push(profile.id);
+    if (data.length < 1000) break;
+    const next = data[data.length - 1].id;
+    if (!next || next <= after) throw new Error("Editor lookup pagination did not advance.");
+    after = next;
+  }
+  return { ids, includeEmpty: matches("") };
 }

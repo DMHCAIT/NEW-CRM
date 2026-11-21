@@ -244,17 +244,23 @@ test("read-only modifier filters resolve outside editors without exposing other 
     const privilegedReads = [];
     const adminClient = { from(table) {
       assert.equal(table, "profiles");
-      let selectedIds = [];
+      let selectedIds, after = "", limit = 1000;
       const chain = { select: () => chain, in(_column, values) { selectedIds = values; return chain; },
+        order: () => chain, limit(value) { limit = value; return chain; }, gt(_key, value) { after = value; return chain; },
         async returns() {
-          privilegedReads.push(...selectedIds);
+          if (selectedIds) privilegedReads.push(...selectedIds);
           await tx.exec("reset role");
-          try { return { data: (await tx.query("select id,full_name,status,deleted_at::text from public.profiles where id=any($1::uuid[])", [selectedIds])).rows, error: null }; }
+          try { return { data: selectedIds
+            ? (await tx.query("select id,full_name,status,deleted_at::text from public.profiles where id=any($1::uuid[])", [selectedIds])).rows
+            : (await tx.query("select id,full_name from public.profiles where ($1 = '' or id > nullif($1,'')::uuid) order by id limit $2", [after, limit])).rows,
+          error: null }; }
           finally { await tx.exec("set local role authenticated"); }
         } };
       return chain;
     } };
+    let currentActor;
     const client = {
+      auth: { getUser: async () => ({ data: { user: { id: currentActor } }, error: null }) },
       async rpc(name, args) {
         assert.equal(name, "crm_lead_page");
         const { rows } = await tx.query(`select public.crm_lead_page($1::jsonb,$2,$3,$4::timestamptz,$5::uuid,$6,$7,$8,$9,$10,$11::jsonb) result`, [
@@ -265,10 +271,12 @@ test("read-only modifier filters resolve outside editors without exposing other 
       },
       from(table) {
         assert.equal(table, "leads");
-        let selectedIds, after = "", limit = 1000, requireModifier = false;
+        let selectedIds, selectedModifiers, assignee, after = "", limit = 1000, requireModifier = false, countOnly = false;
         const chain = {
-          select: () => chain, eq: () => chain, order: () => chain,
-          in(_key, values) { selectedIds = values; return chain; },
+          select(_columns, options) { countOnly = Boolean(options?.head); return chain; },
+          eq(key, value) { if (key === "assignee_id") assignee = value; return chain; }, order: () => chain,
+          in(key, values) { if (key === "modified_by") selectedModifiers = values; else selectedIds = values; return chain; },
+          is(key, value) { if (key === "modified_by" && value === null) selectedModifiers = null; return chain; },
           not() { requireModifier = true; return chain; },
           gt(_key, value) { after = value; return chain; },
           limit(value, options) { if (!options?.referencedTable) limit = value; return chain; },
@@ -276,12 +284,25 @@ test("read-only modifier filters resolve outside editors without exposing other 
             const params = [];
             let where = "not is_archived";
             if (selectedIds) { params.push(selectedIds); where += ` and id=any($${params.length}::uuid[])`; }
+            if (assignee) { params.push(assignee); where += ` and assignee_id=$${params.length}::uuid`; }
             if (after) { params.push(after); where += ` and id > $${params.length}::uuid`; }
             if (requireModifier) where += " and modified_by is not null";
             params.push(limit);
             const { rows } = await tx.query(`select id,modified_by,created_at::text,name,next_followup_at::text
               from public.leads where ${where} order by id limit $${params.length}`, params);
             return { data: rows.map(row => ({ ...row, modifier: null })), error: null };
+          },
+          async then(resolve, reject) {
+            try {
+              assert.ok(countOnly);
+              const params = [];
+              let where = "not is_archived";
+              if (assignee) { params.push(assignee); where += ` and assignee_id=$${params.length}::uuid`; }
+              if (selectedModifiers === null) where += " and modified_by is null";
+              else { params.push(selectedModifiers); where += ` and modified_by=any($${params.length}::uuid[])`; }
+              const { rows } = await tx.query(`select count(*)::int as count from public.leads where ${where}`, params);
+              resolve({ count: rows[0].count, error: null });
+            } catch (error) { reject(error); }
           },
         };
         return chain;
@@ -298,7 +319,8 @@ test("read-only modifier filters resolve outside editors without exposing other 
     const dbError = error => { if (error) throw error; };
     class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
     const modifiers = load("src\\lib\\server\\lead-modifiers.ts", {
-      "@/lib/live-leads": { dbError }, "@/lib/supabase/server": { getSupabaseAdminClient: () => adminClient },
+      "@/lib/live-leads": { dbError }, "@/lib/lead-filters": filterExports,
+      "@/lib/supabase/server": { getSupabaseAdminClient: () => adminClient },
     });
     const query = load("src\\lib\\server\\lead-query.ts", {
       "@/lib/live-leads": { dbError }, "@/lib/server/auth": { HttpError },
@@ -307,6 +329,7 @@ test("read-only modifier filters resolve outside editors without exposing other 
     });
     const filter = queryFilter([{ id: "editor", field: "modifiedBy", operator: "is", value: "Outside Editor" }]);
     for (const [actor, session, expected] of [[outsider, sessions[outsider], [ids[0]]], [owner, sessions[owner], [ids[1], ids[2]]], [manager, managerSession, [ids[3]]]]) {
+      currentActor = actor;
       await tx.exec("set local role authenticated");
       await tx.query("select set_config('request.jwt.claims',$1,true)", [JSON.stringify({ sub: actor, session_id: session })]);
       privilegedReads.length = 0;
@@ -324,6 +347,11 @@ test("read-only modifier filters resolve outside editors without exposing other 
       assert.deepEqual(page.leads.map(row => row.id).sort(), [...expected].sort(), `${actor}: ${JSON.stringify(visible)}`);
       assert.ok(page.leads.every(row => row.modifiedBy === "Outside Editor"));
       assert.equal((await query.fetchLeadPage(client, { ...params, filter, countOnly: true })).total, expected.length);
+      assert.equal((await query.fetchLeadPage(client, {
+        ...params, filter: { ...filter, quickView: "My Leads" }, countOnly: true,
+      })).total, 1);
+      const hiddenFilter = queryFilter([{ id: "editor", field: "modifiedBy", operator: "is", value: "Hidden Editor" }]);
+      assert.equal((await query.fetchLeadPage(client, { ...params, filter: hiddenFilter, countOnly: true })).total, 0);
       if (actor === outsider) {
         const inactiveFilter = queryFilter([{ id: "editor", field: "modifiedBy", operator: "is", value: "Inactive Editor" }]);
         const inactivePage = await query.fetchLeadPage(client, { ...params, filter: inactiveFilter }, 50);

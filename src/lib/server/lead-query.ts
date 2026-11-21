@@ -3,7 +3,7 @@ import { LEAD_SELECT, mapLead, type LeadRow } from "@/lib/crm-data";
 import { criterionError, dateRange, isSavedLeadFilter, localDateKey, matchesTextCriterion, type SavedLeadFilter } from "@/lib/lead-filters";
 import { HttpError } from "@/lib/server/auth";
 import { dbError } from "@/lib/live-leads";
-import { fetchLeadModifiers } from "@/lib/server/lead-modifiers";
+import { fetchLeadModifiers, findMatchingModifierIds } from "@/lib/server/lead-modifiers";
 
 export const DEFAULT_FILTER: SavedLeadFilter = {
   id: "", name: "", criteria: [], matchMode: "all", query: "", quickView: "All accessible leads",
@@ -100,6 +100,35 @@ async function fetchLeadPageIds(client: SupabaseClient, query: LeadQuery, pageSi
   if (!modifierCriteria.length) return fetchDatabaseLeadPageIds(client, query, pageSize);
 
   const otherCriteria = query.filter.criteria.filter(criterion => criterion.field !== "modifiedBy");
+  if (query.countOnly && !otherCriteria.length && !query.filter.query.trim()
+    && !query.dashboard && !query.owner && !query.stage && !query.cursor) {
+    let assigneeId: string | undefined;
+    if (query.filter.quickView === "My Leads") {
+      const { data, error } = await client.auth.getUser();
+      dbError(error);
+      if (!data.user) throw new HttpError(401, "Sign in to view your leads.");
+      assigneeId = data.user.id;
+    }
+    const { ids, includeEmpty } = await findMatchingModifierIds(modifierCriteria, query.filter.matchMode);
+    const batches: (string[] | null)[] = [];
+    for (let offset = 0; offset < ids.length; offset += 100) batches.push(ids.slice(offset, offset + 100));
+    if (includeEmpty) batches.push(null);
+    let total = 0;
+    for (let offset = 0; offset < batches.length; offset += 4) {
+      const counts = await Promise.all(batches.slice(offset, offset + 4).map(async batch => {
+        let request = client.from("leads").select("id", { count: "exact", head: true }).eq("is_archived", false);
+        if (assigneeId) request = request.eq("assignee_id", assigneeId);
+        request = batch ? request.in("modified_by", batch) : request.is("modified_by", null);
+        const { count, error } = await request;
+        dbError(error);
+        if (!Number.isSafeInteger(count) || count === null || count < 0) throw new HttpError(500, "Invalid lead count response.");
+        return count;
+      }));
+      total += counts.reduce((sum, count) => sum + count, 0);
+    }
+    if (!Number.isSafeInteger(total)) throw new HttpError(500, "Invalid lead count response.");
+    return { ids: [], hasMore: false, nextCursor: null, total };
+  }
   const scanQuery: LeadQuery = {
     ...query, countOnly: false, offset: 0,
     filter: { ...query.filter, criteria: query.filter.matchMode === "all" ? otherCriteria : [] },

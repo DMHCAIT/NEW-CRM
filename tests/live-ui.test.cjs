@@ -4646,6 +4646,18 @@ test("last modified choices exclude unavailable editors without discarding saved
   assert.equal(current.criteria[0].value, "Active editor");
 });
 
+test("saved editor selections remain visible while editor choices load", () => {
+  const current = { ...filter, criteria: [{ id: "editor", field: "modifiedBy", operator: "is", value: "Outside editor" }] };
+  const nodes = elements(actualLeads.LiveFilterEditor({
+    filter: current, leads: [], modifiersPending: true, onChange() {},
+  }));
+  const menu = nodes.find(node => node.props?.ariaLabel === "Filter value");
+  assert.equal(menu.props.disabled, true);
+  assert.deepEqual(menu.props.options.map(option => option.value), ["Outside editor"]);
+  const Dropdown = load("src\\components\\searchable-dropdown.tsx").SearchableDropdown;
+  assert.doesNotMatch(renderToStaticMarkup(React.createElement(Dropdown, menu.props)), /unavailable/);
+});
+
 test("every filter field and operator remains available through searchable menus", () => {
   const filters = load("src\\lib\\lead-filters.ts");
   for (const field of filters.FILTER_FIELDS) {

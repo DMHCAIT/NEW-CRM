@@ -33,6 +33,16 @@ export function LeadViewBar({ filter, dashboard, title, children }: {
   </>;
 }
 
+function ModifierFilterEditor(props: Parameters<typeof LiveFilterEditor>[0]) {
+  const { data, loading, error, reload } = useLiveLeadData<{ modifiers: string[] }>("/api/leads?view=modifiers");
+  useEffect(() => subscribeApiWrites(() => { void reload().catch(() => {}); }, "completed"), [reload]);
+  return <>
+    <LiveFilterEditor {...props} modifiers={data?.modifiers ?? []} modifiersPending={!data} />
+    {loading && !data && <p className="helper-banner" role="status">Loading last modified editors...</p>}
+    {error && <p className="helper-banner" role="alert">Could not load last modified editors: {error} <button type="button" className="text-link" onClick={() => void reload().catch(() => {})}>Retry</button></p>}
+  </>;
+}
+
 export default function LeadsWorkspace({ initialFilter, dashboard = false, initialData }: {
   initialFilter?: SavedLeadFilter; dashboard?: boolean; initialData?: LiveLeadSnapshot;
 } = {}) {
@@ -271,7 +281,9 @@ export default function LeadsWorkspace({ initialFilter, dashboard = false, initi
     {dashboardView && <p className="helper-banner"><Link href="/">Dashboard</Link><span> / {filter.name || "Dashboard leads"} · Role-scoped results</span></p>}
     <div className="leads-layout">
     <aside className="lead-filter-sidebar" aria-label="Lead search and preferences">
-    <LiveFilterEditor filter={filter} leads={data.leads} stages={data.stages} profiles={data.profiles} modifiers={data.modifiers} picklists={data.configuration.picklists} onChange={changeFilter} />
+    {filter.criteria.some(criterion => criterion.field === "modifiedBy")
+      ? <ModifierFilterEditor filter={filter} leads={data.leads} stages={data.stages} profiles={data.profiles} picklists={data.configuration.picklists} onChange={changeFilter} />
+      : <LiveFilterEditor filter={filter} leads={data.leads} stages={data.stages} profiles={data.profiles} picklists={data.configuration.picklists} onChange={changeFilter} />}
     <section className="panel saved-filter-panel" aria-label="Saved filters">
       <div className="panel-heading"><h2>Saved filters</h2><Save size={14} /></div>
       <div className="saved-filter-controls">

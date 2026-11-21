@@ -5,6 +5,7 @@ import { dbError, enforceDuplicatePolicy, fetchLeadConfiguration, parseLead, val
 import { checkOrigin } from "@/lib/server/login";
 import { fetchLeadPage, fetchLeadPages, queryParameters } from "@/lib/server/lead-query";
 import { fetchLeadListData } from "@/lib/server/lead-list";
+import { fetchLeadModifiers } from "@/lib/server/lead-modifiers";
 
 export async function GET(request: Request) {
   const started = Date.now();
@@ -17,6 +18,10 @@ export async function GET(request: Request) {
       "Cache-Control": "private, no-store",
       "Server-Timing": `auth;dur=${authenticated - started}, data;dur=${Date.now() - authenticated}`,
     } });
+    if (view === "modifiers") {
+      const modifiers = await fetchLeadModifiers(supabase);
+      return respond({ modifiers: modifiers.filter(modifier => modifier.active).map(modifier => modifier.full_name) });
+    }
     const query = queryParameters(params);
     const requestedPageSize = params.has("pageSize") ? Number(params.get("pageSize")) : 50;
     if (![10, 20, 50, 100].includes(requestedPageSize)) throw new HttpError(400, "Choose a page size of 10, 20, 50 or 100.");

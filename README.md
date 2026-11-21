@@ -1090,8 +1090,11 @@ Last Modified filters the most recent editor, while Modified filters the edit da
 Editor options include active, non-deleted editors from the entire accessible
 lead bucket, including editors outside the user's hierarchy, and remain available
 after filtering. Existing filters for unavailable editors still work. The server
-reads only those editor names and filters accessible leads without changing database
-schema; large buckets can take longer. Lead visibility is unchanged. Names are
+loads editor choices separately when the filter is selected, so opening Leads does
+not wait for the bucket-wide lookup. Last Modified-only counts resolve matching
+profile IDs server-side and count leads under the user's access rules without
+transferring lead rows. Combined filters can take longer. No database schema
+change is required. Lead visibility is unchanged. Names are
 matched case-insensitively, so identical profile names cannot be distinguished. Untouched
 means never edited since creation, not never contacted. Unknown edit history
 matches neither untouched nor edited. Untouched date conditions use creation

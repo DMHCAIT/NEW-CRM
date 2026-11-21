@@ -13,6 +13,7 @@ function load(file, dependencies = {}, globals = {}) {
     require: name => name in dependencies ? dependencies[name]
       : name === "@/lib/server/lead-list" ? load("src\\lib\\server\\lead-list.ts", dependencies)
       : name === "@/lib/server/lead-modifiers" ? load("src\\lib\\server\\lead-modifiers.ts", dependencies)
+      : name === "@/lib/lead-filters" ? filters
       : name === "@/lib/supabase/server" ? { getSupabaseAdminClient: () => { throw new Error("Unexpected admin read"); } }
       : require(name), ...globals });
   return exports;
@@ -68,6 +69,28 @@ test("modifier lookups read only scoped leads and resolve their editor names in 
   await assert.rejects(fetchLeadModifiers(client), /Lead lookup failed/);
 });
 
+test("count editor lookup handles profile pagination and historical duplicate names", async () => {
+  const profiles = Array.from({ length: 1001 }, (_, index) => ({
+    id: String(index).padStart(4, "0"), full_name: index % 2 ? "Same Editor" : "Other Editor",
+  }));
+  let reads = 0;
+  const admin = { from(table) {
+    assert.equal(table, "profiles");
+    let after = "";
+    const chain = { select: () => chain, order: () => chain, limit: () => chain,
+      gt(_key, value) { after = value; return chain; },
+      async returns() { reads++; return { data: profiles.filter(row => row.id > after).slice(0, 1000), error: null }; } };
+    return chain;
+  } };
+  const { findMatchingModifierIds } = load("src\\lib\\server\\lead-modifiers.ts", {
+    "@/lib/live-leads": { dbError }, "@/lib/supabase/server": { getSupabaseAdminClient: () => admin },
+  });
+  const result = await findMatchingModifierIds([{ field: "modifiedBy", operator: "is", value: "same editor" }], "all");
+  assert.equal(result.ids.length, 500);
+  assert.equal(result.includeEmpty, false);
+  assert.equal(reads, 2);
+});
+
 test("lead page resolves inaccessible editor profiles only for returned leads", async () => {
   const calls = [];
   const query = load("src\\lib\\server\\lead-query.ts", {
@@ -100,7 +123,13 @@ test("read-only modifier filtering preserves scope, conditions, counts and pagin
   const query = load("src\\lib\\server\\lead-query.ts", {
     "@/lib/server/auth": auth, "@/lib/live-leads": { dbError }, "@/lib/lead-filters": filters,
     "@/lib/crm-data": { LEAD_SELECT: "id", mapLead: row => ({ ...row, modifiedBy: "" }) },
-    "@/lib/server/lead-modifiers": { fetchLeadModifiers: async () => modifierNames },
+    "@/lib/server/lead-modifiers": {
+      fetchLeadModifiers: async () => modifierNames,
+      findMatchingModifierIds: async criteria => ({
+        ids: modifierNames.filter(item => criteria.every(c => filters.matchesTextCriterion(item.full_name, c))).map(item => item.modifier_id),
+        includeEmpty: criteria.every(c => filters.matchesTextCriterion("", c)),
+      }),
+    },
   });
   const client = {
     async rpc(name, args) {
@@ -117,9 +146,14 @@ test("read-only modifier filtering preserves scope, conditions, counts and pagin
     from(table) {
       assert.equal(table, "leads");
       let ids = [];
-      const chain = { select: () => chain, in(_key, values) { ids = values; return chain; }, eq: () => chain,
+      let countOnly = false, modifierIds = null;
+      const chain = { select(_columns, options) { countOnly = Boolean(options?.head); return chain; },
+        in(key, values) { if (key === "modified_by") modifierIds = values; else ids = values; return chain; }, eq: () => chain,
+        is() { modifierIds = [null]; return chain; },
         order: () => chain, limit: () => chain,
-        returns: async () => ({ data: rows.filter(row => ids.includes(row.id)), error: null }) };
+        returns: async () => ({ data: rows.filter(row => ids.includes(row.id)), error: null }),
+        then(resolve) { assert.ok(countOnly); return Promise.resolve({ count: rows.filter(row => modifierIds.includes(row.modified_by)).length, error: null }).then(resolve); },
+      };
       return chain;
     },
   };
@@ -143,6 +177,92 @@ test("read-only modifier filtering preserves scope, conditions, counts and pagin
   assert.deepEqual(normalized((await query.fetchLeadPage(client, { ...any, offset: 98 }, 10)).leads.map(row => row.id)), expectedAny.slice(98, 108));
   const not = makeQuery([{ ...modifier, operator: "is_not" }]);
   assert.equal((await query.fetchLeadPage(client, { ...not, countOnly: true })).total, 103);
+});
+
+test("modifier-only counts use scoped exact counts without transferring lead rows", async () => {
+  const rows = Array.from({ length: 2505 }, (_, i) => ({
+    id: String(i).padStart(4, "0"), modified_by: [null, "outside", "old"][i % 3],
+    assignee_id: i % 2 ? "me" : "other",
+  }));
+  const profiles = [
+    { id: "outside", full_name: "Outside Editor", status: "active", deleted_at: null },
+    { id: "old", full_name: "Former Editor", status: "inactive", deleted_at: null },
+  ];
+  let leadReads = 0, profileReads = 0, failed = false;
+  const admin = { from(table) {
+    assert.equal(table, "profiles");
+    const chain = { select: () => chain, order: () => chain, limit: () => chain,
+      gt: () => chain,
+      returns: async () => { profileReads++; return { data: profiles, error: null }; } };
+    return chain;
+  } };
+  const modifiers = load("src\\lib\\server\\lead-modifiers.ts", {
+    "@/lib/live-leads": { dbError }, "@/lib/supabase/server": { getSupabaseAdminClient: () => admin },
+  });
+  const query = load("src\\lib\\server\\lead-query.ts", {
+    "@/lib/server/auth": auth, "@/lib/live-leads": { dbError }, "@/lib/lead-filters": filters,
+    "@/lib/server/lead-modifiers": modifiers, "@/lib/crm-data": { LEAD_SELECT: "id", mapLead: row => row },
+  });
+  const client = {
+    auth: { getUser: async () => ({ data: { user: { id: "me" } }, error: null }) },
+    rpc: async () => assert.fail("Modifier-only count must not paginate the page RPC"),
+    from(table) {
+      assert.equal(table, "leads");
+      let owner, selected;
+      const chain = { select(_columns, options) { assert.deepEqual(normalized(options), { count: "exact", head: true }); return chain; },
+        eq(key, value) { if (key === "assignee_id") owner = value; return chain; },
+        in(key, ids) { assert.equal(key, "modified_by"); selected = ids; return chain; },
+        is(key, value) { assert.equal(key, "modified_by"); selected = [value]; return chain; },
+        then(resolve) {
+          leadReads++;
+          return Promise.resolve(failed ? { count: null, error: { message: "Scoped count failed" } }
+            : { count: rows.filter(row => selected.includes(row.modified_by) && (!owner || row.assignee_id === owner)).length, error: null }).then(resolve);
+        } };
+      return chain;
+    },
+  };
+  const criterion = (operator, value = "") => ({ id: operator, field: "modifiedBy", operator, value });
+  const count = async (criteria, matchMode = "all", quickView = "All accessible leads") => {
+    leadReads = 0;
+    const result = await query.fetchLeadPage(client, {
+      ...query.queryParameters(new URLSearchParams()), countOnly: true,
+      filter: { ...base().filter, criteria, matchMode, quickView },
+    });
+    return result.total;
+  };
+  assert.equal(await count([criterion("is", "outside editor")]), 835);
+  assert.equal(leadReads, 1, "2,505 leads require one scoped count and no lead-row reads");
+  assert.equal(profileReads, 1);
+  assert.equal(await count([criterion("is_empty")]), 835);
+  assert.equal(await count([criterion("is_not", "Outside Editor")]), 1670);
+  assert.equal(await count([criterion("is", "Former Editor")]), 835);
+  assert.equal(await count([criterion("is_empty"), criterion("is", "Outside Editor")], "any"), 1670);
+  assert.equal(await count([criterion("is", "Outside Editor")], "all", "My Leads"),
+    rows.filter(row => row.assignee_id === "me" && row.modified_by === "outside").length);
+  assert.equal(leadReads, 1);
+  failed = true;
+  await assert.rejects(count([criterion("is", "Outside Editor")]), /Scoped count failed/);
+});
+
+test("modifier-only counts split large editor sets without losing matches", async () => {
+  const ids = Array.from({ length: 201 }, (_, index) => `editor-${index}`);
+  const batches = [];
+  const query = load("src\\lib\\server\\lead-query.ts", {
+    "@/lib/server/auth": auth, "@/lib/live-leads": { dbError }, "@/lib/lead-filters": filters,
+    "@/lib/server/lead-modifiers": { findMatchingModifierIds: async () => ({ ids, includeEmpty: false }) },
+    "@/lib/crm-data": { LEAD_SELECT: "id", mapLead: row => row },
+  });
+  const client = { from() {
+    let selected;
+    const chain = { select: () => chain, eq: () => chain,
+      in(_column, values) { selected = values; batches.push(values); return chain; },
+      then(resolve) { return Promise.resolve({ count: selected.length, error: null }).then(resolve); } };
+    return chain;
+  } };
+  const params = query.queryParameters(new URLSearchParams());
+  const filter = { ...params.filter, criteria: [{ id: "m", field: "modifiedBy", operator: "is", value: "Editor" }] };
+  assert.equal((await query.fetchLeadPage(client, { ...params, filter, countOnly: true })).total, 201);
+  assert.deepEqual(batches.map(batch => batch.length), [100, 100, 1]);
 });
 
 test("lead query parsing rejects malformed filters, cursors, timezone, offsets and unsupported sorts", () => {
@@ -349,6 +469,36 @@ test("pipeline starts stage pages before slow profiles finish and never reads un
   assert.equal("columns" in data, false);
 });
 
+test("editor choices are loaded separately with lead permission and include only active editors", async () => {
+  const scopedClient = {};
+  let allowed = true, reads = 0;
+  const route = load("src\\app\\api\\leads\\route.ts", {
+    "next/server": { NextResponse: Response },
+    "@/lib/crm-data": {}, "@/lib/server/login": {}, "@/lib/live-leads": {},
+    "@/lib/server/auth": { ...auth, requireUser: async permission => {
+      assert.equal(permission, "leads.view");
+      if (!allowed) throw new HttpError(403, "Lead access required");
+      return { user: { id: "actor" }, supabase: scopedClient };
+    } },
+    "@/lib/server/lead-query": {},
+    "@/lib/server/lead-modifiers": { fetchLeadModifiers: async client => {
+      assert.equal(client, scopedClient);
+      reads++;
+      return [
+        { modifier_id: "one", full_name: "Outside editor", active: true },
+        { modifier_id: "two", full_name: "Inactive editor", active: false },
+      ];
+    } },
+  });
+  const response = await route.GET(new Request("https://crm.example/api/leads?view=modifiers"));
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "private, no-store");
+  assert.deepEqual(await response.json(), { modifiers: ["Outside editor"] });
+  allowed = false;
+  assert.equal((await route.GET(new Request("https://crm.example/api/leads?view=modifiers"))).status, 403);
+  assert.equal(reads, 1, "denied callers must not load editor names");
+});
+
 test("shared lead list loader bounds records, scopes preferences to the actor and reports metadata failures", async () => {
   const scopes = [];
   const actor = { id: "actor" };
@@ -370,11 +520,7 @@ test("shared lead list loader bounds records, scopes preferences to the actor an
       fetchProfiles: async supabase => { assert.equal(supabase, client); return []; },
     },
     "@/lib/lead-filters": filters, "@/lib/server/auth": auth,
-    "@/lib/server/lead-modifiers": { fetchLeadModifiers: async () => [
-      { modifier_id: "editor", full_name: "Outside editor", active: true },
-      { modifier_id: "inactive", full_name: "Inactive editor", active: false },
-      { modifier_id: "deleted", full_name: "Deleted editor", active: false },
-    ] },
+    "@/lib/server/lead-modifiers": { fetchLeadModifiers: async () => { throw new Error("Initial page must not scan editors"); } },
     "@/lib/live-leads": { dbError, fetchLeadConfiguration: async supabase => { assert.equal(supabase, client); return { fields: [] }; } },
     "@/lib/server/lead-query": { fetchLeadPage: async (supabase, actualQuery, size) => {
       reads++;
@@ -387,7 +533,7 @@ test("shared lead list loader bounds records, scopes preferences to the actor an
   const result = await fetchLeadListData(client, actor, query, 100);
   assert.equal(result.leads[0].id, "accessible-lead");
   assert.equal(result.user, actor);
-  assert.deepEqual(normalized(result.modifiers), ["Outside editor"]);
+  assert.deepEqual(normalized(result.modifiers), []);
   assert.deepEqual(normalized(result.columns), ["name"]);
   assert.deepEqual(scopes, [
     { table: "saved_filters", key: "owner_id", value: actor.id },
