@@ -14,6 +14,7 @@ function fixture({ missingLead = false, denied = false, errorTable, mailboxError
   const metadataReads = [];
   let mailboxReads = 0;
   let duplicateReads = 0;
+  const modifierReads = [];
   const rows = {
     notes: [{ id: "note", content: "Private note" }],
     emails: [{ id: "email", body: "Private message" }],
@@ -64,6 +65,10 @@ function fixture({ missingLead = false, denied = false, errorTable, mailboxError
       dbError: error => { if (error) throw error; },
     },
     "@/lib/server/login": {},
+    "@/lib/server/lead-modifiers": { fetchLeadModifiers: async (_client, ids) => {
+      modifierReads.push(ids);
+      return [{ modifier_id: "outside", full_name: "Outside Editor" }];
+    } },
     "@/lib/supabase/server": { getSupabaseAdminClient: () => ({}) },
     "@/lib/server/operational-gmail": { currentGmailMailbox: async () => {
       mailboxReads++;
@@ -77,7 +82,7 @@ function fixture({ missingLead = false, denied = false, errorTable, mailboxError
   const api = {};
   new Function("exports", "require", source)(api, name => mocks[name] ?? require(name));
   return {
-    reads, metadataReads, mailboxReads: () => mailboxReads, duplicateReads: () => duplicateReads,
+    reads, metadataReads, modifierReads, mailboxReads: () => mailboxReads, duplicateReads: () => duplicateReads,
     get: suffix => api.GET(new Request(`https://crm.example/api/leads/${id}${suffix}`), { params: Promise.resolve({ id }) }),
   };
 }
@@ -88,6 +93,8 @@ test("initial overview omits note/email bodies, activity and mailbox work while 
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("cache-control"), "private, no-store");
   const data = await response.json();
+  assert.equal(data.lead.modifiedBy, "Outside Editor");
+  assert.deepEqual(f.modifierReads, [[id]]);
   assert.deepEqual(data.counts, { notes: 7, emails: 7 });
   assert.deepEqual(data.notes, []);
   assert.deepEqual(data.emails, []);

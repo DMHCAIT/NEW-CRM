@@ -1086,7 +1086,13 @@ Column widths stay bounded as records change; truncated values are available on 
 Selection cells do not truncate checkboxes. The table header stays flush at the top
 of the scrolling list, and lead-detail navigation uses prominent navy buttons.
 
-Last Modified filters the editor, while Modified filters the edit date. Untouched
+Last Modified filters the most recent editor, while Modified filters the edit date.
+Editor options include active, non-deleted editors from the entire accessible
+lead bucket, including editors outside the user's hierarchy, and remain available
+after filtering. Existing filters for unavailable editors still work. The server
+reads only those editor names and filters accessible leads without changing database
+schema; large buckets can take longer. Lead visibility is unchanged. Names are
+matched case-insensitively, so identical profile names cannot be distinguished. Untouched
 means never edited since creation, not never contacted. Unknown edit history
 matches neither untouched nor edited. Untouched date conditions use creation
 eligibility plus the absence of edits in the requested interval. Legacy names

@@ -212,6 +212,130 @@ async function leadPage(actor, filter = queryFilter([]), options = {}) {
   ])).rows[0].result, options.verified ?? true);
 }
 
+test("read-only modifier filters resolve outside editors without exposing other buckets", async () => {
+  await db.transaction(async tx => {
+    await tx.exec("savepoint modifier_fixture");
+    const manager = "11000000-0000-4000-8000-000000000091";
+    const editor = "11000000-0000-4000-8000-000000000092";
+    const hiddenEditor = "11000000-0000-4000-8000-000000000093";
+    const child = "11000000-0000-4000-8000-000000000094";
+    const inactiveEditor = "11000000-0000-4000-8000-000000000095";
+    const deletedEditor = "11000000-0000-4000-8000-000000000096";
+    const managerSession = "21000000-0000-4000-8000-000000000091";
+    for (const [id, name, role] of [[manager, "Manager", "manager"], [editor, "Outside Editor", "counselor"], [hiddenEditor, "Hidden Editor", "counselor"], [child, "Team subordinate", "counselor"], [inactiveEditor, "Inactive Editor", "counselor"], [deletedEditor, "Deleted Editor", "counselor"]]) {
+      await tx.query("insert into auth.users(id,email) values($1,$2)", [id, `${id}@example.test`]);
+      await tx.query("insert into public.profiles(id,full_name,email,role) values($1,$2,$3,$4)", [id, name, `${id}@example.test`, role]);
+    }
+    await tx.query("update public.profiles set status='inactive' where id=$1", [inactiveEditor]);
+    await tx.query("update public.profiles set deleted_at=now() where id=$1", [deletedEditor]);
+    await tx.query("update public.profiles set reporting_to=$1 where id=$2", [owner, child]);
+    await tx.query("insert into public.login_sessions(session_id,user_id,email) values($1,$2,$3)", [managerSession, manager, `${manager}@example.test`]);
+    const ids = [];
+    for (const [assignee, modifier, archived] of [
+      [outsider, editor, false], [owner, editor, false], [child, editor, false],
+      [manager, editor, false], [admin, hiddenEditor, false], [outsider, hiddenEditor, true],
+      [outsider, inactiveEditor, false], [outsider, deletedEditor, false],
+    ]) {
+      const { rows } = await tx.query(`insert into public.leads(name,phone,created_by,assignee_id,modified_by,is_archived)
+        values('Modifier fixture','+917111111111',$1,$1,$2,$3) returning id`, [assignee, modifier, archived]);
+      ids.push(rows[0].id);
+    }
+
+    const privilegedReads = [];
+    const adminClient = { from(table) {
+      assert.equal(table, "profiles");
+      let selectedIds = [];
+      const chain = { select: () => chain, in(_column, values) { selectedIds = values; return chain; },
+        async returns() {
+          privilegedReads.push(...selectedIds);
+          await tx.exec("reset role");
+          try { return { data: (await tx.query("select id,full_name,status,deleted_at::text from public.profiles where id=any($1::uuid[])", [selectedIds])).rows, error: null }; }
+          finally { await tx.exec("set local role authenticated"); }
+        } };
+      return chain;
+    } };
+    const client = {
+      async rpc(name, args) {
+        assert.equal(name, "crm_lead_page");
+        const { rows } = await tx.query(`select public.crm_lead_page($1::jsonb,$2,$3,$4::timestamptz,$5::uuid,$6,$7,$8,$9,$10,$11::jsonb) result`, [
+          JSON.stringify(args.filter_json), args.timezone_name, args.page_size, args.after_created, args.after_id,
+          args.count_only, args.owner_filter, args.stage_filter, args.sort_key, args.page_offset, JSON.stringify(args.sort_cursor),
+        ]);
+        return { data: rows[0].result, error: null };
+      },
+      from(table) {
+        assert.equal(table, "leads");
+        let selectedIds, after = "", limit = 1000, requireModifier = false;
+        const chain = {
+          select: () => chain, eq: () => chain, order: () => chain,
+          in(_key, values) { selectedIds = values; return chain; },
+          not() { requireModifier = true; return chain; },
+          gt(_key, value) { after = value; return chain; },
+          limit(value, options) { if (!options?.referencedTable) limit = value; return chain; },
+          async returns() {
+            const params = [];
+            let where = "not is_archived";
+            if (selectedIds) { params.push(selectedIds); where += ` and id=any($${params.length}::uuid[])`; }
+            if (after) { params.push(after); where += ` and id > $${params.length}::uuid`; }
+            if (requireModifier) where += " and modified_by is not null";
+            params.push(limit);
+            const { rows } = await tx.query(`select id,modified_by,created_at::text,name,next_followup_at::text
+              from public.leads where ${where} order by id limit $${params.length}`, params);
+            return { data: rows.map(row => ({ ...row, modifier: null })), error: null };
+          },
+        };
+        return chain;
+      },
+    };
+    const load = (file, dependencies) => {
+      const exports = {};
+      const output = ts.transpileModule(readFileSync(join(__dirname, "..", file), "utf8"), {
+        compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021 },
+      }).outputText;
+      new Function("exports", "require", output)(exports, name => dependencies[name]);
+      return exports;
+    };
+    const dbError = error => { if (error) throw error; };
+    class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
+    const modifiers = load("src\\lib\\server\\lead-modifiers.ts", {
+      "@/lib/live-leads": { dbError }, "@/lib/supabase/server": { getSupabaseAdminClient: () => adminClient },
+    });
+    const query = load("src\\lib\\server\\lead-query.ts", {
+      "@/lib/live-leads": { dbError }, "@/lib/server/auth": { HttpError },
+      "@/lib/server/lead-modifiers": modifiers, "@/lib/lead-filters": filterExports,
+      "@/lib/crm-data": { LEAD_SELECT: "id", mapLead: row => ({ ...row, modifiedBy: "" }) },
+    });
+    const filter = queryFilter([{ id: "editor", field: "modifiedBy", operator: "is", value: "Outside Editor" }]);
+    for (const [actor, session, expected] of [[outsider, sessions[outsider], [ids[0]]], [owner, sessions[owner], [ids[1], ids[2]]], [manager, managerSession, [ids[3]]]]) {
+      await tx.exec("set local role authenticated");
+      await tx.query("select set_config('request.jwt.claims',$1,true)", [JSON.stringify({ sub: actor, session_id: session })]);
+      privilegedReads.length = 0;
+      const names = await modifiers.fetchLeadModifiers(client);
+      assert.ok(names.some(row => row.modifier_id === editor && row.active));
+      if (actor === outsider) {
+        assert.ok(names.some(row => row.modifier_id === inactiveEditor && !row.active));
+        assert.ok(names.some(row => row.modifier_id === deletedEditor && !row.active));
+      }
+      assert.ok(!privilegedReads.includes(hiddenEditor));
+      const params = query.queryParameters(new URLSearchParams());
+      const page = await query.fetchLeadPage(client, { ...params, filter }, 50);
+      const visible = (await tx.query("select id,assignee_id from public.leads where id=any($1::uuid[]) and not is_archived", [expected])).rows;
+      assert.equal(visible.length, expected.length, `${actor}: ${JSON.stringify(visible)}`);
+      assert.deepEqual(page.leads.map(row => row.id).sort(), [...expected].sort(), `${actor}: ${JSON.stringify(visible)}`);
+      assert.ok(page.leads.every(row => row.modifiedBy === "Outside Editor"));
+      assert.equal((await query.fetchLeadPage(client, { ...params, filter, countOnly: true })).total, expected.length);
+      if (actor === outsider) {
+        const inactiveFilter = queryFilter([{ id: "editor", field: "modifiedBy", operator: "is", value: "Inactive Editor" }]);
+        const inactivePage = await query.fetchLeadPage(client, { ...params, filter: inactiveFilter }, 50);
+        assert.deepEqual(inactivePage.leads.map(row => row.id), [ids[6]]);
+        assert.equal(inactivePage.leads[0].modifiedBy, "Inactive Editor");
+      }
+      await tx.exec("reset role");
+    }
+    await tx.exec("rollback to savepoint modifier_fixture");
+  });
+});
+
 test("database lead filters match existing text, choice, date and untouched semantics", async () => {
   const stage = (await db.query("select id,name from public.lead_stages order by sort_order limit 1")).rows[0];
   const raw = [];

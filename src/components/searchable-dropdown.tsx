@@ -17,6 +17,7 @@ type SharedProps = {
   required?: boolean;
   openDirection?: "auto" | "down";
   optionsMaxHeight?: number;
+  showMissingValues?: boolean;
 };
 type SingleSelectProps = SharedProps & {
   multiple?: false;
@@ -40,9 +41,9 @@ export function SearchableDropdown(props: SingleSelectProps | MultiSelectProps) 
   const [position, setPosition] = useState<{ left: number; top?: number; bottom?: number; width: number; maxHeight: number } | null>(null);
   const listboxId = useId();
   const selectedValues = props.multiple ? props.value : props.value ? [props.value] : [];
-  const selectedLabels = props.options
-    .filter((option) => selectedValues.includes(option.value))
-    .map((option) => option.label);
+  const selectedLabels = props.showMissingValues
+    ? selectedValues.map(value => props.options.find(option => option.value === value)?.label ?? `${value} (unavailable)`)
+    : props.options.filter((option) => selectedValues.includes(option.value)).map((option) => option.label);
   const triggerLabel = props.multiple
     ? selectedLabels.length ? selectedLabels.join(", ") : props.placeholder
     : selectedLabels[0] ?? props.placeholder;

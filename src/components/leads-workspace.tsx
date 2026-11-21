@@ -271,7 +271,7 @@ export default function LeadsWorkspace({ initialFilter, dashboard = false, initi
     {dashboardView && <p className="helper-banner"><Link href="/">Dashboard</Link><span> / {filter.name || "Dashboard leads"} · Role-scoped results</span></p>}
     <div className="leads-layout">
     <aside className="lead-filter-sidebar" aria-label="Lead search and preferences">
-    <LiveFilterEditor filter={filter} leads={data.leads} stages={data.stages} profiles={data.profiles} picklists={data.configuration.picklists} onChange={changeFilter} />
+    <LiveFilterEditor filter={filter} leads={data.leads} stages={data.stages} profiles={data.profiles} modifiers={data.modifiers} picklists={data.configuration.picklists} onChange={changeFilter} />
     <section className="panel saved-filter-panel" aria-label="Saved filters">
       <div className="panel-heading"><h2>Saved filters</h2><Save size={14} /></div>
       <div className="saved-filter-controls">

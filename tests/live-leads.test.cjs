@@ -14,6 +14,7 @@ function load(path, dependencies = {}) {
     exports, require: (name) => name in dependencies ? dependencies[name] :
       name === "@/lib/server/login" ? { checkOrigin: () => {} } :
       name === "@/lib/server/operational-gmail" ? { currentGmailMailbox: async () => null } :
+      name === "@/lib/server/lead-modifiers" ? { fetchLeadModifiers: async () => [] } :
       name === "@/lib/server/telecmi" ? { initiateTelecmiCall: async () => assert.fail("Unexpected TeleCMI call in an unrelated action test") } :
       name === "@/lib/email-signature-policy" ? load("src\\lib\\email-signature-policy.ts", dependencies) :
       name === "@/lib/note-images" ? load("src\\lib\\note-images.ts") :

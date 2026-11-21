@@ -4614,6 +4614,38 @@ test("live filter menus use real configuration, multi-select values and safe fie
   assert.equal(current.criteria.length, 0);
 });
 
+test("last modified options include editors from the whole accessible bucket", () => {
+  let current = { ...filter, criteria: [{ id: "editor", field: "modifiedBy", operator: "is", value: "Outside editor" }] };
+  const menu = () => elements(actualLeads.LiveFilterEditor({
+    filter: current, leads: [{ ...lead, modifiedBy: "Outside editor" }], profiles: [profile],
+    modifiers: ["Outside editor", "Another editor"], onChange: next => { current = next; },
+  })).find(node => node.props?.ariaLabel === "Filter value");
+  const options = menu().props.options.map(option => option.value);
+  assert.ok(options.includes("Outside editor"));
+  assert.ok(options.includes("Another editor"));
+  menu().props.onChange("Another editor");
+  assert.equal(current.criteria[0].value, "Another editor");
+});
+
+test("last modified choices exclude unavailable editors without discarding saved selections", () => {
+  let current = { ...filter, criteria: [{ id: "editor", field: "modifiedBy", operator: "is", value: "Inactive editor" }] };
+  const render = () => elements(actualLeads.LiveFilterEditor({
+    filter: current, leads: [{ ...lead, modifiedBy: "Inactive editor" }],
+    modifiers: ["Active editor"], onChange: next => { current = next; },
+  }));
+  let menu = render().find(node => node.props?.ariaLabel === "Filter value");
+  assert.deepEqual(menu.props.options.map(option => option.value), ["Active editor"]);
+  assert.equal(menu.props.value, "Inactive editor");
+  const Dropdown = load("src\\components\\searchable-dropdown.tsx").SearchableDropdown;
+  assert.match(renderToStaticMarkup(React.createElement(Dropdown, menu.props)), /Inactive editor \(unavailable\)/);
+  current = { ...current, criteria: [{ ...current.criteria[0], operator: "in", value: "Inactive editor\nActive editor" }] };
+  let nodes = render();
+  menu = nodes.find(node => node.props?.ariaLabel === "Filter values");
+  assert.deepEqual(menu.props.options.map(option => option.value), ["Active editor"]);
+  nodes.find(node => node.type === "button" && Array.isArray(node.props.children) && node.props.children.includes("Inactive editor")).props.onClick();
+  assert.equal(current.criteria[0].value, "Active editor");
+});
+
 test("every filter field and operator remains available through searchable menus", () => {
   const filters = load("src\\lib\\lead-filters.ts");
   for (const field of filters.FILTER_FIELDS) {

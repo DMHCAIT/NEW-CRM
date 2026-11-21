@@ -272,6 +272,13 @@ function matchesCriterion(lead: Lead, criterion: FilterCriterion, now: Date) {
     if (criterion.operator === "is_not") return date !== expected;
     return date === expected;
   }
+  return matchesTextCriterion(actual, criterion);
+}
+
+export function matchesTextCriterion(actual: string, criterion: FilterCriterion) {
+  if (criterion.operator === "is_empty") return actual.trim() === "";
+  if (criterion.operator === "is_not_empty") return actual.trim() !== "";
+  const expected = criterion.value.trim();
   const isPhone = criterion.field === "phone";
   const normalized = isPhone ? actual.replace(/\D/g, "") : actual.trim().toLocaleLowerCase();
   const value = isPhone ? expected.replace(/\D/g, "") : expected.toLocaleLowerCase();

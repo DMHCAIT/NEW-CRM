@@ -1,8 +1,9 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { LEAD_SELECT, mapLead, type LeadRow } from "@/lib/crm-data";
-import { criterionError, dateRange, isSavedLeadFilter, localDateKey, type SavedLeadFilter } from "@/lib/lead-filters";
+import { criterionError, dateRange, isSavedLeadFilter, localDateKey, matchesTextCriterion, type SavedLeadFilter } from "@/lib/lead-filters";
 import { HttpError } from "@/lib/server/auth";
 import { dbError } from "@/lib/live-leads";
+import { fetchLeadModifiers } from "@/lib/server/lead-modifiers";
 
 export const DEFAULT_FILTER: SavedLeadFilter = {
   id: "", name: "", criteria: [], matchMode: "all", query: "", quickView: "All accessible leads",
@@ -69,7 +70,7 @@ export function databaseFilter(filter: SavedLeadFilter, timezone: string, dashbo
 
 type LeadPageIds = Omit<LeadPage, "leads"> & { ids: string[] };
 
-async function fetchLeadPageIds(client: SupabaseClient, query: LeadQuery, pageSize: number): Promise<LeadPageIds> {
+async function fetchDatabaseLeadPageIds(client: SupabaseClient, query: LeadQuery, pageSize: number): Promise<LeadPageIds> {
   const { data, error } = await client.rpc("crm_lead_page", {
     filter_json: databaseFilter(query.filter, query.dashboard ? "UTC" : query.timezone, query.dashboard),
     timezone_name: query.dashboard ? "UTC" : query.timezone,
@@ -92,6 +93,76 @@ async function fetchLeadPageIds(client: SupabaseClient, query: LeadQuery, pageSi
   } : null };
 }
 
+type ModifierCandidate = { id: string; modified_by: string | null; created_at: string; name: string; next_followup_at: string | null };
+
+async function fetchLeadPageIds(client: SupabaseClient, query: LeadQuery, pageSize: number): Promise<LeadPageIds> {
+  const modifierCriteria = query.filter.criteria.filter(criterion => criterion.field === "modifiedBy");
+  if (!modifierCriteria.length) return fetchDatabaseLeadPageIds(client, query, pageSize);
+
+  const otherCriteria = query.filter.criteria.filter(criterion => criterion.field !== "modifiedBy");
+  const scanQuery: LeadQuery = {
+    ...query, countOnly: false, offset: 0,
+    filter: { ...query.filter, criteria: query.filter.matchMode === "all" ? otherCriteria : [] },
+  };
+  const modifiers = await fetchLeadModifiers(client);
+  const names = new Map(modifiers.map(modifier => [modifier.modifier_id, modifier.full_name]));
+  const otherMatches = new Set<string>();
+  if (query.filter.matchMode === "any" && otherCriteria.length) {
+    let cursor = query.cursor;
+    for (;;) {
+      const page = await fetchDatabaseLeadPageIds(client, {
+        ...scanQuery, cursor, filter: { ...query.filter, criteria: otherCriteria },
+      }, 100);
+      page.ids.forEach(id => otherMatches.add(id));
+      if (!page.hasMore) break;
+      if (!page.nextCursor || page.nextCursor.id === cursor?.id) throw new HttpError(500, "Lead filter pagination did not advance.");
+      cursor = page.nextCursor;
+    }
+  }
+
+  const matched: ModifierCandidate[] = [];
+  let total = 0;
+  let cursor = query.cursor;
+  for (;;) {
+    const page = await fetchDatabaseLeadPageIds(client, { ...scanQuery, cursor }, 100);
+    if (page.ids.length) {
+      const { data, error } = await client.from("leads").select("id,modified_by,created_at,name,next_followup_at")
+        .in("id", page.ids).eq("is_archived", false).returns<ModifierCandidate[]>();
+      dbError(error);
+      if (!Array.isArray(data)) throw new HttpError(500, "Invalid lead filter response.");
+      const missing = data.filter(row => row.modified_by && !names.has(row.modified_by)).map(row => row.id);
+      if (missing.length) {
+        const updated = await fetchLeadModifiers(client, missing);
+        updated.forEach(modifier => names.set(modifier.modifier_id, modifier.full_name));
+      }
+      const rows = new Map(data.map(row => [row.id, row]));
+      for (const id of page.ids) {
+        const row = rows.get(id);
+        if (!row) continue;
+        const name = row.modified_by ? names.get(row.modified_by) : "";
+        if (name === undefined) throw new HttpError(409, "Lead editors changed while filtering. Refresh and try again.");
+        const matches = query.filter.matchMode === "all"
+          ? modifierCriteria.every(criterion => matchesTextCriterion(name, criterion))
+          : otherMatches.has(id) || modifierCriteria.some(criterion => matchesTextCriterion(name, criterion));
+        if (!matches) continue;
+        total++;
+        if (!query.countOnly && total > query.offset) matched.push(row);
+        if (!query.countOnly && matched.length > pageSize) break;
+      }
+    }
+    if ((!query.countOnly && matched.length > pageSize) || !page.hasMore) break;
+    if (!page.nextCursor || page.nextCursor.id === cursor?.id) throw new HttpError(500, "Lead filter pagination did not advance.");
+    cursor = page.nextCursor;
+  }
+  if (query.countOnly) return { ids: [], hasMore: false, nextCursor: null, total };
+  const hasMore = matched.length > pageSize;
+  const last = matched[pageSize - 1];
+  return {
+    ids: matched.slice(0, pageSize).map(row => row.id), hasMore,
+    nextCursor: hasMore ? { id: last.id, createdAt: last.created_at, name: last.name, followUpAt: last.next_followup_at } : null,
+  };
+}
+
 export async function fetchLeadPages(client: SupabaseClient, queries: LeadQuery[], pageSize = 25, options: { latestNote?: boolean } = {}): Promise<LeadPage[]> {
   const pages = await Promise.all(queries.map(query => fetchLeadPageIds(client, query, pageSize)));
   const ids = [...new Set(pages.flatMap(page => page.ids))];
@@ -107,8 +178,16 @@ export async function fetchLeadPages(client: SupabaseClient, queries: LeadQuery[
       .limit(1, { referencedTable: "latest_note" });
     const result = await request.returns<(LeadRow & { latest_note?: { content: string }[] })[]>();
     dbError(result.error);
+    const missingModifierIds = (result.data ?? []).filter(row => row.modified_by && !mapLead(row).modifiedBy).map(row => row.id);
+    const modifiers = missingModifierIds.length ? await fetchLeadModifiers(client, missingModifierIds) : [];
+    const modifierNames = new Map(modifiers.map(modifier => [modifier.modifier_id, modifier.full_name]));
     return (result.data ?? []).map(row => {
       const lead = mapLead(row);
+      if (row.modified_by && !lead.modifiedBy) {
+        const name = modifierNames.get(row.modified_by);
+        if (name === undefined) throw new HttpError(409, "Lead editors changed while loading. Refresh and try again.");
+        lead.modifiedBy = name;
+      }
       if (!options.latestNote) return lead;
       const note = row.latest_note?.[0];
       return { ...lead, latestNote: note ? note.content || "Image attachment" : undefined };

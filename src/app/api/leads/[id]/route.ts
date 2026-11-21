@@ -5,6 +5,7 @@ import { dbError, fetchLeadConfiguration, parseLead, uuid, validateCustomFields 
 import { checkOrigin } from "@/lib/server/login";
 import { getSupabaseAdminClient } from "@/lib/supabase/server";
 import { currentGmailMailbox } from "@/lib/server/operational-gmail";
+import { fetchLeadModifiers } from "@/lib/server/lead-modifiers";
 
 type Context = { params: Promise<{ id: string }> };
 type SavedLead = LeadRow & { custom_fields: Record<string, string>; call_schedule_revision: number };
@@ -32,7 +33,7 @@ export async function GET(request: Request, context: Context) {
     if (!lead || lead.isArchived || (accountsReader && (lead.mergedIntoId
       || !["closed won", "already enrolled"].includes(lead.stage.toLowerCase())))) throw new HttpError(404, "Lead not found.");
     const leadLoaded = Date.now();
-    const [stages, profiles, notes, activities, emails, configuration, extras, mailbox, scheduledCalls, duplicates, noteCount, emailCount] = await Promise.all([
+    const [stages, profiles, notes, activities, emails, configuration, extras, mailbox, scheduledCalls, duplicates, noteCount, emailCount, modifiers] = await Promise.all([
       includeMetadata ? fetchStages(supabase) : undefined, includeMetadata ? fetchProfiles(supabase) : undefined,
       all || section === "note" ? supabase.from("notes").select("id,content,created_at,user_id,images:note_images(id,filename)").eq("lead_id", id).order("created_at", { ascending: false }) : { data: [], error: null },
       withActivities ? supabase.from("activities").select("id,type,description,meta,created_at,user_id").eq("lead_id", id).order("created_at", { ascending: false }) : { data: [], error: null },
@@ -49,7 +50,9 @@ export async function GET(request: Request, context: Context) {
       accountsReader ? { data: [], error: null } : supabase.rpc("lead_duplicate_owners", { lead_id: id }),
       all || section === "note" ? null : supabase.from("notes").select("id", { count: "exact", head: true }).eq("lead_id", id),
       all || section === "email" ? null : supabase.from("emails").select("id", { count: "exact", head: true }).eq("lead_id", id),
+      !accountsReader && !lead.modifiedBy ? fetchLeadModifiers(supabase, [id]) : [],
     ]);
+    if (modifiers.length) lead.modifiedBy = modifiers[0].full_name;
     for (const [key, result] of [["note", notes], ["history", activities], ["email", emails]] as const) {
       if (workspace && result.error) {
         console.error(`Could not prepare lead ${key}`, result.error);

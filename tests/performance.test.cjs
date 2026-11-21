@@ -153,7 +153,7 @@ test("operational screens render completed intent data immediately and consume i
 test("lead typing and pagination request records only while metadata is fresh; refresh reloads metadata", async () => {
   let time = 1000;
   const reads = [];
-  const metadata = { leads: [{ id: "initial" }], stages: ["stage"], profiles: ["owner"], configuration: {}, user: { id: "owner" } };
+  const metadata = { leads: [{ id: "initial" }], stages: ["stage"], profiles: ["owner"], modifiers: ["First editor", "Another editor"], configuration: {}, user: { id: "owner" } };
   const page = { leads: [{ id: "match" }], hasMore: false, nextCursor: null };
   const api = client(async path => {
     reads.push(path);
@@ -169,6 +169,7 @@ test("lead typing and pagination request records only while metadata is fresh; r
   const result = await loadLeadListData(path, { maxAgeMs: 30000 });
   assert.equal(result.leads[0].id, "match");
   assert.deepEqual(result.profiles, metadata.profiles);
+  assert.deepEqual(result.modifiers, metadata.modifiers, "filtering must retain all bucket-wide editor choices");
   assert.equal(new URL(reads.at(-1), "http://crm.test").searchParams.get("metadata"), "0");
   await loadLeadListData(path, { maxAgeMs: 30000 });
   assert.equal(reads.length, 2, "repeat searches reuse their paginated response");
@@ -1064,6 +1065,7 @@ test("API handlers still reject missing, revoked, inactive and unauthorized sess
       "@/lib/server/auth": auth, "@/lib/crm-data": {},
       "@/lib/live-leads": {}, "@/lib/server/login": {}, "@/lib/lead-filters": {},
       "@/lib/server/lead-query": {},
+      "@/lib/server/lead-modifiers": { fetchLeadModifiers: async () => { throw new Error("Unauthorized modifier access"); } },
     });
     const response = await route.GET(new Request("https://crm.example/api/leads"));
     assert.equal(response.status, expected);

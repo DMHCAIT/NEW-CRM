@@ -12,7 +12,7 @@ import { DEFAULT_LEAD_PICKLISTS, type LeadPicklistKey } from "@/lib/lead-picklis
 import type { LeadCursor, LeadPage } from "@/lib/server/lead-query";
 
 export type LiveLeadData = {
-  leads: Lead[]; stages: StageRow[]; profiles: Profile[]; user: CurrentUser;
+  leads: Lead[]; stages: StageRow[]; profiles: Profile[]; modifiers: string[]; user: CurrentUser;
   filters: { id: string; name: string; filter_json: SavedLeadFilter; pinned_to_dashboard: boolean }[];
   columns: string[] | null;
   configuration: LeadConfiguration;
@@ -245,9 +245,9 @@ export function emptyFilter(): SavedLeadFilter {
   return { id: "", name: "", criteria: [], matchMode: "all", query: "", quickView: "All accessible leads" };
 }
 
-export function LiveFilterEditor({ filter, onChange, leads, stages = [], profiles = [], picklists = DEFAULT_LEAD_PICKLISTS }: {
+export function LiveFilterEditor({ filter, onChange, leads, stages = [], profiles = [], modifiers = [], picklists = DEFAULT_LEAD_PICKLISTS }: {
   filter: SavedLeadFilter; onChange: (filter: SavedLeadFilter) => void; leads: Lead[];
-  stages?: StageRow[]; profiles?: Profile[];
+  stages?: StageRow[]; profiles?: Profile[]; modifiers?: string[];
   picklists?: LeadConfiguration["picklists"];
 }) {
   const addCondition = () => onChange({ ...filter, criteria: [...filter.criteria, { id: crypto.randomUUID(), field: "stage", operator: "is", value: "" }] });
@@ -271,9 +271,11 @@ export function LiveFilterEditor({ filter, onChange, leads, stages = [], profile
       };
       const configured = fieldKey === "recentVisitSource" ? [...RECENT_VISIT_SOURCES] : fieldKey === "stage" ? stages.map(stage => stage.name)
         : fieldKey === "assignee" ? profiles.map(profile => profile.fullName)
+          : fieldKey === "modifiedBy" ? modifiers
           : picklistKey[fieldKey] ? picklists[picklistKey[fieldKey]!] ?? DEFAULT_LEAD_PICKLISTS[picklistKey[fieldKey]!] : [];
-      const values = fieldKey === "untouched" || fieldKey === "recentVisitSource" ? [] : leads.map(lead => String(lead[fieldKey] ?? ""));
-      const options = (fieldKey === "recentVisitSource" ? [...RECENT_VISIT_SOURCES] : [...new Set([...configured, ...values, ...selectedValues].filter(Boolean))].sort()).map(value => ({ value, label: value }));
+      const values = fieldKey === "untouched" || fieldKey === "recentVisitSource" || fieldKey === "modifiedBy" ? [] : leads.map(lead => String(lead[fieldKey] ?? ""));
+      const options = (fieldKey === "recentVisitSource" ? [...RECENT_VISIT_SOURCES] : [...new Set([...configured, ...values, ...(fieldKey === "modifiedBy" ? [] : selectedValues)].filter(Boolean))].sort()).map(value => ({ value, label: value }));
+      const unavailableModifiers = fieldKey === "modifiedBy" ? selectedValues.filter(value => !modifiers.includes(value)) : [];
       const operators = operatorsForField(c.field);
       if (!operators.some(operator => operator.value === c.operator)) operators.push({ value: c.operator, label: c.operator.replaceAll("_", " ") });
       const patch = (value: Partial<typeof c>) => onChange({ ...filter, criteria: filter.criteria.map((item) => item.id === c.id ? { ...item, ...value } : item) });
@@ -291,8 +293,9 @@ export function LiveFilterEditor({ filter, onChange, leads, stages = [], profile
         {operatorNeedsValue(c.operator) && <>
           {kind === "choice" && ["is", "is_not", "in", "not_in"].includes(c.operator)
             ? ["in", "not_in"].includes(c.operator)
-              ? <SearchableDropdown multiple ariaLabel="Filter values" placeholder="Choose values" value={selectedValues} options={options} onChange={values => patch({ value: values.join("\n") })} />
-              : <SearchableDropdown ariaLabel="Filter value" placeholder="Choose a value" value={c.value} options={options} onChange={value => patch({ value })} />
+              ? <><SearchableDropdown multiple ariaLabel="Filter values" placeholder="Choose values" value={selectedValues} options={options} showMissingValues={fieldKey === "modifiedBy"} onChange={values => patch({ value: values.join("\n") })} />
+                {unavailableModifiers.map(value => <button type="button" className="text-link" key={value} onClick={() => patch({ value: selectedValues.filter(selected => selected !== value).join("\n") })}>Remove unavailable editor: {value}</button>)}</>
+              : <SearchableDropdown ariaLabel="Filter value" placeholder="Choose a value" value={c.value} options={options} showMissingValues={fieldKey === "modifiedBy"} onChange={value => patch({ value })} />
             : ["in", "not_in"].includes(c.operator) ? <textarea aria-label="Filter values, one per line" placeholder="One value per line" value={c.value} onChange={event => patch({ value: event.target.value })} />
             : <input className="filter-value-input" aria-label="Filter value" placeholder={kind === "date" || kind === "boolean" ? undefined : "Enter a value"} type={["last_days", "next_days"].includes(c.operator) ? "number" : kind === "date" || kind === "boolean" ? "date" : "text"} min={["last_days", "next_days"].includes(c.operator) ? 1 : undefined} value={c.value} onChange={(e) => patch({ value: e.target.value })} />}
         </>}
