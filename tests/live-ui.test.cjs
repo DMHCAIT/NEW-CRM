@@ -1214,6 +1214,24 @@ test("import skips rows missing phone or email @ and accepts any non-empty email
   assert.equal(ui.downloads[0].duplicate_rows, 5);
 });
 
+test("import skips overlong normalized phones before duplicate checks without blocking valid rows", async () => {
+  const ui = importHarness({ parsedRows: [
+    { name: "Minimum", phone: "1234567", email: "min@example.test", assignee: user.email },
+    { name: "Maximum", phone: "+123456789012345", countryCode: "India (+91)", email: "max@example.test", assignee: user.email },
+    { name: "Too long", phone: "+1234567890123456", email: "shared@example.test", assignee: user.email },
+    { name: "Country code makes it too long", phone: "81234567890123", countryCode: "India (+91)", email: "prefix@example.test", assignee: user.email },
+    { name: "Valid repeated email", phone: "9876543210", countryCode: "India (+91)", email: "shared@example.test", assignee: user.email },
+  ] });
+  await ui.read();
+  const tree = ui.render();
+  assert.match(renderToStaticMarkup(tree), /2 rows skipped \(2 with missing or invalid required lead fields\)/);
+  const check = ui.requests.find(request => request.body?.checkOnly);
+  assert.deepEqual(check.body.rows.map(row => row.phone), ["+1234567", "+123456789012345", "+919876543210"]);
+  await elements(tree).find(node => node.type === "button" && node.props.children === "Import validated leads").props.onClick();
+  assert.equal(ui.requests.find(request => request.body?.importId).body.rows.length, 3);
+  assert.equal(ui.downloads[0].duplicate_rows, 2);
+});
+
 test("import ignores invalid optional values and imports remaining lead fields", async () => {
   const ui = importHarness({ parsedRows: [{
     name: "Before bad cells", phone: "880987650009", email: "before@example.test", assignee: user.email,

@@ -147,7 +147,11 @@ again at confirmation. Archived and merged leads cannot be enabled.
 Apply migrations through `202611110006_lead_import_history.sql`. CSV and XLSX uploads
 support up to 200,000 leads and 50 MB, with 5,000-row API batches. Email, name and
 phone are required; country code remains optional. Phone values from every source
-are stored with a leading `+`; an omitted country code is not guessed. The migration
+are stored with a leading `+`; an omitted country code is not guessed. After applying
+the country code, phone numbers must have 7 to 15 digits. Rows outside this range
+are skipped during preview, before duplicate checks, and included in skipped counts.
+Errors referring to a batch row number identify a position in the submitted batch,
+not the original spreadsheet row. The migration
 also adds `+` to existing unprefixed phone values without marking them as user edits.
 An empty or omitted stage defaults to the active **Fresh** stage, regardless of
 stage order. Valid supplied stages are preserved. If Fresh is not active, the

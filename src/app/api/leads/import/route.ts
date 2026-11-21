@@ -34,7 +34,7 @@ export async function POST(request: Request) {
         if (!body.checkOnly && row.assignee_id && row.assignee_id !== user.id && !user.permissions.includes("leads.assign")) throw new Error("Assignment permission required.");
         if (!body.checkOnly && !row.assignee_id) throw new Error("Choose an assignee for every imported lead.");
         return { ...row, note: typeof note === "string" ? note.trim() : "", created_by: user.id, modified_by: user.id };
-      } catch (error) { throw new HttpError(400, `Row ${index + 2}: ${error instanceof Error ? error.message : "Invalid lead"}`); }
+      } catch (error) { throw new HttpError(400, `Batch row ${index + 1}: ${error instanceof Error ? error.message : "Invalid lead"}`); }
     });
     if (clearedCells) console.warn("Lead import cleared invalid optional cells", { count: clearedCells });
     if (body.checkOnly) {

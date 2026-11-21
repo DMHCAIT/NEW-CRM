@@ -985,6 +985,22 @@ test("duplicate precheck preserves a confirmed database timeout for batch splitt
   assert.match(await response.text(), /canceling statement due to statement timeout/);
 });
 
+test("import validation identifies positions as batch rows rather than spreadsheet rows", async () => {
+  const route = load("src\\app\\api\\leads\\import\\route.ts", {
+    "next/server": { NextResponse: Response },
+    "@/lib/live-leads": { ...validation, fetchLeadConfiguration: async () => ({ fields: [], picklists: picklists.DEFAULT_LEAD_PICKLISTS }) },
+    "@/lib/server/auth": { ...auth, requireUser: async () => ({
+      user: { id: "00000000-0000-4000-8000-000000000001", permissions: ["leads.import", "leads.create"] },
+      supabase: {},
+    }) },
+  });
+  const response = await route.POST(new Request("http://localhost/api/leads/import", {
+    method: "POST", body: JSON.stringify({ checkOnly: true, rows: [validLead, { ...validLead, phone: "+1234567890123456" }] }),
+  }));
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /^Batch row 2: /);
+});
+
 test("lead import clears only invalid optional cells and retains valid values in the same columns", async () => {
   let rpcRows;
   const route = load("src\\app\\api\\leads\\import\\route.ts", {
