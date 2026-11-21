@@ -3264,6 +3264,38 @@ test("new leads expose an optional next follow-up and submit the selected local 
   assert.equal(submissions[1].followUpAt, null);
 });
 
+test("eligible duplicate enable asks for a stage and submits the existing lead", async () => {
+  const initial = { ...actualLeads.leadDraft(), email: "match@example.test" };
+  const matches = [{ match_field: "email", lead_id: "sales-lead", lead_name: null, assignee: "DMHCA Sales", in_bucket: false }];
+  const states = [initial, matches, null, "", JSON.stringify([initial.phone, initial.countryCode, initial.email])];
+  const enabled = [];
+  let index = 0;
+  const Component = load("src\\lib\\live-leads-client.tsx", { "@/lib/crm-data": crm, react: {
+    ...React, useEffect() {}, useState(value) {
+      const key = index++;
+      if (!(key in states)) states[key] = typeof value === "function" ? value() : value;
+      return [states[key], value => { states[key] = typeof value === "function" ? value(states[key]) : value; }];
+    },
+  } }).LeadForm;
+  const render = canEnable => {
+    index = 0;
+    return elements(Component({ initial, stages: [{ ...stages[0], is_active: true }], profiles: [profile], canAssign: true,
+      newLead: true, busy: false, canEnable, onSave: async () => {}, onEnable: async (...args) => enabled.push(args) }));
+  };
+  const button = (nodes, text) => nodes.find(node => node.type === "button" && node.props.children === text);
+  assert.equal(button(render(false), "Enable"), undefined);
+  button(render(true), "Enable").props.onClick();
+  let nodes = render(true);
+  assert.equal(button(nodes, "Confirm enable").props.disabled, true);
+  nodes.find(node => node.type === "select" && node.props.id === "enable-stage-email").props.onChange({ target: { value: "stage-1" } });
+  nodes = render(true);
+  assert.equal(button(nodes, "Confirm enable").props.disabled, false);
+  button(nodes, "Confirm enable").props.onClick();
+  assert.deepEqual(enabled, [["sales-lead", "stage-1", initial]]);
+  nodes.find(node => node.type === "input" && node.props.id === "lead-email").props.onChange({ target: { value: "new@example.test" } });
+  assert.equal(button(render(true), "Enable"), undefined, "stale duplicate results are hidden");
+});
+
 test("dedicated lead creation saves, confirms duplicates and surfaces failures", async (t) => {
   const previousConfirm = global.confirm;
   t.after(() => { if (previousConfirm === undefined) delete global.confirm; else global.confirm = previousConfirm; });

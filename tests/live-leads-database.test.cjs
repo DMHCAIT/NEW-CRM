@@ -56,6 +56,72 @@ async function asUser(id, callback, verified = true) {
   });
 }
 
+test("team leads can enable only matching out-of-bucket DMHCA Sales leads without running stage assignment", async () => {
+  await db.transaction(async tx => {
+    await tx.exec("savepoint enable_fixture");
+    const sales = "11000000-0000-4000-8000-000000000090";
+    await tx.query("insert into auth.users(id,email) values($1,'sales@example.test')", [sales]);
+    await tx.query("insert into public.profiles(id,full_name,email,role) values($1,'DMHCA Sales','sales@example.test','counselor')", [sales]);
+    await tx.query("update public.crm_settings set value = value || '{\"duplicateFields\":\"phone_email\"}'::jsonb where setting_key='lead_configuration'");
+    const stages = (await tx.query("select id,name from public.lead_stages where name in ('Fresh','Cold','Junk')")).rows;
+    const stage = name => stages.find(row => row.name === name).id;
+    await tx.query("update public.lead_assignment_automations set enabled=true,strategy='round_robin',owner_ids=array[$1::uuid,$2::uuid],next_owner_index=0 where rule_key in ('cold','junk')", [sales, outsider]);
+    const lead = (await tx.query(`insert into public.leads(name,phone,email,stage_id,assignee_id,created_by)
+      values('Enable fixture','7070707070','enable-fixture@example.test',$1,$2,$2) returning id`, [stage("Fresh"), sales])).rows[0].id;
+    const call = async (actor, sql, args, verified = true) => {
+      await tx.exec("savepoint enable_call");
+      try {
+        await tx.exec("set local role authenticated");
+        await tx.query("select set_config('request.jwt.claims',$1,true)", [JSON.stringify({ sub: actor, session_id: verified ? sessions[actor] : "21000000-0000-4000-8000-000000000099" })]);
+        const result = await tx.query(sql, args);
+        await tx.exec("reset role");
+        await tx.exec("release savepoint enable_call");
+        return result;
+      } catch (error) {
+        await tx.exec("rollback to savepoint enable_call");
+        await tx.exec("release savepoint enable_call");
+        throw error;
+      }
+    };
+    const lookup = "select * from public.find_live_lead_duplicates('', $1, '')";
+    const enable = "select public.enable_sales_lead($1,$2,'',$3) as id";
+    const email = "enable-fixture@example.test";
+    const match = (await call(owner, lookup, [email])).rows[0];
+    assert.equal(match.lead_id, lead);
+    assert.equal(match.lead_name, null);
+    assert.equal(match.in_bucket, false);
+    assert.equal((await call(outsider, lookup, [email])).rows[0].lead_id, null);
+    await assert.rejects(call(outsider, enable, [lead, stage("Cold"), email]), /team lead/);
+    await assert.rejects(call(owner, enable, [lead, stage("Cold"), email], false), /team lead/);
+    await assert.rejects(call(owner, enable, [lead, stage("Cold"), "other@example.test"]), /no longer matches/);
+    await assert.rejects(call(owner, enable, [hidden, stage("Cold"), email]), /no longer available/);
+    await assert.rejects(call(owner, enable, [lead, "00000000-0000-4000-8000-000000000000", email]), /active CRM stage/);
+    await tx.query("select set_config('request.jwt.claims','{}',true)");
+    await tx.query("update public.leads set is_archived=true where id=$1", [lead]);
+    assert.equal((await call(owner, lookup, [email])).rows[0].lead_id, null);
+    await assert.rejects(call(owner, enable, [lead, stage("Cold"), email]), /no longer available/);
+    await tx.query("select set_config('request.jwt.claims','{}',true)");
+    await tx.query("update public.leads set is_archived=false where id=$1", [lead]);
+    assert.equal((await call(owner, enable, [lead, stage("Cold"), email])).rows[0].id, lead);
+    const saved = (await tx.query("select assignee_id,stage_id,modified_by from public.leads where id=$1", [lead])).rows[0];
+    assert.deepEqual(saved, { assignee_id: owner, stage_id: stage("Cold"), modified_by: owner });
+    assert.equal((await tx.query("select count(*)::int as count from public.lead_enable_operations")).rows[0].count, 0);
+    assert.equal((await tx.query("select count(*)::int as count from public.pending_lead_stage_assignments where lead_id=$1", [lead])).rows[0].count, 0);
+    assert.equal((await tx.query("select next_owner_index from public.lead_assignment_automations where rule_key='cold'")).rows[0].next_owner_index, 0);
+    await assert.rejects(call(owner, enable, [lead, stage("Cold"), email]), /no longer available/);
+    await call(owner, "update public.leads set stage_id=$1 where id=$2", [stage("Junk"), lead]);
+    assert.equal((await tx.query("select assignee_id from public.leads where id=$1", [lead])).rows[0].assignee_id, sales);
+    await tx.query("select set_config('request.jwt.claims','{}',true)");
+    const sameStage = (await tx.query(`insert into public.leads(name,phone,email,stage_id,assignee_id,created_by)
+      values('Same stage fixture','7070707071','same-stage@example.test',$1,$2,$2) returning id`, [stage("Cold"), sales])).rows[0].id;
+    assert.equal((await tx.query("select next_owner_index from public.lead_assignment_automations where rule_key='cold'")).rows[0].next_owner_index, 1);
+    await call(owner, enable, [sameStage, stage("Cold"), "same-stage@example.test"]);
+    assert.equal((await tx.query("select assignee_id from public.leads where id=$1", [sameStage])).rows[0].assignee_id, owner);
+    assert.equal((await tx.query("select next_owner_index from public.lead_assignment_automations where rule_key='cold'")).rows[0].next_owner_index, 1);
+    await tx.exec("rollback to savepoint enable_fixture");
+  });
+});
+
 test("latest-note column migration preserves saved layout order, defaults and other views without duplicate columns", async () => {
   const sql = readFileSync(join(__dirname, "..", "supabase", "migrations", "202611160005_latest_note_column.sql"), "utf8")
     .replace(/^begin;\s*/i, "").replace(/\s*commit;\s*$/i, "");

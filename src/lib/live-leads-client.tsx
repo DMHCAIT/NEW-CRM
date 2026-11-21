@@ -325,16 +325,20 @@ export function leadDraft(lead?: Lead & { customFields?: Record<string, string> 
 
 type DuplicateMatch = { match_field: "phone" | "email"; lead_id: string | null; lead_name: string | null; assignee: string; in_bucket: boolean };
 
-export function LeadForm({ initial, stages, profiles, canAssign, onSave, busy, submitLabel = "Save lead", fields = [], picklists = DEFAULT_LEAD_PICKLISTS, newLead = false }: {
+export function LeadForm({ initial, stages, profiles, canAssign, onSave, busy, submitLabel = "Save lead", fields = [], picklists = DEFAULT_LEAD_PICKLISTS, newLead = false, canEnable = false, onEnable }: {
   initial: LeadDraft; stages: StageRow[]; profiles: Profile[]; canAssign: boolean;
   onSave: (draft: LeadDraft) => Promise<void>; busy: boolean; submitLabel?: string;
   fields?: LeadConfiguration["fields"];
   picklists?: LeadConfiguration["picklists"];
   newLead?: boolean;
+  canEnable?: boolean;
+  onEnable?: (leadId: string, stageId: string, draft: LeadDraft) => Promise<void>;
 }) {
   const [draft, setDraft] = useState(initial);
   useEffect(() => { setDraft(initial); }, [initial]);
   const [duplicates, setDuplicates] = useState<DuplicateMatch[]>([]);
+  const [enableLead, setEnableLead] = useState<{ id: string; field: "phone" | "email" } | null>(null);
+  const [enableStage, setEnableStage] = useState("");
   const duplicateLookup = useDebouncedValue(JSON.stringify([draft.phone, draft.countryCode, draft.email]), 400, newLead);
   useEffect(() => {
     if (!newLead) return;
@@ -347,12 +351,29 @@ export function LeadForm({ initial, stages, profiles, canAssign, onSave, busy, s
     return () => { cancelled = true; };
   }, [duplicateLookup, newLead]);
   const renderDuplicates = (field: "phone" | "email") => {
+    if (duplicateLookup !== JSON.stringify([draft.phone, draft.countryCode, draft.email])) return null;
     const matches = duplicates.filter((match) => match.match_field === field);
     if (!matches.length) return null;
     return <div className="helper-banner lead-duplicate-hint" role="alert">{matches.map((match, index) => {
       const assignee = match.assignee?.trim() || "Unassigned";
+      const leadId = match.lead_id;
       return match.in_bucket && match.lead_id
         ? <p key={index}>Duplicate: this {field} already exists in your bucket{match.lead_name ? ` (${match.lead_name})` : ""} and is assigned to <strong>{assignee}</strong>. <Link href={`/leads/${match.lead_id}`} prefetch={false} className="text-link">View lead</Link></p>
+        : canEnable && onEnable && leadId && assignee.toLowerCase() === "dmhca sales"
+        ? <div key={index}>
+          <p>Duplicate: this {field} already exists and is assigned to <strong>{assignee}</strong>.{" "}
+            <button type="button" className="text-link" disabled={busy} onClick={() => { setEnableLead({ id: leadId, field }); setEnableStage(""); }}>Enable</button>
+          </p>
+          {enableLead?.id === leadId && enableLead.field === field && <div>
+            <label htmlFor={`enable-stage-${field}`}>Choose a stage for the existing lead</label>{" "}
+            <select id={`enable-stage-${field}`} value={enableStage} disabled={busy} onChange={event => setEnableStage(event.target.value)}>
+              <option value="">Choose stage</option>
+              {stages.filter(stage => stage.is_active).map(stage => <option key={stage.id} value={stage.id}>{stage.name}</option>)}
+            </select>{" "}
+            <button type="button" className="button button-primary" disabled={busy || !enableStage} onClick={() => void onEnable(leadId, enableStage, draft)}>{busy ? "Enabling..." : "Confirm enable"}</button>{" "}
+            <button type="button" className="button button-secondary" disabled={busy} onClick={() => setEnableLead(null)}>Cancel</button>
+          </div>}
+        </div>
         : <p key={index}>Duplicate: this {field} already exists and is assigned to <strong>{assignee}</strong>.</p>;
     })}</div>;
   };
@@ -368,15 +389,15 @@ export function LeadForm({ initial, stages, profiles, canAssign, onSave, busy, s
   };
   const renderTextField = (field: "name" | "email" | "phone" | "altPhone") => {
     const required = newLead && createRequired.includes(field as typeof createRequired[number]);
-    return <label className="form-field" key={field}><span>{labels[field]}{required && <span className="live-lead-required" aria-hidden="true"> *</span>}</span>
-      <input required={required || field === "name" || field === "phone"} type={field === "email" ? "email" : field.toLowerCase().includes("phone") ? "tel" : "text"} value={draft[field]} maxLength={field === "email" ? 254 : field.toLowerCase().includes("phone") ? 30 : 200} onChange={(e) => setDraft({ ...draft, [field]: e.target.value })} />
+    return <div className="form-field" key={field}><label htmlFor={`lead-${field}`}>{labels[field]}{required && <span className="live-lead-required" aria-hidden="true"> *</span>}</label>
+      <input id={`lead-${field}`} required={required || field === "name" || field === "phone"} type={field === "email" ? "email" : field.toLowerCase().includes("phone") ? "tel" : "text"} value={draft[field]} maxLength={field === "email" ? 254 : field.toLowerCase().includes("phone") ? 30 : 200} onChange={(e) => { setEnableLead(null); setDraft({ ...draft, [field]: e.target.value }); }} />
             {(field === "phone" || field === "email") && renderDuplicates(field)}
-          </label>;
+          </div>;
   };
   const renderPicklist = (field: LeadPicklistKey, required = false) => {
     const options = legacyChoice(field, draft[field]).map((value) => ({ value, label: value }));
     return <div className="form-field" key={field}><label htmlFor={`lead-${field}`}>{labels[field]}{required && <span className="live-lead-required" aria-hidden="true"> *</span>}</label>
-      <SearchableDropdown id={`lead-${field}`} ariaLabel={labels[field]} placeholder={`Choose ${labels[field].toLocaleLowerCase()}`} value={draft[field]} options={options} required={required} openDirection="down" optionsMaxHeight={136} onChange={(value) => setDraft({ ...draft, [field]: value })} />
+      <SearchableDropdown id={`lead-${field}`} ariaLabel={labels[field]} placeholder={`Choose ${labels[field].toLocaleLowerCase()}`} value={draft[field]} options={options} required={required} openDirection="down" optionsMaxHeight={136} onChange={(value) => { if (field === "countryCode") setEnableLead(null); setDraft({ ...draft, [field]: value }); }} />
     </div>;
   };
   const stageOptions = stages.map((stage) => ({ value: stage.id, label: stage.name }));

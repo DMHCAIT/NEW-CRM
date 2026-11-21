@@ -40,6 +40,24 @@ export default function NewLeadPage() {
     }
   }
 
+  async function enableLead(leadId: string, stageId: string, draft: LeadDraft) {
+    if (saving.current) return;
+    saving.current = true;
+    setBusy(true);
+    setError("");
+    try {
+      const enabled = await apiRequest<{ id: string }>("/api/leads/enable", {
+        body: { leadId, stageId, phone: draft.phone, countryCode: draft.countryCode, email: draft.email },
+      });
+      router.push(`/leads/${enabled.id}`);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Could not enable the lead. Please try again.");
+    } finally {
+      saving.current = false;
+      setBusy(false);
+    }
+  }
+
   if (!data) return <section className="panel live-panel"><h1>New lead</h1><p role={error ? "alert" : "status"}>{error || (loading ? "Loading lead configuration..." : "Lead configuration is unavailable.")}</p><Link href="/leads" className="button button-secondary">Back to leads</Link></section>;
   if (!data.user.permissions.includes("leads.create")) return <section className="panel live-panel"><h1>New lead</h1><p role="alert">You do not have permission to create leads.</p><Link href="/leads" className="button button-secondary">Back to leads</Link></section>;
 
@@ -50,7 +68,7 @@ export default function NewLeadPage() {
     </header>
     {error && <p className="helper-banner" role="alert">{error}</p>}
     <section className="panel live-panel" aria-label="New lead form">
-      <LeadForm initial={initial} stages={data.stages} profiles={data.profiles} fields={data.configuration.fields} picklists={data.configuration.picklists} canAssign={data.user.permissions.includes("leads.assign")} onSave={saveLead} busy={busy} submitLabel="Create lead" newLead />
+      <LeadForm initial={initial} stages={data.stages} profiles={data.profiles} fields={data.configuration.fields} picklists={data.configuration.picklists} canAssign={data.user.permissions.includes("leads.assign")} canEnable={data.user.profile.role === "team_lead" && data.user.permissions.includes("leads.view") && data.user.permissions.includes("leads.edit") && data.user.permissions.includes("leads.assign")} onEnable={enableLead} onSave={saveLead} busy={busy} submitLabel="Create lead" newLead />
     </section>
   </div>;
 }

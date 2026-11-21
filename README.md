@@ -130,6 +130,18 @@ every lead's phone on each overview request. Apply
 `202611170005_index_lead_duplicate_owners.sql` for this query optimization;
 lead visibility and cross-owner merge permissions are unchanged.
 
+### Enable a DMHCA Sales lead
+
+After applying `202611210001_enable_sales_leads.sql`, a team lead with lead
+creation, viewing, editing and assignment permissions can enable an active
+duplicate assigned to the **DMHCA Sales** user outside their bucket from the
+New lead form. Select a stage and confirm to move the existing lead to the
+signed-in team lead; no duplicate is created. The selected stage's assignment
+automation is skipped for this transfer only, even for Cold, Junk or Not
+Interested. Later stage changes and all other automations work as before.
+Matching uses the configured duplicate fields and verifies the owner and contact
+again at confirmation. Archived and merged leads cannot be enabled.
+
 ### Lead spreadsheet imports
 
 Apply migrations through `202611110006_lead_import_history.sql`. CSV and XLSX uploads
