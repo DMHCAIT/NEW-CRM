@@ -31,7 +31,7 @@ export async function deliverScheduledInvoices(admin: SupabaseClient, invoiceIds
 export function invoiceDeliveryMessage(results: Awaited<ReturnType<typeof deliverScheduledInvoices>>) {
   const sent = results.filter(result => result.sent).length;
   const failures = results.filter(result => !result.sent);
-  return `${sent} invoice email(s) accepted by SMTP for the lead, with the lead owner, creator and sales@dmhca.in copied.`
+  return `${sent} invoice email(s) accepted by SMTP for the lead, with the lead owner, creator and sales@dmhca.in copied; the reportee and accounts@dmhca.in are BCC'd.`
     + (failures.length ? ` ${failures.length} delivery attempt(s) failed: ${failures.map(result => result.error).join("; ")}` : "")
     + " Future-dated invoices remain scheduled; pending discounts require approval. Already sent or payment-locked invoices are not resent.";
 }

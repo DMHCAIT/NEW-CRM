@@ -102,16 +102,19 @@ function deliveryFixture(currency="INR",paymentType="one_shot"){
     payment_expires_at:new Date(Date.now()+4*86400000).toISOString()};
   const calls=[],updates=[],emails=[];
   const family=[invoice];
-  let smtpFailure=false,saveFailure=false,pdfFailure=false,ownerEmail="owner@example.com",ownerError=null,stripeConfigured=true;
+  let smtpFailure=false,saveFailure=false,pdfFailure=false,ownerEmail="owner@example.com",ownerError=null,stripeConfigured=true,reporteeEmail=null,profileLookupId=null;
   const admin={from:table=>{
     assert.ok(["invoices","leads","profiles"].includes(table));
     let update;
     const query={
-      update:values=>{update=values;return query;},eq:()=>query,is:()=>query,select:()=>query,
+      update:values=>{update=values;return query;},eq:(key,value)=>{if(table==="profiles"&&key==="id")profileLookupId=value;return query;},is:()=>query,select:()=>query,
       or:()=>query,order:()=>query,range:async(start,end)=>({data:family.slice(start,end+1),error:null}),
       maybeSingle:async()=>{
         if(table==="leads")return {data:{id:"lead",name:"Lead",email:"live@example.com",assignee_id:"current-owner"},error:null};
-        if(table==="profiles")return {data:{email:ownerEmail},error:ownerError};
+        if(table==="profiles"){
+          if(profileLookupId==="reportee-id")return {data:{email:reporteeEmail},error:null};
+          return {data:{email:ownerEmail,reporting_to:reporteeEmail?"reportee-id":null},error:ownerError};
+        }
         if(update){
           updates.push(update);
           if(saveFailure&&(update.stripe_session_id||update.razorpay_payment_link_id))return {data:null,error:new Error("Persistence unavailable")};
@@ -152,13 +155,14 @@ function deliveryFixture(currency="INR",paymentType="one_shot"){
   return {invoice,admin,calls,updates,emails,helpers,family,
     send:()=>helpers.deliverInvoice(admin,invoice,{id:"lead",name:"Live Name",email:"live@example.com"},"creator@example.com"),
     failSmtp:()=>{smtpFailure=true;},failPersistence:()=>{saveFailure=true;},
-    failPdf:()=>{pdfFailure=true;},setOwnerEmail:value=>{ownerEmail=value;},failOwner:()=>{ownerError=new Error("Owner lookup failed");},
+    failPdf:()=>{pdfFailure=true;},setOwnerEmail:value=>{ownerEmail=value;},setReporteeEmail:value=>{reporteeEmail=value;},failOwner:()=>{ownerError=new Error("Owner lookup failed");},
     disableStripe:()=>{stripeConfigured=false;},
   };
 }
 test("invoice delivery routes INR and USD to Razorpay and copies creator plus assigned owner",async()=>{
   for(const currency of ["INR","USD"]){
     const f=deliveryFixture(currency);
+    f.setReporteeEmail("manager@example.com");
     await f.send();
     assert.equal(f.calls[0].provider,"razorpay");
     assert.equal(f.calls[0].input.currency,currency);
@@ -170,6 +174,7 @@ test("invoice delivery routes INR and USD to Razorpay and copies creator plus as
     assert.equal(f.emails[0].attachments[0].contentType,"application/pdf");
     assert.equal(f.emails[0].to,"saved@example.com");
     assert.equal(f.emails[0].cc,"creator@example.com, owner@example.com, sales@dmhca.in");
+    assert.equal(f.emails[0].bcc,"manager@example.com, accounts@dmhca.in");
     assert.ok(f.emails[0].html.includes('href="https://rzp.io/i/test"'));
     assert.doesNotMatch(f.emails[0].html,/View complete invoice|Pay Now · View invoice/);
     assert.doesNotMatch(f.emails[0].html,/View invoice payment status/);

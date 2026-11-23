@@ -9,6 +9,7 @@ export type MailAttachment = { filename: string; content: Buffer | Uint8Array; c
 export async function sendMail(options: {
   to: string;
   cc?: string;
+  bcc?: string;
   subject: string;
   html: string;
   text?: string;
@@ -24,6 +25,7 @@ export async function sendMail(options: {
     from: options.fromName ? { name: options.fromName, address: extractAddress(from) } : from,
     to: options.to,
     cc: options.cc,
+    bcc: options.bcc,
     replyTo: options.replyTo,
     subject: options.subject,
     html: options.html,

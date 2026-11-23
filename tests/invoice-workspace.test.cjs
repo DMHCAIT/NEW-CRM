@@ -387,6 +387,23 @@ test("verified link recording supports scheduled installments and expired full-p
   }
 });
 
+test("super admin and accounts may accept an unrelated payment URL as manual evidence", async () => {
+  for (const role of ["super_admin", "accounts"]) {
+    const invoice = { id: leadId, lead_id: leadId, status: "sent", payment_type: "one_shot", created_by: "someone-else" };
+    const { detail, calls } = fixture({ role, singleInvoice: invoice, assigneeId: "someone-else", rpcData: true });
+    const result = await detail.PATCH(new Request(`https://crm.example/api/invoices/${leadId}`, {
+      method: "PATCH", body: JSON.stringify({ action: "verify_payment_url", url: "https://example.com/unrelated-payment" }),
+    }), { params: Promise.resolve({ id: leadId }) });
+    assert.equal(result.status, 200);
+    assert.match(result.data.message, /invoice is paid/);
+    assert.equal(calls.some(call => call[0] === "verify"), false);
+    const external = calls.find(call => call[0] === "rpc" && call[1] === "operational_confirm_external_payment");
+    assert.ok(external);
+    assert.equal(external[2].p_invoice_id, leadId);
+    assert.equal(external[2].p_evidence, "https://example.com/unrelated-payment");
+  }
+});
+
 test("unrelated users and unapproved enrollments cannot reach payment providers or recording RPCs", async () => {
   const invoice = { id: leadId, lead_id: leadId, status: "scheduled", payment_type: "installments", created_by: "someone-else" };
   for (const options of [

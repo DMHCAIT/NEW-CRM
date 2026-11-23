@@ -93,6 +93,7 @@ export async function GET(request: Request) {
         || invoice.lead?.assignee_id === user.id || ["admin", "super_admin", "accounts"].includes(user.profile.role)),
       status: ["sent", "pending_approval"].includes(invoice.status) && invoiceWindowExpired(invoice) ? "expired" : invoice.status,
     })), courseBalances, installmentParents, leads, profiles: profiles ?? [], userId: user.id,
+      role: user.profile.role,
       restrictedInvoiceLeads: user.profile.role === "accounts",
       canCreate: user.permissions.includes("invoices.create"), canApprove: ["admin", "super_admin", "accounts"].includes(user.profile.role) && user.permissions.includes("invoices.approve"),
       canApproveDiscount: ["super_admin", "accounts"].includes(user.profile.role) && user.permissions.includes("invoices.approve"),
@@ -143,7 +144,7 @@ export async function POST(request: Request) {
     const message = invoice.status === "pending_approval"
       ? "Discount request submitted for Accounts or Super Admin approval."
       : delivery.sent
-        ? "Invoice saved in CRM; email accepted by SMTP for the lead, with the current lead owner, creator and sales@dmhca.in copied."
+        ? "Invoice saved in CRM; email accepted by SMTP for the lead, with the current lead owner, creator and sales@dmhca.in copied; the reportee and accounts@dmhca.in are BCC'd."
         : `Invoice issued, but automatic delivery failed: ${delivery.error ?? "check configuration and reconcile."}`;
     return NextResponse.json({ id: data, status: invoice.status, delivery, message, warning: delivery.error ? message : undefined }, { status: 201 });
   } catch (error) { return jsonError(error); }

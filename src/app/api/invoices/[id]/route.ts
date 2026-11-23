@@ -85,6 +85,20 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
       if (invoice.tax_review_required || enrollment.tax_review_required || ["pending_approval", "rejected"].includes(enrollment.status)
         || ((Number(enrollment.discount_percent) > 0 || enrollment.pricing_review_note) && !enrollment.approved_at))
         throw new HttpError(409, "Complete enrollment approval and tax review before recording payment.");
+      if (input.action === "verify_payment_url" && ["super_admin", "accounts"].includes(user.profile.role)) {
+        const { error: externalError } = await supabase.rpc("operational_confirm_external_payment", {
+          p_invoice_id: id, p_reference: `manual-url:${id}`, p_evidence: input.url,
+        });
+        if (externalError?.code === "P0001") throw new HttpError(409, externalError.message);
+        if (externalError?.code === "23505") throw new HttpError(409, "This external payment reference is already recorded against an invoice.");
+        databaseError(externalError);
+        try {
+          await sendPaymentReceipt(admin, id);
+          return NextResponse.json({ recorded: true, message: "Manual payment URL accepted by Super Admin or Accounts; invoice is paid and receipt accepted by SMTP." });
+        } catch (receiptError) {
+          return NextResponse.json({ recorded: true, message: `Manual payment URL accepted and invoice is paid, but receipt delivery failed: ${receiptError instanceof Error ? receiptError.message : "delivery error"}` });
+        }
+      }
       const payment = input.action === "verify_payment_url"
         ? await verifyInvoicePaymentUrl(invoice, input.url) : await verifySavedInvoicePayment(invoice);
       const { data: recorded, error: paymentError } = await admin.rpc("operational_record_verified_url", {
@@ -132,7 +146,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
       if (!issued || !lead) throw new HttpError(500, "Approved invoice could not be loaded for delivery.");
       try {
         const result = await deliverInvoice(admin, issued, lead, issued.creator_email);
-        return NextResponse.json({ message: "Invoice approved and saved in CRM; email accepted by SMTP for the lead, with the current lead owner, creator and sales@dmhca.in copied.", messageId: result.messageId });
+        return NextResponse.json({ message: "Invoice approved and saved in CRM; email accepted by SMTP for the lead, with the current lead owner, creator and sales@dmhca.in copied; the reportee and accounts@dmhca.in are BCC'd.", messageId: result.messageId });
       } catch (deliveryError) {
         const message = `Invoice approved, but automatic delivery failed: ${deliveryError instanceof Error ? deliveryError.message : "Delivery failed."}`;
         return NextResponse.json({ message, warning: message });

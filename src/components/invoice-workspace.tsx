@@ -39,6 +39,7 @@ type Data = {
   leads: LeadOption[];
   profiles: { id: string; full_name: string }[];
   userId: string;
+  role: "counselor" | "team_lead" | "manager" | "accounts" | "admin" | "super_admin";
   canCreate: boolean;
   canApprove: boolean;
   canApproveDiscount: boolean;
@@ -262,7 +263,9 @@ export function InvoiceWorkspace({ leadId, timelineOnly = false }: { leadId?: st
         {canRecordPayment(selected) && ["one_shot", "installments"].includes(selected.payment_type) && <form key={`${selected.id}-link`} className="operational-form" onSubmit={async event => { event.preventDefault(); const values = formValues(event.currentTarget); await state.mutate(`/api/invoices/${selected.id}`, "PATCH", { action: "verify_payment_url", url: values.url }); }}>
           <label>Payment link<input className="form-input" name="url" type="url" required maxLength={2000} placeholder="Paste the company Razorpay payment URL" /></label>
           <button className="button button-primary" disabled={state.busy}>Verify link &amp; mark paid</button>
-          <p className="zf-hint">The provider must confirm a captured payment matching the customer, amount and currency. An unpaid, unrelated or already-used payment cannot mark this invoice Paid.</p>
+          <p className="zf-hint">{data?.role && ["super_admin", "accounts"].includes(data.role)
+            ? "Super Admin and Accounts may enter any payment URL as manual evidence; this action marks the invoice Paid."
+            : "The provider must confirm a captured payment matching the customer, amount and currency. An unpaid, unrelated or already-used payment cannot mark this invoice Paid."}</p>
         </form>}
         {data?.canApprove && <details><summary>Finance: confirm bank / UPI payment</summary><form key={`${selected.id}-finance`} className="operational-form" onSubmit={async event => { event.preventDefault(); if (!confirm("Confirm that finance verified receipt of the full amount for this invoice?")) return; const values = formValues(event.currentTarget); await state.mutate(`/api/invoices/${selected.id}`, "PATCH", { action: "external_payment", reference: values.reference, evidence: values.evidence }); }}>
           <label>Payment reference<input className="form-input" name="reference" required maxLength={200} /></label><label>Receipt link or verification evidence<textarea className="form-input" name="evidence" required maxLength={2000} /></label>
