@@ -1118,6 +1118,44 @@ test("tracked imports save sheet counts and provenance atomically and replay bat
   await assert.rejects(send(rows), /not found/);
 });
 
+test("individually deleted leads can be reimported without changing their history", async () => {
+  const originalRows = [
+    { name: "Tracked deleted", phone: "7834567001", country_code: "India (+91)", email: "individually-deleted-tracked@example.test", assignee_id: owner, note: "Original note" },
+    { name: "Untracked deleted", phone: "7834567002", email: "individually-deleted-untracked@example.test", assignee_id: owner },
+    { name: "Still active", phone: "7834567003", email: "individually-active@example.test", assignee_id: owner },
+  ];
+  const sheet = (await asUser(owner, tx => tx.query(
+    "select public.start_live_lead_import('individual-deletion.csv',1,0) as sheet"))).rows[0].sheet;
+  await asUser(owner, tx => tx.query("select public.import_live_lead_sheet_batch($1,0,$2::jsonb)", [sheet.id, JSON.stringify([originalRows[0]])]));
+  for (const row of originalRows.slice(1)) await db.query(
+    "insert into public.leads(name,phone,normalized_phone,email,normalized_email,created_by,assignee_id) values($1,$2,$2,$3,$3,$4,$4)",
+    [row.name, row.phone, row.email, owner]);
+  const ids = (await db.query("select id,email from public.leads where email = any($1)", [originalRows.map(row => row.email)])).rows;
+  const deletedIds = ids.filter(row => row.email !== originalRows[2].email).map(row => row.id);
+  for (const id of deletedIds) await asUser(admin, tx => tx.query(
+    "update public.leads set is_archived=true,modified_by=$1 where id=$2 and not is_archived", [admin, id]));
+
+  const rows = [
+    { ...originalRows[0], country_code: "", email: "individual-local-match@example.test", note: "New note" },
+    { ...originalRows[1], phone: "7834567012" },
+    { ...originalRows[2], phone: "7834567013" },
+    { ...originalRows[1], phone: "7834567014" },
+  ];
+  const duplicates = async () => (await asUser(owner, tx => tx.query(
+    "select public.find_live_lead_import_duplicates($1::jsonb) as result", [JSON.stringify(rows)]))).rows[0].result;
+  assert.deepEqual(await duplicates(), [2, 3]);
+  const retrySheet = (await asUser(owner, tx => tx.query(
+    "select public.start_live_lead_import('individual-reimport.csv',4,0) as sheet"))).rows[0].sheet;
+  const result = await asUser(owner, tx => tx.query(
+    "select public.import_live_lead_sheet_batch($1,0,$2::jsonb) as result", [retrySheet.id, JSON.stringify(rows)]));
+  assert.deepEqual(result.rows[0].result, { imported: 2, skipped: 2 });
+  assert.deepEqual(await duplicates(), [0, 1, 2, 3]);
+  const originals = (await db.query("select is_archived from public.leads where id=any($1::uuid[])", [deletedIds])).rows;
+  assert.equal(originals.length, 2);
+  assert.ok(originals.every(row => row.is_archived));
+  assert.equal((await db.query("select content from public.notes where lead_id=$1", [ids.find(row => row.email === originalRows[0].email).id])).rows[0].content, "Original note");
+});
+
 for (const deletionMode of ["single", "batched"]) test(`reimporting a ${deletionMode}-deleted sheet ignores its archived leads but retains other duplicate checks`, async () => {
   const suffix = deletionMode === "single" ? "1" : "2";
   const originalRows = [0, 1].map(index => ({
@@ -1159,15 +1197,15 @@ for (const deletionMode of ["single", "batched"]) test(`reimporting a ${deletion
     originalRows[0],
     ...otherRows.map(({ archived, ...row }) => row),
   ];
-  assert.deepEqual(await duplicates(retryRows), [2, 3, 4], "in-file, active and unrelated archived matches must still be skipped");
+  assert.deepEqual(await duplicates(retryRows), [2, 3], "in-file and active matches must still be skipped");
   const retrySheet = (await asUser(owner, tx => tx.query(
     "select public.start_live_lead_import($1,5,0) as sheet", [`reimport-${deletionMode}.csv`]))).rows[0].sheet;
-  assert.deepEqual((await send(retrySheet.id, retryRows)).rows[0].result, { imported: 2, skipped: 3 });
-  assert.deepEqual((await send(retrySheet.id, retryRows)).rows[0].result, { imported: 2, skipped: 3 });
+  assert.deepEqual((await send(retrySheet.id, retryRows)).rows[0].result, { imported: 3, skipped: 2 });
+  assert.deepEqual((await send(retrySheet.id, retryRows)).rows[0].result, { imported: 3, skipped: 2 });
   assert.deepEqual(await duplicates(originalRows), [0, 1], "the new import must block subsequent duplicates");
   const saved = (await db.query(
     "select imported_rows,duplicate_rows,status from public.lead_import_sheets where id=$1", [retrySheet.id])).rows[0];
-  assert.deepEqual(saved, { imported_rows: 2, duplicate_rows: 3, status: "completed" });
+  assert.deepEqual(saved, { imported_rows: 3, duplicate_rows: 2, status: "completed" });
   const originals = (await db.query(
     "select l.is_archived,n.content from public.leads l join public.notes n on n.lead_id=l.id where l.import_sheet_id=$1 order by n.content", [sheet.id])).rows;
   assert.deepEqual(originals, [

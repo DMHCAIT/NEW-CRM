@@ -180,12 +180,12 @@ Administrators with lead import/delete permissions can delete an accessible shee
 after confirmation. This archives only leads actually created by that sheet,
 including reassigned leads still within the administrator's scope; duplicates and
 unrelated leads remain unchanged. This follows normal CRM deletion semantics and
-preserves audit history. Apply `202611170003_reimport_deleted_lead_sheets.sql` to
-allow re-uploading a deleted sheet: both the duplicate precheck and final import
-ignore archived leads belonging to fully deleted sheets. Active leads, unrelated
-archived leads, in-file duplicates, and sheets whose deletion is still in progress
-retain their existing duplicate protection. Re-imports create new leads; they do
-not restore or modify the archived originals.
+preserves audit history. Apply `202611250001_reimport_individually_deleted_leads.sql`
+to allow re-importing individually deleted leads as well as deleted sheets. Both
+the duplicate precheck and final import ignore archived leads, except those on a
+sheet whose deletion is still in progress. Active leads and in-file duplicates
+retain their duplicate protection. Re-imports create new leads; they do not
+restore or modify the archived originals.
 Other users see only their own imports; users with the
 existing user-view permission can view imports across users.
 
